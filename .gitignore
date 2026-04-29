@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+
+# Local SQLite databases (large; not tracked)
+bulk-local.db
+bulk-local.db-*
+test-local.db
+*.db.bak*
+*.sqlite
+*.sqlite-*
+
+# Wrangler state
+.wrangler/
+.dev.vars
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# Editor
+.vscode/
+.idea/
+.DS_Store
+
+# Env
+.env
+.env.local
+
+# Logs
+*.log

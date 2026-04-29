@@ -1,0 +1,21 @@
+name = "tianxi-backend"
+main = "src/index.ts"
+compatibility_date = "2025-04-14"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+ENVIRONMENT = "production"
+AI_API_URL = "https://api.x.ai/v1/chat/completions"
+AI_MODEL = "grok-4.20-reasoning"
+# TIMESFM_API_URL set later when RunPod endpoint ready
+
+# Cloudflare D1 Database
+[[d1_databases]]
+binding = "DB"
+database_name = "tianxi-db"
+database_id = "aad1636e-869a-43f5-aa95-4a19e3aa5517"
+
+# KV for caching odds and sessions
+# [[kv_namespaces]]
+# binding = "CACHE"
+# id = "placeholder"

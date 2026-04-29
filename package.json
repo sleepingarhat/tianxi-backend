@@ -1,0 +1,24 @@
+{
+  "name": "tianxi-backend",
+  "version": "1.0.0",
+  "description": "天喜娛樂 Tianxi Entertainment - 賽馬AI分析平台後端",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:migrate": "wrangler d1 execute tianxi-db --local --file=./src/db/schema.sql && wrangler d1 execute tianxi-db --local --file=./src/db/schema_v2.sql",
+    "db:migrate:remote": "wrangler d1 execute tianxi-db --remote --file=./src/db/schema.sql && wrangler d1 execute tianxi-db --remote --file=./src/db/schema_v2.sql",
+    "db:seed": "tsx scripts/import-csv.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "hono": "^4.7.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260416.2",
+    "@types/better-sqlite3": "^7.6.13",
+    "better-sqlite3": "^11.10.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "wrangler": "^4.83.0"
+  }
+}
