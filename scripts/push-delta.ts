@@ -111,8 +111,11 @@ function main() {
         });
         return `(${vals.join(',')})`;
       }).join(',');
-      // NOTE: no BEGIN/COMMIT wrapper — Cloudflare D1 rejects explicit SQL transactions
-      const sql = `INSERT OR REPLACE INTO ${table} (${cols.join(',')}) VALUES\n${valuesSql};\n`;
+      // NOTE: no BEGIN/COMMIT wrapper — Cloudflare D1 rejects explicit SQL transactions.
+      // `defer_foreign_keys` delays FK validation until the implicit transaction
+      // commits, letting bulk deltas land even when parent rows (e.g. trainers,
+      // jockeys, race_meetings) arrive in a later chunk within the same push.
+      const sql = `PRAGMA defer_foreign_keys = on;\nINSERT OR REPLACE INTO ${table} (${cols.join(',')}) VALUES\n${valuesSql};\n`;
       const fn = join(outDir, `${table}-${String(chunkIdx).padStart(4, '0')}.sql`);
       writeFileSync(fn, sql);
       manifest.push(fn);
