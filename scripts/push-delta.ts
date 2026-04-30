@@ -114,31 +114,42 @@ function main() {
     const updateSetClause = nonPkCols.length
       ? nonPkCols.map((c) => `${c}=excluded.${c}`).join(', ')
       : '';
+    // D1 multi-row VALUES + ON CONFLICT DO UPDATE triggers D1_RESET_DO on some
+    // tables (observed on `horses`, where the SET clause over 22 columns crashes
+    // the Durable Object). Emit one INSERT statement per row when UPSERT is in
+    // play. For INSERT-only tables we can still batch.
+    const oneStatementPerRow = pkCols.length > 0 && updateSetClause !== '';
+    const rowsPerStatement = oneStatementPerRow ? 1 : ROWS_PER_CHUNK;
+    const statementsPerChunk = oneStatementPerRow ? ROWS_PER_CHUNK : 1;
+
     let chunkIdx = 0;
-    for (let i = 0; i < rows.length; i += ROWS_PER_CHUNK) {
-      const batch = rows.slice(i, i + ROWS_PER_CHUNK);
-      const valuesSql = batch.map(r => {
-        const vals = cols.map(c => {
-          const v = r[c];
-          if (prefixMap[c] && v !== null && v !== undefined) {
-            return esc(`${prefixMap[c]}${v}`);
-          }
-          return esc(v);
-        });
-        return `(${vals.join(',')})`;
-      }).join(',');
-      let sql: string;
-      if (pkCols.length && updateSetClause) {
-        sql = `INSERT INTO ${table} (${cols.join(',')}) VALUES\n${valuesSql}\nON CONFLICT(${pkCols.join(',')}) DO UPDATE SET ${updateSetClause};\n`;
-      } else if (pkCols.length) {
-        // Only PK columns exist (e.g. link tables) — ignore duplicates.
-        sql = `INSERT INTO ${table} (${cols.join(',')}) VALUES\n${valuesSql}\nON CONFLICT(${pkCols.join(',')}) DO NOTHING;\n`;
-      } else {
-        // No declared PK — fall back to OR REPLACE (safe only for tables with no inbound FK).
-        sql = `INSERT OR REPLACE INTO ${table} (${cols.join(',')}) VALUES\n${valuesSql};\n`;
+    for (let i = 0; i < rows.length; i += rowsPerStatement * statementsPerChunk) {
+      const chunkRows = rows.slice(i, i + rowsPerStatement * statementsPerChunk);
+      const stmts: string[] = [];
+      for (let j = 0; j < chunkRows.length; j += rowsPerStatement) {
+        const batch = chunkRows.slice(j, j + rowsPerStatement);
+        const valuesSql = batch.map(r => {
+          const vals = cols.map(c => {
+            const v = r[c];
+            if (prefixMap[c] && v !== null && v !== undefined) {
+              return esc(`${prefixMap[c]}${v}`);
+            }
+            return esc(v);
+          });
+          return `(${vals.join(',')})`;
+        }).join(',');
+        let sql: string;
+        if (pkCols.length && updateSetClause) {
+          sql = `INSERT INTO ${table} (${cols.join(',')}) VALUES ${valuesSql} ON CONFLICT(${pkCols.join(',')}) DO UPDATE SET ${updateSetClause};`;
+        } else if (pkCols.length) {
+          sql = `INSERT INTO ${table} (${cols.join(',')}) VALUES\n${valuesSql}\nON CONFLICT(${pkCols.join(',')}) DO NOTHING;`;
+        } else {
+          sql = `INSERT OR REPLACE INTO ${table} (${cols.join(',')}) VALUES\n${valuesSql};`;
+        }
+        stmts.push(sql);
       }
       const fn = join(outDir, `${table}-${String(chunkIdx).padStart(4, '0')}.sql`);
-      writeFileSync(fn, sql);
+      writeFileSync(fn, stmts.join('\n') + '\n');
       manifest.push(fn);
       chunkIdx++;
     }
