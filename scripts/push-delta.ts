@@ -34,11 +34,12 @@ function main() {
   const db = new Database(dbPath, { readonly: true });
   const manifest: string[] = [];
 
-  // --include selector: 'race' (default, fast post-race-day sync) or 'pool-a' (trackwork/injury/form)
-  // or 'all' for everything.
+  // --include selector: 'race' (default, fast post-race-day sync), 'pool-a' (trackwork/injury/form),
+  // 'elo' (ELO snapshots only, for post-compute sync), or 'all' for everything.
   const include = (arg('include', 'race') || 'race').toLowerCase();
   const wantRace  = include === 'race'  || include === 'all';
   const wantPoolA = include === 'pool-a' || include === 'all';
+  const wantElo   = include === 'elo'   || include === 'all';
 
   // Table definitions with date-scoping filters
   // ORDER MATTERS: FK parents first (horses/jockeys/trainers) → meetings → races → dependents
@@ -53,6 +54,10 @@ function main() {
     horseRefs.push(`SELECT DISTINCT horse_id FROM horse_injury WHERE injury_date >= '${since}'`);
     horseRefs.push(`SELECT DISTINCT horse_id FROM horse_form_records WHERE race_date >= '${since}'`);
   }
+  if (wantElo) {
+    // ELO snapshots store bare codes (K059). Prefix to 'horse_K059' to match horses.id.
+    horseRefs.push(`SELECT DISTINCT ('horse_' || horse_id) FROM horse_elo_snapshots WHERE as_of_date >= '${since}'`);
+  }
   const horseRefUnion = horseRefs.length ? horseRefs.join(' UNION ') : `SELECT NULL WHERE 0`;
 
   const plan: Array<{ table: string; where: string }> = [];
@@ -62,6 +67,17 @@ function main() {
   if (wantRace) {
     plan.push({ table: 'jockeys',  where: `id IN (SELECT DISTINCT jockey_id FROM race_results WHERE race_id IN (${recentRaceIds}))` });
     plan.push({ table: 'trainers', where: `id IN (SELECT DISTINCT trainer_id FROM race_results WHERE race_id IN (${recentRaceIds}))` });
+  }
+  if (wantElo && !wantRace) {
+    // ELO-only path still needs jockey/trainer FK parents for snapshot FKs.
+    plan.push({ table: 'jockeys',  where: `id IN (SELECT DISTINCT ('jockey_'  || jockey_id)  FROM jockey_elo_snapshots  WHERE as_of_date >= '${since}')` });
+    plan.push({ table: 'trainers', where: `id IN (SELECT DISTINCT ('trainer_' || trainer_id) FROM trainer_elo_snapshots WHERE as_of_date >= '${since}')` });
+  }
+  if (wantElo && !wantRace) {
+    // Snapshot-only push (post ELO compute). Skip race_meetings/races/race_results.
+    plan.push({ table: 'horse_elo_snapshots',   where: `as_of_date >= '${since}' AND ('horse_'   || horse_id)   IN (SELECT id FROM horses)` });
+    plan.push({ table: 'jockey_elo_snapshots',  where: `as_of_date >= '${since}' AND ('jockey_'  || jockey_id)  IN (SELECT id FROM jockeys)` });
+    plan.push({ table: 'trainer_elo_snapshots', where: `as_of_date >= '${since}' AND ('trainer_' || trainer_id) IN (SELECT id FROM trainers)` });
   }
 
   if (wantRace) {
