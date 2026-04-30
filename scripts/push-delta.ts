@@ -85,6 +85,11 @@ function main() {
     horse_elo_snapshots: { horse_id: 'horse_' },
     jockey_elo_snapshots: { jockey_id: 'jockey_' },
     trainer_elo_snapshots: { trainer_id: 'trainer_' },
+    // Pool A ingest stores bare codes (K059) in horse_id; D1 horses.id uses
+    // the prefixed form (horse_K059). Map on push so FK resolves.
+    horse_trackwork: { horse_id: 'horse_' },
+    horse_injury: { horse_id: 'horse_' },
+    horse_form_records: { horse_id: 'horse_' },
   };
 
   for (const { table, where } of plan) {
