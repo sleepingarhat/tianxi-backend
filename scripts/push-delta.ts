@@ -111,7 +111,17 @@ function main() {
 
     const prefixMap = COLUMN_PREFIX[table] || {};
     const nonPkCols = cols.filter((c) => !pkCols.includes(c));
-    const updateSetClause = nonPkCols.length
+    // Tables with secondary UNIQUE constraints (beyond PK) can fail UPSERT when
+    // the new row would violate the secondary constraint on a different PK.
+    // For FK-parent tables (horses/jockeys/trainers) where we mainly care that
+    // the row exists for child FK resolution, fall back to INSERT OR IGNORE:
+    // if a row with the same code already exists (even under a different id),
+    // skip silently — children reference by id which matches our local id.
+    const FK_PARENT_SKIP_UPDATE = new Set(['horses', 'jockeys', 'trainers']);
+    const skipUpdate = FK_PARENT_SKIP_UPDATE.has(table);
+    const updateSetClause = skipUpdate
+      ? ''
+      : nonPkCols.length
       ? nonPkCols.map((c) => `${c}=excluded.${c}`).join(', ')
       : '';
     // D1 multi-row VALUES + ON CONFLICT DO UPDATE triggers D1_RESET_DO on some
@@ -141,6 +151,10 @@ function main() {
         let sql: string;
         if (pkCols.length && updateSetClause) {
           sql = `INSERT INTO ${table} (${cols.join(',')}) VALUES ${valuesSql} ON CONFLICT(${pkCols.join(',')}) DO UPDATE SET ${updateSetClause};`;
+        } else if (skipUpdate) {
+          // INSERT OR IGNORE skips row on ANY uniqueness failure (PK or secondary UNIQUE)
+          // — correct for FK-parent tables where existence is all that matters.
+          sql = `INSERT OR IGNORE INTO ${table} (${cols.join(',')}) VALUES\n${valuesSql};`;
         } else if (pkCols.length) {
           sql = `INSERT INTO ${table} (${cols.join(',')}) VALUES\n${valuesSql}\nON CONFLICT(${pkCols.join(',')}) DO NOTHING;`;
         } else {
