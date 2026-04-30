@@ -63,21 +63,24 @@ function main() {
   const plan: Array<{ table: string; where: string }> = [];
 
   // FK parents — always pushed first in their own chunk
-  plan.push({ table: 'horses',   where: `id IN (${horseRefUnion})` });
+  // Skip for elo-only mode: horses exist in D1 already, and .elo-pipeline's
+  // bulk-local.db has bare-code horses.id which won't match prefixed refs.
+  if (wantRace || wantPoolA) {
+    plan.push({ table: 'horses',   where: `id IN (${horseRefUnion})` });
+  }
   if (wantRace) {
     plan.push({ table: 'jockeys',  where: `id IN (SELECT DISTINCT jockey_id FROM race_results WHERE race_id IN (${recentRaceIds}))` });
     plan.push({ table: 'trainers', where: `id IN (SELECT DISTINCT trainer_id FROM race_results WHERE race_id IN (${recentRaceIds}))` });
   }
   if (wantElo && !wantRace) {
-    // ELO-only path still needs jockey/trainer FK parents for snapshot FKs.
-    plan.push({ table: 'jockeys',  where: `id IN (SELECT DISTINCT ('jockey_'  || jockey_id)  FROM jockey_elo_snapshots  WHERE as_of_date >= '${since}')` });
-    plan.push({ table: 'trainers', where: `id IN (SELECT DISTINCT ('trainer_' || trainer_id) FROM trainer_elo_snapshots WHERE as_of_date >= '${since}')` });
-  }
-  if (wantElo && !wantRace) {
-    // Snapshot-only push (post ELO compute). Skip race_meetings/races/race_results.
-    plan.push({ table: 'horse_elo_snapshots',   where: `as_of_date >= '${since}' AND ('horse_'   || horse_id)   IN (SELECT id FROM horses)` });
-    plan.push({ table: 'jockey_elo_snapshots',  where: `as_of_date >= '${since}' AND ('jockey_'  || jockey_id)  IN (SELECT id FROM jockeys)` });
-    plan.push({ table: 'trainer_elo_snapshots', where: `as_of_date >= '${since}' AND ('trainer_' || trainer_id) IN (SELECT id FROM trainers)` });
+    // ELO-only path: skip horses/jockeys/trainers re-push (they already exist in D1).
+    // .elo-pipeline's bulk-local.db stores horses.id as bare code "K059" rather than
+    // prefixed "horse_K059" used by tianxi-backend ingest. The FK parent subquery
+    // `('horse_' || horse_id) IN (SELECT id FROM horses)` would always miss here,
+    // producing 0 rows. Trust D1 to have the horses/jockeys/trainers already.
+    plan.push({ table: 'horse_elo_snapshots',   where: `as_of_date >= '${since}'` });
+    plan.push({ table: 'jockey_elo_snapshots',  where: `as_of_date >= '${since}'` });
+    plan.push({ table: 'trainer_elo_snapshots', where: `as_of_date >= '${since}'` });
   }
 
   if (wantRace) {
