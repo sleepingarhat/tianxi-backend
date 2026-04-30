@@ -27,8 +27,14 @@ export function ensureSchema(db: DB, schemaPaths: string[]): void {
     // each statement independently and swallowing the two known idempotency errors.
     const statements = sql
       .split(/;\s*\n/)
-      .map((s) => s.trim())
-      .filter((s) => s.length > 0 && !s.startsWith('--'));
+      .map((s) =>
+        s
+          .split('\n')
+          .filter((ln) => !ln.trim().startsWith('--'))
+          .join('\n')
+          .trim(),
+      )
+      .filter((s) => s.length > 0);
     for (const stmt of statements) {
       try {
         db.exec(stmt + ';');

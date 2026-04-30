@@ -462,22 +462,37 @@ async function computeComposite(
   const raceGoing: string | null = raceCtx?.going ?? null;
   const raceVenue: string | null = raceCtx?.venue ?? null;
 
+  // Leakage fix (2026-04-30): use date-filtered subqueries instead of
+  // h.total_wins/h.total_starts (which are recomputed post-ingest to include
+  // the same-day race being predicted). wins_pre/starts_pre count results
+  // from meetings strictly before raceDate.
   const { results } = await db.prepare(`
     SELECT rr.horse_id, rr.jockey_id, rr.trainer_id, rr.horse_number, rr.draw, rr.win_odds,
            rr.actual_weight,
-           h.name_ch, h.name_en, h.total_wins, h.total_starts,
-           j.name_ch AS jockey_ch, t.name_ch AS trainer_ch,
-           (SELECT MAX(rm2.date) FROM race_results rr2
+           h.name_ch, h.name_en,
+           (SELECT COUNT(*) FROM race_results rr2
              JOIN races r2 ON r2.id = rr2.race_id
              JOIN race_meetings rm2 ON rm2.id = r2.meeting_id
-            WHERE rr2.horse_id = rr.horse_id AND rm2.date < ?) AS last_race_date
+            WHERE rr2.horse_id = rr.horse_id
+              AND rm2.date < ?
+              AND rr2.finishing_position = 1) AS wins_pre,
+           (SELECT COUNT(*) FROM race_results rr3
+             JOIN races r3 ON r3.id = rr3.race_id
+             JOIN race_meetings rm3 ON rm3.id = r3.meeting_id
+            WHERE rr3.horse_id = rr.horse_id
+              AND rm3.date < ?) AS starts_pre,
+           j.name_ch AS jockey_ch, t.name_ch AS trainer_ch,
+           (SELECT MAX(rm4.date) FROM race_results rr4
+             JOIN races r4 ON r4.id = rr4.race_id
+             JOIN race_meetings rm4 ON rm4.id = r4.meeting_id
+            WHERE rr4.horse_id = rr.horse_id AND rm4.date < ?) AS last_race_date
     FROM race_results rr
     JOIN horses h ON h.id = rr.horse_id
     LEFT JOIN jockeys j ON j.id = rr.jockey_id
     LEFT JOIN trainers t ON t.id = rr.trainer_id
     WHERE rr.race_id = ?
     ORDER BY rr.horse_number
-  `).bind(raceDate, raceId).all<any>();
+  `).bind(raceDate, raceDate, raceDate, raceId).all<any>();
 
   const enriched = await Promise.all((results ?? []).map(async (r: any) => {
     const hRead = await fetchAxisEloReading(db, 'horse', r.horse_id, raceDate, engine);
@@ -539,7 +554,8 @@ async function computeComposite(
                       + fWeight.bonus + fCond.bonus + fInjury.bonus + fJT.bonus;
 
     const base = eloComposite != null ? (eloComposite - 1500) / 200 : 0;
-    const winRate = r.total_starts > 0 ? r.total_wins / r.total_starts : 0;
+    // winRate computed from pre-race wins/starts only (no same-day leakage).
+    const winRate = r.starts_pre > 0 ? r.wins_pre / r.starts_pre : 0;
     const score = base + winRate * 1.2 + factorBonus / 100;
     const finalScore = eloComposite != null ? eloComposite + factorBonus : null;
 
@@ -626,10 +642,10 @@ analyzeRoutes.get('/top-picks', async (c) => {
   try {
     picks = await computeComposite(c.env.DB, raceId, race.date, engine);
   } catch (err: any) {
-    // Legacy fallback
+    // Legacy fallback (no ELO / factor engine available)
     const { results } = await c.env.DB.prepare(`
       SELECT rr.horse_id, rr.horse_number, rr.draw, rr.win_odds,
-             h.name_ch, h.name_en, h.total_wins, h.total_starts
+             h.name_ch, h.name_en
       FROM race_results rr JOIN horses h ON h.id = rr.horse_id
       WHERE rr.race_id = ? ORDER BY rr.horse_number
     `).bind(raceId).all<any>();
