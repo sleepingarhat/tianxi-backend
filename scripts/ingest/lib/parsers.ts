@@ -3,11 +3,16 @@
  * Normalizes DD/MM/YYYY, finish times, positions, weights, stakes
  */
 
-// '01/01/2019' → '2019-01-01' (ISO)
+// '01/01/2019' → '2019-01-01' (ISO); '26/04/26' → '2026-04-26' (HKJC form CSV uses 2-digit year)
 export function parseHKDate(s: string | undefined | null): string | null {
   if (!s) return null;
-  const m = s.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
-  if (m) return `${m[3]}-${m[2]}-${m[1]}`;
+  // 4-digit year: DD/MM/YYYY
+  const m4 = s.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if (m4) return `${m4[3]}-${m4[2]}-${m4[1]}`;
+  // 2-digit year: DD/MM/YY — HKJC form_*.csv mixes this with 4-digit. All HK
+  // horse racing data is post-2000, so prefix '20'.
+  const m2 = s.match(/^(\d{2})\/(\d{2})\/(\d{2})$/);
+  if (m2) return `20${m2[3]}-${m2[2]}-${m2[1]}`;
   // Already ISO?
   if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
   return null;
