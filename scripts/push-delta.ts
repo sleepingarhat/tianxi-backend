@@ -88,16 +88,32 @@ function main() {
   };
 
   for (const { table, where } of plan) {
-    const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((r: any) => r.name);
+    const tableInfo = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string; pk: number }>;
+    const cols = tableInfo.map((r) => r.name);
     if (!cols.length) {
       console.error(`skip ${table}: no schema`);
       continue;
     }
+    // Collect PK column names (in declaration order) so we can emit a proper
+    // upsert. Cloudflare D1 rejects both BEGIN/COMMIT and `PRAGMA defer_foreign_keys`,
+    // and `INSERT OR REPLACE` on a table referenced by FK runs DELETE+INSERT
+    // which transiently orphans child rows (→ SQLITE_CONSTRAINT_FOREIGNKEY).
+    // `ON CONFLICT(pk) DO UPDATE SET col=excluded.col` performs an in-place
+    // UPDATE without DELETE, preserving FK integrity for inbound refs.
+    const pkCols = tableInfo
+      .filter((r) => r.pk && r.pk > 0)
+      .sort((a, b) => a.pk - b.pk)
+      .map((r) => r.name);
+
     const rows = db.prepare(`SELECT * FROM ${table} WHERE ${where}`).all() as Record<string, unknown>[];
     console.error(`${table}: ${rows.length} rows`);
     if (!rows.length) continue;
 
     const prefixMap = COLUMN_PREFIX[table] || {};
+    const nonPkCols = cols.filter((c) => !pkCols.includes(c));
+    const updateSetClause = nonPkCols.length
+      ? nonPkCols.map((c) => `${c}=excluded.${c}`).join(', ')
+      : '';
     let chunkIdx = 0;
     for (let i = 0; i < rows.length; i += ROWS_PER_CHUNK) {
       const batch = rows.slice(i, i + ROWS_PER_CHUNK);
@@ -111,11 +127,16 @@ function main() {
         });
         return `(${vals.join(',')})`;
       }).join(',');
-      // NOTE: no BEGIN/COMMIT wrapper — Cloudflare D1 rejects explicit SQL transactions.
-      // `defer_foreign_keys` delays FK validation until the implicit transaction
-      // commits, letting bulk deltas land even when parent rows (e.g. trainers,
-      // jockeys, race_meetings) arrive in a later chunk within the same push.
-      const sql = `PRAGMA defer_foreign_keys = on;\nINSERT OR REPLACE INTO ${table} (${cols.join(',')}) VALUES\n${valuesSql};\n`;
+      let sql: string;
+      if (pkCols.length && updateSetClause) {
+        sql = `INSERT INTO ${table} (${cols.join(',')}) VALUES\n${valuesSql}\nON CONFLICT(${pkCols.join(',')}) DO UPDATE SET ${updateSetClause};\n`;
+      } else if (pkCols.length) {
+        // Only PK columns exist (e.g. link tables) — ignore duplicates.
+        sql = `INSERT INTO ${table} (${cols.join(',')}) VALUES\n${valuesSql}\nON CONFLICT(${pkCols.join(',')}) DO NOTHING;\n`;
+      } else {
+        // No declared PK — fall back to OR REPLACE (safe only for tables with no inbound FK).
+        sql = `INSERT OR REPLACE INTO ${table} (${cols.join(',')}) VALUES\n${valuesSql};\n`;
+      }
       const fn = join(outDir, `${table}-${String(chunkIdx).padStart(4, '0')}.sql`);
       writeFileSync(fn, sql);
       manifest.push(fn);
