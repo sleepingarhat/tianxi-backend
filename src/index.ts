@@ -13,6 +13,7 @@ import { oddsRoutes } from './routes/odds';
 import { loungeRoutes } from './routes/lounge';
 import { silksRoutes } from './routes/silks';
 import { silksSvgRoutes } from './routes/silks_svg';
+import { adminRoutes } from './routes/admin';
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -41,6 +42,7 @@ app.route('/api/odds', oddsRoutes);
 app.route('/api/lounge', loungeRoutes);
 app.route('/api/silks', silksRoutes);
 app.route('/api/silks-svg', silksSvgRoutes);
+app.route('/admin', adminRoutes);
 
 // 404
 app.notFound((c) => {
