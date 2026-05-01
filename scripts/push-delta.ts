@@ -129,6 +129,14 @@ function main() {
     entries_upcoming: { horse_id: 'horse_' },
   };
 
+  // Tables whose natural conflict key is a secondary UNIQUE index (not the PK).
+  // For these, `ON CONFLICT(pk)` never fires when the same logical row arrives
+  // with a fresh surrogate id; we hit the UNIQUE constraint instead and the
+  // whole chunk fails. Target the composite UNIQUE columns explicitly.
+  const UNIQUE_CONFLICT: Record<string, string[]> = {
+    horse_form_records: ['horse_id', 'race_date', 'venue', 'race_number'],
+  };
+
   for (const { table, where } of plan) {
     const tableInfo = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string; pk: number }>;
     const cols = tableInfo.map((r) => r.name);
@@ -152,7 +160,11 @@ function main() {
     if (!rows.length) continue;
 
     const prefixMap = COLUMN_PREFIX[table] || {};
-    const nonPkCols = cols.filter((c) => !pkCols.includes(c));
+    // Resolve conflict target: prefer explicit UNIQUE mapping, else PK cols.
+    const uniqueCols = UNIQUE_CONFLICT[table];
+    const conflictCols = uniqueCols && uniqueCols.length ? uniqueCols : pkCols;
+    // Everything that isn't part of the conflict key is eligible for update.
+    const nonConflictCols = cols.filter((c) => !conflictCols.includes(c));
     // Tables with secondary UNIQUE constraints (beyond PK) can fail UPSERT when
     // the new row would violate the secondary constraint on a different PK.
     // For FK-parent tables (horses/jockeys/trainers) where we mainly care that
@@ -163,14 +175,14 @@ function main() {
     const skipUpdate = FK_PARENT_SKIP_UPDATE.has(table);
     const updateSetClause = skipUpdate
       ? ''
-      : nonPkCols.length
-      ? nonPkCols.map((c) => `${c}=excluded.${c}`).join(', ')
+      : nonConflictCols.length
+      ? nonConflictCols.map((c) => `${c}=excluded.${c}`).join(', ')
       : '';
     // D1 multi-row VALUES + ON CONFLICT DO UPDATE triggers D1_RESET_DO on some
     // tables (observed on `horses`, where the SET clause over 22 columns crashes
     // the Durable Object). Emit one INSERT statement per row when UPSERT is in
     // play. For INSERT-only tables we can still batch.
-    const oneStatementPerRow = pkCols.length > 0 && updateSetClause !== '';
+    const oneStatementPerRow = conflictCols.length > 0 && updateSetClause !== '';
     const rowsPerStatement = oneStatementPerRow ? 1 : ROWS_PER_CHUNK;
     const statementsPerChunk = oneStatementPerRow ? ROWS_PER_CHUNK : 1;
 
@@ -191,14 +203,14 @@ function main() {
           return `(${vals.join(',')})`;
         }).join(',');
         let sql: string;
-        if (pkCols.length && updateSetClause) {
-          sql = `INSERT INTO ${table} (${cols.join(',')}) VALUES ${valuesSql} ON CONFLICT(${pkCols.join(',')}) DO UPDATE SET ${updateSetClause};`;
+        if (conflictCols.length && updateSetClause) {
+          sql = `INSERT INTO ${table} (${cols.join(',')}) VALUES ${valuesSql} ON CONFLICT(${conflictCols.join(',')}) DO UPDATE SET ${updateSetClause};`;
         } else if (skipUpdate) {
           // INSERT OR IGNORE skips row on ANY uniqueness failure (PK or secondary UNIQUE)
           // — correct for FK-parent tables where existence is all that matters.
           sql = `INSERT OR IGNORE INTO ${table} (${cols.join(',')}) VALUES\n${valuesSql};`;
-        } else if (pkCols.length) {
-          sql = `INSERT INTO ${table} (${cols.join(',')}) VALUES\n${valuesSql}\nON CONFLICT(${pkCols.join(',')}) DO NOTHING;`;
+        } else if (conflictCols.length) {
+          sql = `INSERT INTO ${table} (${cols.join(',')}) VALUES\n${valuesSql}\nON CONFLICT(${conflictCols.join(',')}) DO NOTHING;`;
         } else {
           sql = `INSERT OR REPLACE INTO ${table} (${cols.join(',')}) VALUES\n${valuesSql};`;
         }
