@@ -76,6 +76,16 @@ export function ingestEntries(
      ON CONFLICT(date, venue) DO NOTHING`,
   );
 
+  // Stub horse row — unblocks FK in entries_upcoming.horse_id when the horse
+  // has not yet appeared in race_results/pool-a ingests (e.g. first-time
+  // entrant debuting on the upcoming card). We insert id + code + name only;
+  // richer fields (colour/sex/age/owner) land later via horse profile scraper.
+  const upsertHorseStub = db.prepare(
+    `INSERT INTO horses (id, code, name)
+     VALUES (?, ?, ?)
+     ON CONFLICT(id) DO NOTHING`,
+  );
+
   for (const file of files) {
     stats.filesProcessed++;
     try {
@@ -104,12 +114,16 @@ export function ingestEntries(
           const raceNo = 0; // sentinel: unknown race in current txt format
           const id = entryId(meeting, venue, raceNo, horseNo);
           try {
+            // Seed horses stub so downstream FK (entries_upcoming.horse_id →
+            // horses.id) can resolve in D1 even for debut entrants. D1 stores
+            // horses.id as prefixed 'horse_<code>'; match that here.
+            upsertHorseStub.run(`horse_${code}`, code, code);
             upsert.run(
               id,
               meeting,
               venue,
               raceNo,
-              code, // horse_id = code (convention)
+              code, // horse_id = code (convention); push-delta prefixes to horse_<code> for D1
               horseNo,
               code,
               header.written,
