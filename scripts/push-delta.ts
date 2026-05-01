@@ -42,6 +42,7 @@ function main() {
   const wantPoolA   = include === 'pool-a'  || include === 'all';
   const wantElo     = include === 'elo'     || include === 'all';
   const wantEntries = include === 'entries' || include === 'all';
+  const wantOdds    = include === 'odds'    || include === 'all';
 
   // Table definitions with date-scoping filters
   // ORDER MATTERS: FK parents first (horses/jockeys/trainers) → meetings → races → dependents
@@ -118,6 +119,14 @@ function main() {
       plan.push({ table: 'race_meetings', where: `date >= '${since}'` });
     }
     plan.push({ table: 'entries_upcoming', where: `race_date >= '${since}'` });
+  }
+
+  if (wantOdds) {
+    // Odds snapshots + pool totals are append-only time series. No FK on
+    // horse/jockey/trainer — combination encodes the bet selection as free text.
+    // race_date filter keeps the push small (current-meeting snapshot window).
+    plan.push({ table: 'odds_snapshots', where: `race_date >= '${since}'` });
+    plan.push({ table: 'pool_totals',    where: `race_date >= '${since}'` });
   }
 
   const COLUMN_PREFIX: Record<string, Record<string, string>> = {
