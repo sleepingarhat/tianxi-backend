@@ -35,11 +35,13 @@ function main() {
   const manifest: string[] = [];
 
   // --include selector: 'race' (default, fast post-race-day sync), 'pool-a' (trackwork/injury/form),
-  // 'elo' (ELO snapshots only, for post-compute sync), or 'all' for everything.
+  // 'elo' (ELO snapshots only, for post-compute sync), 'entries' (forward-looking racecard
+  // upcoming meetings), or 'all' for everything.
   const include = (arg('include', 'race') || 'race').toLowerCase();
-  const wantRace  = include === 'race'  || include === 'all';
-  const wantPoolA = include === 'pool-a' || include === 'all';
-  const wantElo   = include === 'elo'   || include === 'all';
+  const wantRace    = include === 'race'    || include === 'all';
+  const wantPoolA   = include === 'pool-a'  || include === 'all';
+  const wantElo     = include === 'elo'     || include === 'all';
+  const wantEntries = include === 'entries' || include === 'all';
 
   // Table definitions with date-scoping filters
   // ORDER MATTERS: FK parents first (horses/jockeys/trainers) → meetings → races → dependents
@@ -98,6 +100,20 @@ function main() {
     plan.push({ table: 'horse_trackwork',    where: `trackwork_date >= '${since}'` });
     plan.push({ table: 'horse_injury',       where: `injury_date    >= '${since}'` });
     plan.push({ table: 'horse_form_records', where: `race_date      >= '${since}'` });
+  }
+
+  if (wantEntries) {
+    // Forward-looking racecards — `race_date >= since` works because entries are
+    // future-dated meetings. Caller typically passes since=today or a near-past date
+    // to include both tomorrow's card and any recent cards still in transition.
+    // FK-parent horses are referenced by entries.horse_id; the pool-a horseRefUnion
+    // does not cover this (entries is not in that union). The entries txt ingest
+    // writes horse_code into horse_id (convention), which may not match prefixed
+    // horses.id. For now we rely on D1 already having those horses via pool-a/race
+    // syncs; entries rows that reference unknown horse_ids will fail FK and be
+    // reported in the ingest log. This is acceptable until GraphQL-enriched entries
+    // land (which will carry proper horse_id + jockey_id + trainer_id).
+    plan.push({ table: 'entries_upcoming', where: `race_date >= '${since}'` });
   }
 
   const COLUMN_PREFIX: Record<string, Record<string, string>> = {
@@ -197,3 +213,4 @@ function main() {
 }
 
 main();
+
