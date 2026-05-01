@@ -81,12 +81,15 @@ export function ingestHorseInjury(
           stats.skipped++;
           continue;
         }
-        const injuryType = r['injury_type'] || r['type'] || r['類別'] || r['種類'] || '';
+        // CSV schema compat: HKJC scraper writes `detail` column (Chinese injury description)
+        // which serves as both the injury_type and description. Legacy Replit schema used
+        // `injury_type` + `description` as separate columns.
+        const injuryType = r['injury_type'] || r['type'] || r['類別'] || r['種類'] || r['detail'] || '';
         if (!injuryType) {
           stats.skipped++;
           continue;
         }
-        const resRaw = r['resolution_date'] || r['resolved_at'] || r['復出日期'] || '';
+        const resRaw = r['resolution_date'] || r['resolved_at'] || r['復出日期'] || r['cleared_date'] || '';
         const resIso = parseHKDate(resRaw);
         const description = r['description'] || r['備註'] || r['說明'] || null;
         const daysOut = daysBetween(isoDate, resIso);
@@ -121,3 +124,4 @@ export function ingestHorseInjury(
 
   return stats;
 }
+
