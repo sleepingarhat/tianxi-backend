@@ -9,8 +9,15 @@
  *   - structured: '0.36.80' / '1.02.30' (MIN.SEC.HUND) → parsed to seconds
  *   - text: 'slow' / '慢跑' / 'gallops' → stored raw in time_text, time_sec = NULL
  *
- * UPSERT key: UNIQUE(horse_id, trackwork_date, venue, distance, time_text)
- * Fallback: if venue missing, that column is NULL in the key tuple.
+ * UPSERT key: id (deterministic hash of horse_id + trackwork_date + venue + distance + time_text).
+ * We conflict on the PK because SQLite treats NULLs as distinct in composite UNIQUE
+ * indexes — natural-key conflict would miss rows where venue/distance is NULL, but the
+ * id hash is identical for identical inputs, so PK conflict catches all real duplicates.
+ *
+ * Historical bug (fixed 2026-05-01): previously conflicted on the natural-key tuple,
+ * which meant NULL-venue rows hit the `id` PK UNIQUE first and threw. Inside a
+ * `db.transaction()` that throw aborted the whole tx and silently killed every
+ * subsequent row → symptom was "ins=104 fail=1" for 1979 horses.
  */
 import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -54,8 +61,11 @@ export function ingestHorseTrackwork(
        (id, horse_id, trackwork_date, venue, batch, distance, time_text, time_sec,
         partner, comment, source_commit, ingested_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-     ON CONFLICT(horse_id, trackwork_date, venue, distance, time_text) DO UPDATE SET
+     ON CONFLICT(id) DO UPDATE SET
+       venue = excluded.venue,
        batch = excluded.batch,
+       distance = excluded.distance,
+       time_text = excluded.time_text,
        time_sec = excluded.time_sec,
        partner = excluded.partner,
        comment = excluded.comment,
@@ -98,25 +108,25 @@ export function ingestHorseTrackwork(
         const comment = r['comment'] || r['備註'] || null;
 
         const id = trackworkId(horseCode, isoDate, venue, distance, timeText);
-        try {
-          upsert.run(
-            id,
-            horseCode,
-            isoDate,
-            venue,
-            batch,
-            distance,
-            timeText,
-            timeSec,
-            partner,
-            comment,
-            sourceCommit,
-          );
-          stats.inserted++;
-        } catch (err) {
-          stats.failed++;
-          console.error(`[trackwork] row ${horseCode} ${isoDate}:`, err);
-        }
+        // No per-row try-catch here: ON CONFLICT(id) DO UPDATE now handles all
+        // duplicate cases gracefully, so upsert.run() should not throw for
+        // UNIQUE violations. If it DOES throw (schema error etc.), we want
+        // the whole tx to fail-fast rather than silently truncate — the outer
+        // try/catch around tx() will catch it and log per-file.
+        upsert.run(
+          id,
+          horseCode,
+          isoDate,
+          venue,
+          batch,
+          distance,
+          timeText,
+          timeSec,
+          partner,
+          comment,
+          sourceCommit,
+        );
+        stats.inserted++;
       }
     });
 
