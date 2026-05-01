@@ -93,18 +93,32 @@ async function fetchRuns(env: AdminEnv, limit = 50): Promise<any[]> {
   } catch { return []; }
 }
 
-// Map workflow name → latest conclusion + timestamp
-function buildWorkflowMap(runs: any[]): Record<string, { conclusion: string; updatedAt: string; status: string }> {
-  const map: Record<string, { conclusion: string; updatedAt: string; status: string }> = {};
+// Map workflow key (name + filename) → recent runs (array + lastSuccess).
+// 2026-05-01 v4: keep full recent run list instead of only latest, so
+// an in_progress / cancelled latest no longer false-triggers '無自動 ✗'.
+interface WfInfo {
+  recent: Array<{ conclusion: string; status: string; updatedAt: string }>;
+  lastRunAt: string;
+  lastSuccessAt: string | null;
+}
+function buildWorkflowMap(runs: any[]): Record<string, WfInfo> {
+  const map: Record<string, WfInfo> = {};
   for (const r of runs) {
     const name = r.name || '';
-    const path = (r.path || '').split('/').pop() || '';  // e.g. capy_race_daily.yml
+    const path = (r.path || '').split('/').pop() || '';
     const keys = [name, path].filter(Boolean);
     for (const k of keys) {
-      if (!map[k] || new Date(r.updated_at) > new Date(map[k].updatedAt)) {
-        map[k] = { conclusion: r.conclusion || '', updatedAt: r.updated_at, status: r.status };
+      const info = (map[k] = map[k] || { recent: [], lastRunAt: '', lastSuccessAt: null });
+      info.recent.push({ conclusion: r.conclusion || '', status: r.status, updatedAt: r.updated_at });
+      if (r.updated_at > info.lastRunAt) info.lastRunAt = r.updated_at;
+      if (r.conclusion === 'success' && (!info.lastSuccessAt || r.updated_at > info.lastSuccessAt)) {
+        info.lastSuccessAt = r.updated_at;
       }
     }
+  }
+  for (const k of Object.keys(map)) {
+    map[k].recent.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
+    map[k].recent = map[k].recent.slice(0, 10);
   }
   return map;
 }
@@ -119,25 +133,47 @@ function assessHistory(count: number | null, latest: string | null, minCount: nu
   if (ageDays > maxStaleDays) return 'warn';
   return 'ok';
 }
-function assessAuto(wfMap: Record<string, any>, wfNames: string[]): Status {
+// Scan last 5 runs per workflow — transient states (in_progress / cancelled
+// in the latest slot) no longer mask a healthy stream of successes.
+function assessAuto(wfMap: Record<string, WfInfo>, wfNames: string[]): Status {
   let anyFound = false, anySuccess = false, anyFail = false;
   for (const n of wfNames) {
     const m = wfMap[n];
     if (!m) continue;
     anyFound = true;
-    if (m.conclusion === 'success') anySuccess = true;
-    if (m.conclusion === 'failure') anyFail = true;
+    for (const run of m.recent.slice(0, 5)) {
+      if (run.conclusion === 'success') anySuccess = true;
+      if (run.conclusion === 'failure') anyFail = true;
+    }
   }
   if (!anyFound) return 'bad';
   if (anySuccess && !anyFail) return 'ok';
   if (anySuccess && anyFail) return 'warn';
-  return 'bad';
+  return 'warn';  // found but running-only → transient, not broken
+}
+// Pull lastRun/lastSuccess times + staleness for per-row dashboard badges.
+function lastRunInfo(wfMap: Record<string, WfInfo>, wfNames: string[]):
+  { lastRunAt: string | null; lastSuccessAt: string | null; lastSuccessAgeH: number | null } {
+  let lastRunAt: string | null = null;
+  let lastSuccessAt: string | null = null;
+  for (const n of wfNames) {
+    const m = wfMap[n];
+    if (!m) continue;
+    if (m.lastRunAt && (!lastRunAt || m.lastRunAt > lastRunAt)) lastRunAt = m.lastRunAt;
+    if (m.lastSuccessAt && (!lastSuccessAt || m.lastSuccessAt > lastSuccessAt)) lastSuccessAt = m.lastSuccessAt;
+  }
+  const lastSuccessAgeH = lastSuccessAt ? (Date.now() - new Date(lastSuccessAt).getTime()) / 3600000 : null;
+  return { lastRunAt, lastSuccessAt, lastSuccessAgeH };
+}
+// Combined: auto status + last-run timestamps — spread into dataset row.
+function rowAuto(wfMap: Record<string, WfInfo>, wfNames: string[]) {
+  return { auto: assessAuto(wfMap, wfNames), ...lastRunInfo(wfMap, wfNames) };
 }
 
 // ── /api/coverage ──────────────────────────────────────────────────────
 adminRoutes.get('/api/coverage', async (c) => {
   const db = c.env.DB;
-  const runs = await fetchRuns(c.env, 80);
+  const runs = await fetchRuns(c.env, 150);  // v4: 80→150 so each of 16 workflows has ≥5 recent
   const wf = buildWorkflowMap(runs);
 
   // Gather all counts + latest dates in parallel
@@ -174,62 +210,62 @@ adminRoutes.get('/api/coverage', async (c) => {
   const datasets = [
     { key: 'meetings', label: '賽馬日', count: mc, latest: latestM,
       history: assessHistory(mc, latestM, 880, 14),
-      auto: assessAuto(wf, ['capy_race_daily.yml', 'Capy Race Day — RacingData Results', 'capy_d1_sync.yml']),
+      ...rowAuto(wf, ['capy_race_daily.yml', 'Capy Race Day — RacingData Results', 'capy_d1_sync.yml']),
       workflows: ['capy_race_daily', 'capy_d1_sync'], detail: `${mc} 場 · 最新 ${fd(latestM)}` },
     { key: 'races', label: '場次', count: rc, latest: latestM,
       history: assessHistory(rc, latestM, 8000, 14),
-      auto: assessAuto(wf, ['capy_race_daily.yml', 'Capy Race Day — RacingData Results']),
+      ...rowAuto(wf, ['capy_race_daily.yml', 'Capy Race Day — RacingData Results']),
       workflows: ['capy_race_daily'], detail: `${rc} 場次` },
     { key: 'results', label: '賽果', count: rsc, latest: latestResult,
       history: assessHistory(rsc, latestResult, 95000, 14),
-      auto: assessAuto(wf, ['capy_race_daily.yml', 'Capy Race Day — RacingData Results', 'capy_d1_sync.yml']),
+      ...rowAuto(wf, ['capy_race_daily.yml', 'Capy Race Day — RacingData Results', 'capy_d1_sync.yml']),
       workflows: ['capy_race_daily', 'capy_d1_sync'], detail: `${rsc} 行 · 最新 ${fd(latestResult)}` },
     { key: 'horses', label: '馬匹', count: hc, latest: null,
       history: assessHistory(hc, null, 5000, 365),
-      auto: assessAuto(wf, ['capy_race_daily.yml', 'capy_pool_a.yml']),
+      ...rowAuto(wf, ['capy_race_daily.yml', 'capy_pool_a.yml']),
       workflows: ['capy_race_daily', 'capy_pool_a'], detail: `${hc} 匹` },
     { key: 'jockeys', label: '騎師', count: jc, latest: null,
       history: assessHistory(jc, null, 150, 365),
-      auto: assessAuto(wf, ['capy_race_daily.yml']),
+      ...rowAuto(wf, ['capy_race_daily.yml']),
       workflows: ['capy_race_daily'], detail: `${jc} 位` },
     { key: 'trainers', label: '練馬師', count: tc, latest: null,
       history: assessHistory(tc, null, 150, 365),
-      auto: assessAuto(wf, ['capy_race_daily.yml']),
+      ...rowAuto(wf, ['capy_race_daily.yml']),
       workflows: ['capy_race_daily'], detail: `${tc} 位` },
     { key: 'trackwork', label: '晨操', count: twc, latest: latestTW,
       history: assessHistory(twc, latestTW, 5000, 3),
-      auto: assessAuto(wf, ['capy_pool_a.yml', 'capy_d1_sync_pool_a.yml',
-        'Capy Pool A — HorseData + Trackwork + Injury', 'Capy D1 Sync Pool A — trackwork + injury + form']),
+      ...rowAuto(wf, ['capy_pool_a.yml', 'capy_d1_sync_pool_a.yml',
+        'Capy Pool A — Horse Profiles + Trackwork + Injury', 'Capy D1 Sync Pool A — trackwork + injury + form']),
       workflows: ['capy_pool_a', 'capy_d1_sync_pool_a'], detail: `${twc} 行 · 最新 ${fd(latestTW)}` },
     { key: 'injury', label: '傷患', count: ic, latest: latestInjury,
       history: assessHistory(ic, latestInjury, 1200, 30),
-      auto: assessAuto(wf, ['capy_pool_a.yml', 'capy_d1_sync_pool_a.yml',
-        'Capy Pool A — HorseData + Trackwork + Injury']),
+      ...rowAuto(wf, ['capy_pool_a.yml', 'capy_d1_sync_pool_a.yml',
+        'Capy Pool A — Horse Profiles + Trackwork + Injury']),
       workflows: ['capy_pool_a', 'capy_d1_sync_pool_a'], detail: `${ic} 行 · 最新 ${fd(latestInjury)}` },
     { key: 'form', label: '往績 (form records)', count: fc, latest: latestForm,
       history: assessHistory(fc, latestForm, 180000, 30),
-      auto: assessAuto(wf, ['capy_race_daily.yml', 'capy_pool_a.yml', 'capy_d1_sync_pool_a.yml']),
+      ...rowAuto(wf, ['capy_race_daily.yml', 'capy_pool_a.yml', 'capy_d1_sync_pool_a.yml']),
       workflows: ['capy_race_daily', 'capy_pool_a'], detail: `${fc} 行 · 最新 ${fd(latestForm)}` },
     { key: 'entries', label: '排位表 (upcoming)', count: ec, latest: latestE,
       history: assessHistory(ec, latestE, 50, 2),
-      auto: assessAuto(wf, ['capy_entries.yml', 'capy_d1_sync_entries.yml',
-        'Capy Entries — forward-looking racecards', 'Capy D1 Sync Entries — forward-looking racecards']),
+      ...rowAuto(wf, ['capy_entries.yml', 'capy_d1_sync_entries.yml',
+        'Capy Entries — Race Card (排位表)', 'Capy D1 Sync Entries — forward-looking racecards']),
       workflows: ['capy_entries', 'capy_d1_sync_entries'], detail: `${ec} 行 · 最新 ${fd(latestE)}` },
     { key: 'odds', label: '賠率', count: oc, latest: latestOdds,
       history: assessHistory(oc, latestOdds, 1000, 1),
-      auto: assessAuto(wf, ['capy_odds.yml', 'Capy Odds Snapshot — live win/place odds']),
+      ...rowAuto(wf, ['capy_odds.yml', 'Capy Odds — live snapshot (hkjc-api GraphQL)']),
       workflows: ['capy_odds'], detail: `${oc} 行 · 最新 ${fd(latestOdds)}` },
     { key: 'horseElo', label: '馬匹 ELO', count: heC, latest: latestElo,
       history: assessHistory(heC, latestElo, 75000, 7),
-      auto: assessAuto(wf, ['ELO Post-Race Auto-Update', 'elo_auto_update.yml', 'capy_race_daily.yml']),
+      ...rowAuto(wf, ['ELO Post-Race Auto-Update', 'elo-post-race.yml', 'capy_race_daily.yml']),
       workflows: ['ELO Post-Race Auto-Update'], detail: `${heC} snapshots · 最新 ${fd(latestElo)}` },
     { key: 'jockeyElo', label: '騎師 ELO', count: jeC, latest: latestElo,
       history: assessHistory(jeC, latestElo, 45000, 7),
-      auto: assessAuto(wf, ['ELO Post-Race Auto-Update']),
+      ...rowAuto(wf, ['ELO Post-Race Auto-Update', 'elo-post-race.yml']),
       workflows: ['ELO Post-Race Auto-Update'], detail: `${jeC} snapshots` },
     { key: 'trainerElo', label: '練馬師 ELO', count: teC, latest: latestElo,
       history: assessHistory(teC, latestElo, 45000, 7),
-      auto: assessAuto(wf, ['ELO Post-Race Auto-Update']),
+      ...rowAuto(wf, ['ELO Post-Race Auto-Update', 'elo-post-race.yml']),
       workflows: ['ELO Post-Race Auto-Update'], detail: `${teC} snapshots` },
   ];
 
@@ -426,8 +462,8 @@ function renderPanel(token: string): string {
 
   <h2>資料來源覆蓋（11 個核心表）</h2>
   <table id="coverDS"><thead><tr>
-    <th>資料源</th><th>歷史齊全</th><th>自動更新</th><th>數量 / 最新</th><th>負責工作流</th>
-  </tr></thead><tbody><tr><td colspan="5">載入中…</td></tr></tbody></table>
+    <th>資料源</th><th>歷史齊全</th><th>自動更新</th><th>最新運行</th><th>最後成功</th><th>數量 / 最新</th><th>負責工作流</th>
+  </tr></thead><tbody><tr><td colspan="7">載入中…</td></tr></tbody></table>
 
   <h2>預測因子覆蓋（11 個因子）</h2>
   <table id="coverFac"><thead><tr>
@@ -478,15 +514,34 @@ function renderPanel(token: string): string {
       (level === 'ok' ? '✓' : level === 'warn' ? '▲' : '✗') + '</span>' + label + '</span>';
   }
 
+  function fmtTs(s) {
+    if (!s) return '<span class="muted-cell">—</span>';
+    // Format YYYY-MM-DDTHH:MM:SSZ → MM-DD HH:MM
+    const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(s);
+    if (!m) return s;
+    return m[2] + '-' + m[3] + ' ' + m[4] + ':' + m[5];
+  }
+  function fmtSuccess(s, ageH) {
+    if (!s) return '<span class="chip bad"><span class="icon">✗</span>從未成功</span>';
+    const label = fmtTs(s);
+    // ageH thresholds: ≤26h ok, ≤72h warn, >72h bad
+    const level = ageH == null ? 'bad' : ageH <= 26 ? 'ok' : ageH <= 72 ? 'warn' : 'bad';
+    const suffix = ageH == null ? '' : ' (' + (ageH < 24 ? ageH.toFixed(1) + 'h' : Math.floor(ageH/24) + 'd') + ')';
+    return '<span class="chip ' + level + '"><span class="icon">' +
+      (level === 'ok' ? '✓' : level === 'warn' ? '▲' : '✗') + '</span>' + label + suffix + '</span>';
+  }
+
   async function loadCoverage() {
     const c = await json('/admin/api/coverage');
     const ds = document.querySelector('#coverDS tbody');
-    if (c.error) { ds.innerHTML = '<tr><td colspan="5" class="bad">' + c.error + '</td></tr>'; return; }
+    if (c.error) { ds.innerHTML = '<tr><td colspan="7" class="bad">' + c.error + '</td></tr>'; return; }
     ds.innerHTML = c.datasets.map(d =>
       '<tr>' +
       '<td><strong>' + d.label + '</strong><div class="muted-cell">' + d.key + '</div></td>' +
       '<td>' + chip(d.history, '歷史齊全 ✓', '部分歷史 ▲', '未達標 ✗') + '</td>' +
       '<td>' + chip(d.auto, '自動更新 ✓', '間歇失敗 ▲', '無自動 ✗') + '</td>' +
+      '<td class="muted-cell">' + fmtTs(d.lastRunAt) + '</td>' +
+      '<td>' + fmtSuccess(d.lastSuccessAt, d.lastSuccessAgeH) + '</td>' +
       '<td class="muted-cell">' + d.detail + '</td>' +
       '<td class="muted-cell">' + (d.workflows || []).join(' · ') + '</td>' +
       '</tr>'
