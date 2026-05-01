@@ -125,6 +125,8 @@ function main() {
     horse_trackwork: { horse_id: 'horse_' },
     horse_injury: { horse_id: 'horse_' },
     horse_form_records: { horse_id: 'horse_' },
+    // Entries ingest writes bare code (E436) into horse_id; prefix for FK.
+    entries_upcoming: { horse_id: 'horse_' },
   };
 
   for (const { table, where } of plan) {
