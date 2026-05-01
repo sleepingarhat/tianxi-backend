@@ -81,7 +81,7 @@ export function ingestEntries(
   // entrant debuting on the upcoming card). We insert id + code + name only;
   // richer fields (colour/sex/age/owner) land later via horse profile scraper.
   const upsertHorseStub = db.prepare(
-    `INSERT INTO horses (id, code, name)
+    `INSERT INTO horses (id, code, name_en)
      VALUES (?, ?, ?)
      ON CONFLICT(id) DO NOTHING`,
   );
