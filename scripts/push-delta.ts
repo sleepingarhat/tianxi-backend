@@ -60,6 +60,11 @@ function main() {
     // ELO snapshots store bare codes (K059). Prefix to 'horse_K059' to match horses.id.
     horseRefs.push(`SELECT DISTINCT ('horse_' || horse_id) FROM horse_elo_snapshots WHERE as_of_date >= '${since}'`);
   }
+  if (wantEntries) {
+    // Entries seed horses.id as prefixed 'horse_<code>' via entries ingest stub.
+    // Reference by that id directly so the horses push captures debut entrants.
+    horseRefs.push(`SELECT DISTINCT ('horse_' || horse_id) FROM entries_upcoming WHERE race_date >= '${since}'`);
+  }
   const horseRefUnion = horseRefs.length ? horseRefs.join(' UNION ') : `SELECT NULL WHERE 0`;
 
   const plan: Array<{ table: string; where: string }> = [];
@@ -67,7 +72,7 @@ function main() {
   // FK parents — always pushed first in their own chunk
   // Skip for elo-only mode: horses exist in D1 already, and .elo-pipeline's
   // bulk-local.db has bare-code horses.id which won't match prefixed refs.
-  if (wantRace || wantPoolA) {
+  if (wantRace || wantPoolA || wantEntries) {
     plan.push({ table: 'horses',   where: `id IN (${horseRefUnion})` });
   }
   if (wantRace) {
@@ -106,13 +111,12 @@ function main() {
     // Forward-looking racecards — `race_date >= since` works because entries are
     // future-dated meetings. Caller typically passes since=today or a near-past date
     // to include both tomorrow's card and any recent cards still in transition.
-    // FK-parent horses are referenced by entries.horse_id; the pool-a horseRefUnion
-    // does not cover this (entries is not in that union). The entries txt ingest
-    // writes horse_code into horse_id (convention), which may not match prefixed
-    // horses.id. For now we rely on D1 already having those horses via pool-a/race
-    // syncs; entries rows that reference unknown horse_ids will fail FK and be
-    // reported in the ingest log. This is acceptable until GraphQL-enriched entries
-    // land (which will carry proper horse_id + jockey_id + trainer_id).
+    // race_meetings FK: push meeting placeholders first (entries ingest seeds them
+    // via `INSERT ... ON CONFLICT(date, venue) DO NOTHING`). Avoid double-push when
+    // --include=race already added it above.
+    if (!wantRace) {
+      plan.push({ table: 'race_meetings', where: `date >= '${since}'` });
+    }
     plan.push({ table: 'entries_upcoming', where: `race_date >= '${since}'` });
   }
 
