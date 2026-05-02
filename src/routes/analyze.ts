@@ -499,11 +499,11 @@ async function computeComposite(
     // Fallback: if jockey_id FK is null, construct snapshot ID from jockey name
     // (race_results.jockey_name is populated from CSV; ELO snapshots use 'jockey_<name>')
     const jSnapshotId = r.jockey_id
-      ?? (r.jockey_name ? \`jockey_\${r.jockey_name}\` : null)
-      ?? (r.jockey_ch   ? \`jockey_\${r.jockey_ch}\`   : null);
+      ?? (r.jockey_name ? `jockey_${r.jockey_name}` : null)
+      ?? (r.jockey_ch   ? `jockey_${r.jockey_ch}`   : null);
     const tSnapshotId = r.trainer_id
-      ?? (r.trainer_name ? \`trainer_\${r.trainer_name}\` : null)
-      ?? (r.trainer_ch   ? \`trainer_\${r.trainer_ch}\`   : null);
+      ?? (r.trainer_name ? `trainer_${r.trainer_name}` : null)
+      ?? (r.trainer_ch   ? `trainer_${r.trainer_ch}`   : null);
     const jRead = jSnapshotId ? await fetchAxisEloReading(db, 'jockey', jSnapshotId, raceDate, engine) : null;
     const tRead = tSnapshotId ? await fetchAxisEloReading(db, 'trainer', tSnapshotId, raceDate, engine) : null;
     const hElo = hRead?.rating ?? null;
