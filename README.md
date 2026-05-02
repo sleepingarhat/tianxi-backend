@@ -1,106 +1,78 @@
-# 天喜 Backend · tianxi-backend
+# 天喜後端 · tianxi-backend
 
-> Hono + Cloudflare Workers + D1 API 層。消化 `tianxi-database` 嘅 CSV，提供賽事 / 賽駒 / 騎練 / ELO / composite prediction endpoints 畀 `tianxi-site` frontend 用。
+Cloudflare Workers + D1 API 服務、ELO 複合預測引擎、內部管理控制台。
 
-## Production
+## 技術棧
 
-- **Workers URL**：<https://tianxi-backend.tianxi-entertainment.workers.dev>
-- **D1 binding**：`tianxi-db` (`aad1636e-869a-43f5-aa95-4a19e3aa5517`)
-- **Runtime**：Cloudflare Workers · Node compat `nodejs_compat`
+- **Runtime**: Cloudflare Workers (Hono v4)
+- **Database**: Cloudflare D1（SQLite，綁定名 `DB`）
+- **語言**: TypeScript 5.9
+- **部署**: `wrangler deploy`
 
-## 生態系統
+## 系統架構
+
+**生態系統（3 repos）**
 
 | Repo | 角色 |
-|---|---|
-| [tianxi-database](https://github.com/sleepingarhat/tianxi-database) | CSV source + scraper + D1 sync GHA |
-| **tianxi-backend** (本 repo) | Workers API + ELO engine |
-| [tianxi-site](https://github.com/sleepingarhat/tianxi-site) | CF Pages 靜態前端 |
+|------|------|
+| **tianxi-database**（public） | 數據爬取 · CSV · GHA 調度 |
+| **tianxi-backend**（本 repo · private） | API + ELO + 預測 + 管理控制台 |
+| **tianxi-site**（public） | CF Pages 前端 |
 
-## 快速跑動
+## API 端點
+
+### 公開 API（無需認證）
+
+| 端點 | 說明 |
+|------|------|
+| `GET /api/meetings/smart/current` | 當前 / 最近賽馬日 |
+| `GET /api/meetings/next` | 下一個賽馬日 |
+| `GET /api/races/:id/entries` | 排位表 + 兄弟場次導航 |
+| `GET /api/horses/:id/detail` | 馬匹詳情 KV（Level-3 用） |
+| `GET /api/analyze/top-picks?raceId=` | ELO + 7 因子複合預測 |
+| `GET /api/analyze/explain?raceId=&horseId=` | 單匹因子分解 + 說明文字 |
+| `GET /api/jockeys` | 騎師列表 + 統計 |
+| `GET /api/trainers` | 練馬師列表 + 統計 |
+| `GET /api/silks/:code.gif` | 騎師衫色代理 |
+
+### 管理 API（Bearer token 或 `?token=`）
+
+| 端點 | 說明 |
+|------|------|
+| `GET /admin` | 內部控制台 HTML |
+| `GET /admin/api/coverage` | 14 個數據源覆蓋狀態 |
+| `GET /admin/api/status` | D1 即時計數 |
+| `GET /admin/api/alerts` | 系統告警 |
+| `GET /admin/api/runs` | GHA 工作流運行記錄 |
+| `GET /admin/api/meetings` | 最近賽事列表（預測工具用） |
+| `POST /admin/api/dispatch` | 觸發 GHA 工作流 |
+
+## ELO 預測引擎 v1.2
+
+複合分：`0.7 × 馬匹ELO + 0.2 × 騎師ELO + 0.1 × 練馬師ELO + Σ因子調整`
+
+**7 個調整因子**：近戰狀態 · 途程適應 · 場地適應 · 檔位偏差 · 負磅變化 · 晨操狀態 · 騎練配對
+
+## 本地開發
 
 ```bash
-# 本地 dev
 npm install
-cp .dev.vars.example .dev.vars   # 填 D1 credentials
-npm run dev
-
-# Deploy
-wrangler deploy
+npm run dev           # wrangler dev
+npm run deploy        # wrangler deploy
 ```
 
-## Routes
+## Worker Secrets（必須設定）
 
-| Path | 用途 |
-|---|---|
-| `GET /api/meetings` / `/api/meetings/next` / `/api/meetings/smart/current` | 賽馬日清單 / 下一個 / 最新 |
-| `GET /api/races/:id` | 單場賽事（entries + 騎練 + silks + 賠率） |
-| `GET /api/horses/:id` | 馬匹 profile + career stats + form |
-| `GET /api/jockeys/:id` · `GET /api/trainers/:id` | 騎練 profile |
-| `GET /api/analyze/top-picks?raceId=` | Composite score ranking（ELO 0.7/0.2/0.1 + per-race factors） |
-| `GET /api/analyze/explain?raceId=&horseId=` | 單匹馬-場預測分解 |
-| `GET /api/odds/:raceId` | 各彩池即時賠率（獨贏 / 位置 / 連贏 / 位置 Q / 三重彩 / 四重彩 / 四連環 / 六環彩 / 三 T / 單 T） |
-| `GET /api/silks/:code.gif` | HKJC silks proxy + D1 blob cache |
-| `POST /api/chat` · `GET /api/lounge/*` | AI chat（rate-limited） + lounge 社群 |
-
-## Scripts
-
-| Script | 用途 |
-|---|---|
-| `scripts/import-csv.ts` | CSV → `bulk-local.db` (scratch SQLite)，schema 自動 bootstrap |
-| `scripts/push-delta.ts` | Date-scoped delta → SQL chunks（200 rows / chunk）· 支援 `--include=race/pool-a/all` |
-| `scripts/elo/compute.ts` + `compute_v11.ts` | ELO v1.1 / v1.2 engine（horse / jockey / trainer axes） |
-| `scripts/push-to-d1.sh` | 手動 push CSV → D1（配合 `push-delta.ts`） |
-| `scripts/test-composite.ts` | Local test：`/analyze/top-picks` composite logic |
-
-## 注意：Cloudflare D1 限制
-
-**唔接受 `BEGIN;...COMMIT;`**。用 `INSERT OR REPLACE INTO ... VALUES (...)` 裸 SQL 或 transaction JS API。`push-delta.ts` 已經唔再 emit BEGIN/COMMIT wrapper（見 commit `5788a65`）。
-
-## Composite Prediction Logic（2026-04-28 spec）
-
-```
-score = ELO_composite + Σ(factor_i × weight_i)
-  where ELO_composite = 0.7 × horse_elo + 0.2 × jockey_elo + 0.1 × trainer_elo
-
-  factors = {
-    recency:    ±15 (14-28d sweet spot)
-    distance:   ±20 (top-3 rate @ bucket)
-    going:      ±15
-    draw:       ±10 (venue × distance bias)
-    weight:     ±10 (delta from career avg)
-    condition:  ±15 (trackwork recency / quality)
-    injury:     -30 if active flag
-    jtCombo:    ±10 (jockey × trainer synergy)
-  }
+```bash
+wrangler secret put ADMIN_TOKEN     # 管理控制台 token
+wrangler secret put GITHUB_TOKEN    # GitHub PAT（repo + workflow 權限）
+wrangler secret put GITHUB_REPO     # 值：sleepingarhat/tianxi-database
 ```
 
-ELO snapshots 查詢用 `as_of_date < raceDate` 防止 look-ahead，但 cumulative stats on `horses.total_wins/total_starts` 係 live-updated → **小心 leakage**（見 Open issue）。
+> **注意**：`GITHUB_TOKEN` + `GITHUB_REPO` 未設定時，管理控制台所有自動化狀態顯示為「✗ 無自動」且無法觸發工作流。
 
-## Open issues
+## D1 資料庫
 
-### 🚨 Data leakage in `winRate` (2026-04-30 flagged)
-
-`src/routes/analyze.ts:468,542` 用 `h.total_wins / h.total_starts` 計 winRate。呢個 field 喺 `import-csv.ts` ingest 之後即時 recompute，**包含當日賽果**。即係 query 2026-04-29 一場嘅 top-picks 時，winRate 已經 include 咗該場結果 → 贏咗嘅馬被 leakage 抬高。
-
-**Fix 方向**：
-
-```ts
-// 改 query 為：
-(SELECT COUNT(*) FROM race_results rr2 JOIN races r2 ON r2.id=rr2.race_id
-  JOIN race_meetings rm2 ON rm2.id=r2.meeting_id
-  WHERE rr2.horse_id = rr.horse_id AND rm2.date < ?) AS wins_pre,
-(SELECT COUNT(*) FROM race_results rr3 JOIN races r3 ON r3.id=rr3.race_id
-  JOIN race_meetings rm3 ON rm3.id=r3.meeting_id
-  WHERE rr3.horse_id = rr.horse_id AND rm3.date < ?) AS starts_pre
-```
-
-### 其他 TODO
-
-- [ ] Pre-race AI batch (`tools/pre_race_ai_batch.py`): T-2h 將每場 `/top-picks` snapshot 寫入新 `predictions_history` table
-- [ ] Factor 2-6 implementation（目前 distance/going/draw/weight/condition/injury/jtCombo 部份 stub，只有 recency 全實裝）
-- [ ] `prefers-reduced-motion` bypass 測試（chat 嘅 streaming animation）
-
-## Changelog
-
-- `5788a65` (2026-04-30) · `push-delta.ts`：加 `--include` selector · 砍 BEGIN/COMMIT wrapper（D1 incompat fix） · `horseRefUnion` 合併 race + pool-a sources
-- `b525ec5` (2026-04-29) · init · Hono + D1 · routes 齊 · ELO v1.2 online
+- **綁定**：`DB`
+- **資料庫 ID**：`aad1636e-869a-43f5-aa95-4a19e3aa5517`
+- **Schema 檔案**：`src/db/schema.sql` + `schema_v2.sql` + 各擴充 SQL
