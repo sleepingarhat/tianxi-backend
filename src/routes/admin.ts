@@ -57,7 +57,7 @@ adminRoutes.get('/api/status', async (c) => {
     scalar<string>(db, `SELECT MAX(race_date) FROM entries_upcoming`),
     scalar<string>(db, `SELECT MAX(trackwork_date) FROM horse_trackwork`),
     scalar<string>(db, `SELECT MAX(as_of_date) FROM horse_elo_snapshots`),
-    scalar<string>(db, `SELECT MAX(captured_at) FROM odds_snapshots`),
+    scalar<string>(db, `SELECT MAX(snapshot_at) FROM odds_snapshots`),
   ]);
   return c.json({
     counts: { meetings: mc, races: rc, results: rsc, horses: hc, jockeys: jc, trainers: tc,
@@ -200,10 +200,10 @@ adminRoutes.get('/api/coverage', async (c) => {
     scalar<string>(db, `SELECT MAX(race_date) FROM entries_upcoming`),
     scalar<string>(db, `SELECT MAX(trackwork_date) FROM horse_trackwork`),
     scalar<string>(db, `SELECT MAX(as_of_date) FROM horse_elo_snapshots`),
-    scalar<string>(db, `SELECT MAX(captured_at) FROM odds_snapshots`),
+    scalar<string>(db, `SELECT MAX(snapshot_at) FROM odds_snapshots`),
     scalar<string>(db, `SELECT MAX(race_date) FROM race_results`),
     scalar<string>(db, `SELECT MAX(injury_date) FROM horse_injury`),
-    scalar<string>(db, `SELECT MAX(form_date) FROM horse_form_records`),
+    scalar<string>(db, `SELECT MAX(race_date) FROM horse_form_records`),
   ]);
 
   // Helper: format date or '—'
@@ -326,7 +326,7 @@ adminRoutes.get('/api/alerts', async (c) => {
   const now = new Date();
   const alerts: { level: 'red' | 'yellow'; msg: string }[] = [];
 
-  const oddsLatest = await scalar<string>(db, `SELECT MAX(captured_at) FROM odds_snapshots`);
+  const oddsLatest = await scalar<string>(db, `SELECT MAX(snapshot_at) FROM odds_snapshots`);
   const oddsCount = await scalar<number>(db, `SELECT COUNT(*) FROM odds_snapshots`);
   if (!oddsCount) alerts.push({ level: 'red', msg: '賠率表 odds_snapshots 完全冇資料' });
   else if (oddsLatest) {
