@@ -546,8 +546,12 @@ function renderPanel(token: string): string {
     return TOKEN ? path + sep + 'token=' + encodeURIComponent(TOKEN) : path;
   }
   async function json(path, opts = {}) {
-    const res = await fetch(apiPath(path), { ...opts, headers: { ...(opts.headers || {}), ...H } });
-    return await res.json();
+    try {
+      const res = await fetch(apiPath(path), { ...opts, headers: { ...(opts.headers || {}), ...H } });
+      const text = await res.text();
+      try { return JSON.parse(text); }
+      catch(e) { return { error: 'HTTP ' + res.status + ' (non-JSON): ' + text.slice(0, 300) }; }
+    } catch(e) { return { error: 'Fetch failed: ' + (e.message || e) }; }
   }
   function fmtNum(n) { return n == null ? '—' : Number(n).toLocaleString() }
   function fmtDate(s) { return s || '—' }
@@ -578,7 +582,7 @@ function renderPanel(token: string): string {
   async function loadCoverage() {
     const c = await json('/admin/api/coverage');
     const ds = document.querySelector('#coverDS tbody');
-    if (c.error) { ds.innerHTML = '<tr><td colspan="7" class="bad">' + c.error + '</td></tr>'; return; }
+    if (!c || c.error) { ds.innerHTML = '<tr><td colspan="7" class="bad">' + (c && c.error || '未知錯誤') + '</td></tr>'; document.querySelector('#coverFac tbody').innerHTML = '<tr><td colspan="7" class="bad">—</td></tr>'; return; }
     ds.innerHTML = c.datasets.map(d =>
       '<tr>' +
       '<td><strong>' + d.label + '</strong><div class="muted-cell">' + d.key + '</div></td>' +
@@ -607,7 +611,7 @@ function renderPanel(token: string): string {
 
   async function loadStatus() {
     const s = await json('/admin/api/status');
-    if (s.error) { document.getElementById('status').innerHTML = '<div class="tile bad">' + s.error + '</div>'; return; }
+    if (!s || s.error) { document.getElementById('status').innerHTML = '<div class="tile bad">' + (s && s.error || '未知錯誤') + '</div>'; return; }
     const el = document.getElementById('status');
     const tiles = [
       ['賽馬日', s.counts.meetings, s.dates.earliestMeeting + ' → ' + s.dates.latestMeeting, ''],
@@ -634,6 +638,7 @@ function renderPanel(token: string): string {
   async function loadGaps() {
     const g = await json('/admin/api/gaps');
     const tb = document.querySelector('#gaps tbody');
+    if (!g || g.error) { tb.innerHTML = '<tr><td colspan="2" class="bad">' + (g && g.error || '未知錯誤') + '</td></tr>'; return; }
     if (!g.suspectMonths || !g.suspectMonths.length) {
       tb.innerHTML = '<tr><td colspan="2" class="ok">✓ 所有月份正常</td></tr>';
     } else {
@@ -644,6 +649,7 @@ function renderPanel(token: string): string {
   async function loadAlerts() {
     const a = await json('/admin/api/alerts');
     const bar = document.getElementById('alertbar');
+    if (!a || a.error) { bar.innerHTML = '<div class="alert red">⚠ API 錯誤：' + (a && a.error || '未知') + '</div>'; return; }
     if (!a.alerts || !a.alerts.length) {
       bar.innerHTML = '<div class="alert ok">✓ 系統正常 · 無告警</div>'; return;
     }
@@ -655,7 +661,7 @@ function renderPanel(token: string): string {
   async function loadRuns() {
     const r = await json('/admin/api/runs?limit=20');
     const tb = document.querySelector('#runs tbody');
-    if (r.error) { tb.innerHTML = '<tr><td colspan="5" class="bad">' + r.error + '</td></tr>'; return; }
+    if (!r || r.error) { tb.innerHTML = '<tr><td colspan="5" class="bad">' + (r && r.error || '未知錯誤') + '</td></tr>'; return; }
     tb.innerHTML = r.runs.map(x => {
       const st = '<span class="pill ' + x.status + '">' + x.status + '</span>';
       const cc = x.conclusion ? '<span class="pill ' + x.conclusion + '">' + x.conclusion + '</span>' : '—';
@@ -686,6 +692,7 @@ function renderPanel(token: string): string {
   async function loadRecentMeetings() {
     const data = await json('/admin/api/meetings?limit=10');
     const tb = document.querySelector('#recentMeetings tbody');
+    if (!data || data.error) { tb.innerHTML = '<tr><td colspan="5" class="bad">' + (data && data.error || '未知錯誤') + '</td></tr>'; return; }
     if (!data.meetings || !data.meetings.length) {
       tb.innerHTML = '<tr><td colspan="5" class="warn">無賽事資料</td></tr>'; return;
     }
