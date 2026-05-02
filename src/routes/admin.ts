@@ -33,6 +33,11 @@ async function scalar<T = any>(db: D1Database, sql: string): Promise<T | null> {
   } catch { return null; }
 }
 
+// ── /api/ping — no DB, just proves Worker + auth is alive ──
+adminRoutes.get('/api/ping', (c) => {
+  return c.json({ ok: true, time: new Date().toISOString(), token: 'accepted' });
+});
+
 // ── /api/status ──────────────────────────────────────────────────────────
 adminRoutes.get('/api/status', async (c) => {
   const db = c.env.DB;
@@ -806,22 +811,47 @@ function renderPanel(token: string): string {
     }
   }
 
-  // ── 快速 ping 測試 ──
+  // ── 快速 ping 測試（10s timeout，不查 D1） ──
   (async function ping() {
     const el = document.getElementById('pingResult');
+    const url = apiPath('/admin/api/ping');
+    el.innerHTML = 'JS 已啟動 · 測試 <a href="' + url + '" target="_blank" style="color:inherit">/admin/api/ping</a>…';
+    const ctrl = new AbortController();
+    const tid = setTimeout(() => ctrl.abort(), 10000);
     try {
-      const res = await fetch(apiPath('/admin/api/status'));
+      const res = await fetch(url, { signal: ctrl.signal });
+      clearTimeout(tid);
       const text = await res.text();
       if (res.ok) {
-        el.textContent = '✓ API 連線正常 (HTTP ' + res.status + ') · TOKEN=' + (TOKEN ? TOKEN.slice(0,8) + '…' : '（空）');
-        el.style.display = 'none'; // hide if ok, already loading data
+        el.textContent = '✓ Worker 正常 (HTTP 200) · TOKEN=' + (TOKEN ? TOKEN.slice(0,8) + '…' : '（空）') + ' · ' + text.slice(0,60);
+        el.style.background = '#e8f5ec';
+        // Now test D1
+        el.textContent += ' · 測試 D1…';
+        try {
+          const ctrl2 = new AbortController();
+          const tid2 = setTimeout(() => ctrl2.abort(), 10000);
+          const r2 = await fetch(apiPath('/admin/api/status'), { signal: ctrl2.signal });
+          clearTimeout(tid2);
+          const t2 = await r2.text();
+          if (r2.ok) {
+            el.textContent = '✓ Worker + D1 正常 · 載入資料中…';
+            setTimeout(() => { if(el.style.display !== 'none') el.style.display = 'none'; }, 3000);
+          } else {
+            el.style.background = '#fdf0f2'; el.style.borderColor = '#c8102e'; el.style.color = '#7a0b1e';
+            el.textContent = '✓ Worker 正常，但 D1/status 失敗 HTTP ' + r2.status + '：' + t2.slice(0, 300);
+          }
+        } catch(e2) {
+          el.style.background = '#fff0c6'; el.style.borderColor = '#d9a40b'; el.style.color = '#6a4d05';
+          el.textContent = '✓ Worker 正常，但 D1 查詢逾時（10s）：' + (e2.message || e2) + ' — D1 資料庫可能未初始化';
+        }
       } else {
         el.style.background = '#fdf0f2'; el.style.borderColor = '#c8102e'; el.style.color = '#7a0b1e';
         el.textContent = '✗ API 回傳 HTTP ' + res.status + '：' + text.slice(0, 200);
       }
     } catch(e) {
+      clearTimeout(tid);
       el.style.background = '#fdf0f2'; el.style.borderColor = '#c8102e'; el.style.color = '#7a0b1e';
-      el.textContent = '✗ Fetch 失敗：' + (e.message || e);
+      el.textContent = '✗ ' + (e.name === 'AbortError' ? 'Worker 逾時 10s 無回應（Worker 可能 crash 或 CPU 超限）' : 'Fetch 失敗：' + (e.message || e));
     }
   })();
 
