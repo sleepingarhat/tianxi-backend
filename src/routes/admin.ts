@@ -420,14 +420,178 @@ adminRoutes.get('/api/meetings', async (c) => {
   return c.json({ meetings: results ?? [] });
 });
 
-// ── GET / — HTML dashboard (繁體) ──
-adminRoutes.get('/', (c) => {
+// ── GET / — HTML dashboard (SSR: all data fetched server-side) ──
+adminRoutes.get('/', async (c) => {
   c.header('Cache-Control', 'no-store, no-cache, must-revalidate');
   c.header('Pragma', 'no-cache');
-  return c.html(renderPanel(c.req.query('token') || ''));
+  const token = c.req.query('token') || '';
+  const data = await fetchAdminPageData(c.env);
+  return c.html(renderPanel(token, data));
 });
 
-function renderPanel(token: string): string {
+// ── Server-side data aggregation for admin panel ──────────────────────────
+async function fetchAdminPageData(env: AdminEnv): Promise<Record<string, any>> {
+  const db = env.DB;
+  // All D1 queries in one parallel batch
+  const [
+    mc, rc, rsc, hc, jc, tc, twc, ic, fc, ec, oc, heC, jeC, teC,
+    latestM, earliestM, latestE, latestTW, latestElo, latestO,
+    latestResult, latestInjury, latestForm,
+    oddsLatest, oddsCount, nextMeet, entLatest, meetLatest,
+  ] = await Promise.all([
+    scalar<number>(db, 'SELECT COUNT(*) FROM race_meetings'),
+    scalar<number>(db, 'SELECT COUNT(*) FROM races'),
+    scalar<number>(db, 'SELECT COUNT(*) FROM race_results'),
+    scalar<number>(db, 'SELECT COUNT(*) FROM horses'),
+    scalar<number>(db, 'SELECT COUNT(*) FROM jockeys'),
+    scalar<number>(db, 'SELECT COUNT(*) FROM trainers'),
+    scalar<number>(db, 'SELECT COUNT(*) FROM horse_trackwork'),
+    scalar<number>(db, 'SELECT COUNT(*) FROM horse_injury'),
+    scalar<number>(db, 'SELECT COUNT(*) FROM horse_form_records'),
+    scalar<number>(db, 'SELECT COUNT(*) FROM entries_upcoming'),
+    scalar<number>(db, 'SELECT COUNT(*) FROM odds_snapshots'),
+    scalar<number>(db, 'SELECT COUNT(*) FROM horse_elo_snapshots'),
+    scalar<number>(db, 'SELECT COUNT(*) FROM jockey_elo_snapshots'),
+    scalar<number>(db, 'SELECT COUNT(*) FROM trainer_elo_snapshots'),
+    scalar<string>(db, 'SELECT MAX(date) FROM race_meetings'),
+    scalar<string>(db, 'SELECT MIN(date) FROM race_meetings'),
+    scalar<string>(db, 'SELECT MAX(race_date) FROM entries_upcoming'),
+    scalar<string>(db, 'SELECT MAX(trackwork_date) FROM horse_trackwork'),
+    scalar<string>(db, 'SELECT MAX(as_of_date) FROM horse_elo_snapshots'),
+    scalar<string>(db, 'SELECT MAX(snapshot_at) FROM odds_snapshots'),
+    scalar<string>(db, 'SELECT MAX(race_date) FROM race_results'),
+    scalar<string>(db, 'SELECT MAX(injury_date) FROM horse_injury'),
+    scalar<string>(db, 'SELECT MAX(race_date) FROM horse_form_records'),
+    scalar<string>(db, 'SELECT MAX(snapshot_at) FROM odds_snapshots'),
+    scalar<number>(db, 'SELECT COUNT(*) FROM odds_snapshots'),
+    scalar<string>(db, "SELECT MIN(date) FROM race_meetings WHERE date >= date('now','localtime')"),
+    scalar<string>(db, 'SELECT MAX(race_date) FROM entries_upcoming'),
+    scalar<string>(db, 'SELECT MAX(date) FROM race_meetings'),
+  ]);
+
+  const runs = await fetchRuns(env, 150);
+  const wf = buildWorkflowMap(runs);
+  const fd = (s: string | null) => s || '—';
+
+  // Coverage datasets
+  const datasets = [
+    { key: 'meetings', label: '賽馬日', history: assessHistory(mc, latestM, 880, 14),
+      ...rowAuto(wf, ['capy_race_daily.yml', 'Capy Race Day — RacingData Results', 'capy_d1_sync.yml']),
+      workflows: ['capy_race_daily', 'capy_d1_sync'], detail: `${mc} 場 · 最新 ${fd(latestM)}` },
+    { key: 'races', label: '場次', history: assessHistory(rc, latestM, 8000, 14),
+      ...rowAuto(wf, ['capy_race_daily.yml', 'Capy Race Day — RacingData Results']),
+      workflows: ['capy_race_daily'], detail: `${rc} 場次` },
+    { key: 'results', label: '賽果', history: assessHistory(rsc, latestResult, 95000, 14),
+      ...rowAuto(wf, ['capy_race_daily.yml', 'Capy Race Day — RacingData Results', 'capy_d1_sync.yml']),
+      workflows: ['capy_race_daily', 'capy_d1_sync'], detail: `${rsc} 行 · 最新 ${fd(latestResult)}` },
+    { key: 'horses', label: '馬匹', history: assessHistory(hc, null, 5000, 365),
+      ...rowAuto(wf, ['capy_race_daily.yml', 'capy_pool_a.yml']),
+      workflows: ['capy_race_daily', 'capy_pool_a'], detail: `${hc} 匹` },
+    { key: 'jockeys', label: '騎師', history: assessHistory(jc, null, 150, 365),
+      ...rowAuto(wf, ['capy_race_daily.yml']),
+      workflows: ['capy_race_daily'], detail: `${jc} 位` },
+    { key: 'trainers', label: '練馬師', history: assessHistory(tc, null, 150, 365),
+      ...rowAuto(wf, ['capy_race_daily.yml']),
+      workflows: ['capy_race_daily'], detail: `${tc} 位` },
+    { key: 'trackwork', label: '晨操', history: assessHistory(twc, latestTW, 5000, 3),
+      ...rowAuto(wf, ['capy_pool_a.yml', 'capy_d1_sync_pool_a.yml', 'Capy Pool A — Horse Profiles + Trackwork + Injury', 'Capy D1 Sync Pool A — trackwork + injury + form']),
+      workflows: ['capy_pool_a', 'capy_d1_sync_pool_a'], detail: `${twc} 行 · 最新 ${fd(latestTW)}` },
+    { key: 'injury', label: '傷患', history: assessHistory(ic, latestInjury, 1200, 30),
+      ...rowAuto(wf, ['capy_pool_a.yml', 'capy_d1_sync_pool_a.yml', 'Capy Pool A — Horse Profiles + Trackwork + Injury']),
+      workflows: ['capy_pool_a', 'capy_d1_sync_pool_a'], detail: `${ic} 行 · 最新 ${fd(latestInjury)}` },
+    { key: 'form', label: '往績', history: assessHistory(fc, latestForm, 180000, 30),
+      ...rowAuto(wf, ['capy_race_daily.yml', 'capy_pool_a.yml', 'capy_d1_sync_pool_a.yml']),
+      workflows: ['capy_race_daily', 'capy_pool_a'], detail: `${fc} 行 · 最新 ${fd(latestForm)}` },
+    { key: 'entries', label: '排位表', history: assessHistory(ec, latestE, 50, 2),
+      ...rowAuto(wf, ['capy_entries.yml', 'capy_d1_sync_entries.yml', 'Capy Entries — Race Card (排位表)', 'Capy D1 Sync Entries — forward-looking racecards']),
+      workflows: ['capy_entries', 'capy_d1_sync_entries'], detail: `${ec} 行 · 最新 ${fd(latestE)}` },
+    { key: 'odds', label: '賠率', history: assessHistory(oc, latestO, 1000, 1),
+      ...rowAuto(wf, ['capy_odds.yml', 'Capy Odds — live snapshot (hkjc-api GraphQL)']),
+      workflows: ['capy_odds'], detail: `${oc} 行 · 最新 ${fd(latestO)}` },
+    { key: 'horseElo', label: '馬匹 ELO', history: assessHistory(heC, latestElo, 75000, 7),
+      ...rowAuto(wf, ['ELO Post-Race Auto-Update', 'elo-post-race.yml', 'capy_race_daily.yml']),
+      workflows: ['ELO Post-Race Auto-Update'], detail: `${heC} snapshots · 最新 ${fd(latestElo)}` },
+    { key: 'jockeyElo', label: '騎師 ELO', history: assessHistory(jeC, latestElo, 45000, 7),
+      ...rowAuto(wf, ['ELO Post-Race Auto-Update', 'elo-post-race.yml']),
+      workflows: ['ELO Post-Race Auto-Update'], detail: `${jeC} snapshots` },
+    { key: 'trainerElo', label: '練馬師 ELO', history: assessHistory(teC, latestElo, 45000, 7),
+      ...rowAuto(wf, ['ELO Post-Race Auto-Update', 'elo-post-race.yml']),
+      workflows: ['ELO Post-Race Auto-Update'], detail: `${teC} snapshots` },
+  ];
+  function minOf(...s: Status[]): Status {
+    if (s.includes('bad')) return 'bad'; if (s.includes('warn')) return 'warn'; return 'ok';
+  }
+  function getDs(key: string) { return datasets.find(d => d.key === key) || datasets[0]; }
+  const factors = [
+    { key: 'horse_elo', label: '馬匹 ELO', used: true, weight: 0.7, history: getDs('horseElo').history, auto: getDs('horseElo').auto, sourceLabel: 'horse_elo_snapshots', note: '使用中（composite baseline）' },
+    { key: 'jockey_elo', label: '騎師 ELO', used: true, weight: 0.2, history: getDs('jockeyElo').history, auto: getDs('jockeyElo').auto, sourceLabel: 'jockey_elo_snapshots', note: '使用中' },
+    { key: 'trainer_elo', label: '練馬師 ELO', used: true, weight: 0.1, history: getDs('trainerElo').history, auto: getDs('trainerElo').auto, sourceLabel: 'trainer_elo_snapshots', note: '使用中' },
+    { key: 'recency', label: '近戰狀態', used: true, weight: null, history: minOf(getDs('races').history, getDs('results').history), auto: getDs('results').auto, sourceLabel: 'races + race_results', note: '使用中（days since last race sweet spot 14-28）' },
+    { key: 'distance_fit', label: '途程適應', used: false, weight: 0, history: getDs('results').history, auto: getDs('results').auto, sourceLabel: 'race_results × distance', note: 'stub 0 · 未寫入 analyze.ts' },
+    { key: 'going_fit', label: '場地適應', used: false, weight: 0, history: getDs('results').history, auto: getDs('results').auto, sourceLabel: 'race_results × going', note: 'stub 0' },
+    { key: 'draw_bias', label: '檔位偏差', used: false, weight: 0, history: getDs('results').history, auto: getDs('results').auto, sourceLabel: 'race_results × venue × distance × draw', note: 'stub 0' },
+    { key: 'weight_delta', label: '負磅變化', used: false, weight: 0, history: getDs('results').history, auto: getDs('results').auto, sourceLabel: 'race_results.horse_weight', note: 'stub 0' },
+    { key: 'trackwork_fit', label: '晨操狀態', used: false, weight: 0, history: getDs('trackwork').history, auto: getDs('trackwork').auto, sourceLabel: 'horse_trackwork', note: 'stub 0 · 資料本身亦未齊' },
+    { key: 'injury', label: '傷患', used: false, weight: 0, history: getDs('injury').history, auto: getDs('injury').auto, sourceLabel: 'horse_injury', note: 'stub 0' },
+    { key: 'jt_combo', label: '騎練配對', used: false, weight: 0, history: minOf(getDs('races').history, getDs('jockeys').history, getDs('trainers').history), auto: getDs('races').auto, sourceLabel: 'races × jockeys × trainers', note: 'stub 0' },
+  ];
+
+  // Alerts
+  const now = new Date();
+  const alerts: { level: string; msg: string }[] = [];
+  if (!oddsCount) alerts.push({ level: 'red', msg: '賠率表 odds_snapshots 完全冇資料' });
+  else if (oddsLatest) {
+    const hrs = (now.getTime() - new Date(oddsLatest).getTime()) / 3600000;
+    if (hrs > 6) alerts.push({ level: 'red', msg: `賠率已停更新 ${hrs.toFixed(1)} 小時` });
+  }
+  if (latestTW) {
+    const days = Math.floor((now.getTime() - new Date(latestTW).getTime()) / 86400000);
+    if (days > 3) alerts.push({ level: 'yellow', msg: `晨操資料落後 ${days} 日（最新：${latestTW}）` });
+  } else alerts.push({ level: 'yellow', msg: '晨操資料完全冇' });
+  if (nextMeet && (!entLatest || entLatest < nextMeet)) {
+    alerts.push({ level: 'yellow', msg: `排位表未同步（最新 ${entLatest || '—'} · 下場 ${nextMeet}）` });
+  }
+  if (meetLatest) {
+    const days = Math.floor((now.getTime() - new Date(meetLatest).getTime()) / 86400000);
+    if (days > 14) alerts.push({ level: 'red', msg: `賽馬日已 ${days} 日冇更新（${meetLatest}）` });
+  }
+  const cutoff = now.getTime() - 3 * 3600000;
+  for (const f of runs.filter((x: any) => x.conclusion === 'failure' && new Date(x.updated_at).getTime() > cutoff).slice(0, 3)) {
+    alerts.push({ level: 'red', msg: `工作流失敗：${f.name}（#${f.id}）` });
+  }
+
+  // Meetings
+  const { results: meetRows } = await db.prepare(`
+    SELECT m.id, m.date, m.venue, m.track_condition, m.total_races, COUNT(r.id) AS race_count
+    FROM race_meetings m LEFT JOIN races r ON r.meeting_id = m.id
+    GROUP BY m.id ORDER BY m.date DESC LIMIT 10
+  `).all().catch(() => ({ results: [] as any[] }));
+
+  // Gap months
+  const { results: gapRows } = await db.prepare(`
+    SELECT substr(date,1,7) AS ym, COUNT(*) AS n FROM race_meetings
+    GROUP BY ym HAVING n < 5 AND substr(ym,6,2) NOT IN ('06','07','08')
+      AND ym < strftime('%Y-%m','now') ORDER BY ym
+  `).all().catch(() => ({ results: [] as any[] }));
+
+  return {
+    coverage: { datasets, factors },
+    status: {
+      counts: { meetings: mc, races: rc, results: rsc, horses: hc, jockeys: jc, trainers: tc,
+        trackwork: twc, injury: ic, form: fc, entries: ec, odds: oc,
+        horseElo: heC, jockeyElo: jeC, trainerElo: teC },
+      dates: { earliestMeeting: earliestM, latestMeeting: latestM,
+        latestEntry: latestE, latestTrackwork: latestTW, latestElo, latestOdds: latestO },
+      serverTime: now.toISOString(),
+    },
+    alerts: { alerts },
+    runs: { runs: runs.slice(0, 20).map((r: any) => ({ id: r.id, name: r.name, status: r.status, conclusion: r.conclusion, updatedAt: r.updated_at, htmlUrl: r.html_url })) },
+    meetings: { meetings: meetRows ?? [] },
+    gaps: { suspectMonths: gapRows ?? [] },
+  };
+}
+
+function renderPanel(token: string, preloaded: Record<string, any>): string {
   return `<!doctype html>
 <html lang="zh-Hant"><head><meta charset="utf-8"><title>天喜 · 內部控制台</title>
 <style>
@@ -484,35 +648,25 @@ function renderPanel(token: string): string {
 </style></head>
 <body>
   <h1>天喜 · 內部控制台 <span class="pulse" title="實時監控"></span></h1>
-  <div class="bar">內部運營監控 · 每 30 秒自動刷新<span class="refresh" id="refreshClock">初始化中…</span></div>
+  <div class="bar">伺服器端渲染 · 每 60 秒自動刷新<span class="refresh" id="refreshClock"></span></div>
 
-  <!-- 診斷框 — 有錯誤時才顯示 -->
-  <div id="diagBox" style="display:none;background:#fdf0f2;border:2px solid #c8102e;border-radius:4px;padding:10px 14px;margin-bottom:14px;font-size:12px">
-    <strong style="color:#c8102e">⚠ 診斷資訊</strong>
-    <pre id="diagMsg" style="margin:6px 0 0;white-space:pre-wrap;color:#333"></pre>
-  </div>
-  <!-- 快速 API 測試 — 確認 JS + fetch 正常運作 -->
-  <div id="pingResult" style="background:#e8f5ec;border:1px solid #18a355;border-radius:4px;padding:6px 12px;margin-bottom:10px;font-size:12px;color:#186e2e">
-    JS 已啟動，測試 API 連線中…
-  </div>
-
-  <div id="alertbar"><div class="alert ok">讀取告警中…</div></div>
+  <div id="alertbar"></div>
 
   <h2>資料來源覆蓋（14 個核心表）</h2>
   <table id="coverDS"><thead><tr>
     <th>資料源</th><th>歷史齊全</th><th>自動更新</th><th>最新運行</th><th>最後成功</th><th>數量 / 最新</th><th>負責工作流</th>
-  </tr></thead><tbody><tr><td colspan="7">載入中…</td></tr></tbody></table>
+  </tr></thead><tbody></tbody></table>
 
   <h2>預測因子覆蓋（11 個因子）</h2>
   <table id="coverFac"><thead><tr>
     <th>因子</th><th>目前使用</th><th>權重</th><th>歷史齊全</th><th>自動更新</th><th>資料來源</th><th>備註</th>
-  </tr></thead><tbody><tr><td colspan="7">載入中…</td></tr></tbody></table>
+  </tr></thead><tbody></tbody></table>
 
   <h2>D1 即時計數</h2>
-  <div id="status" class="grid">載入中…</div>
+  <div id="status" class="grid"></div>
 
   <h2>可疑月份（香港賽季內但場次不足 5 場）</h2>
-  <table id="gaps"><thead><tr><th>年-月</th><th>場次</th></tr></thead><tbody><tr><td colspan="2">載入中…</td></tr></tbody></table>
+  <table id="gaps"><thead><tr><th>年-月</th><th>場次</th></tr></thead><tbody></tbody></table>
 
   <h2>觸發工作流</h2>
   <div class="actions-row">
@@ -534,12 +688,12 @@ function renderPanel(token: string): string {
   <div id="dispatchLog" class="log" style="display:none"></div>
 
   <h2>最近工作流運行</h2>
-  <table id="runs"><thead><tr><th>ID</th><th>名稱</th><th>狀態</th><th>結果</th><th>更新時間</th></tr></thead><tbody><tr><td colspan="5">載入中…</td></tr></tbody></table>
+  <table id="runs"><thead><tr><th>ID</th><th>名稱</th><th>狀態</th><th>結果</th><th>更新時間</th></tr></thead><tbody></tbody></table>
 
   <h2>最近賽事</h2>
   <table id="recentMeetings"><thead><tr>
     <th>日期</th><th>場地</th><th>場地狀況</th><th>場數</th><th>操作</th>
-  </tr></thead><tbody><tr><td colspan="5">載入中…</td></tr></tbody></table>
+  </tr></thead><tbody></tbody></table>
 
   <h2>即時預測工具</h2>
   <div class="actions-row">
@@ -555,33 +709,10 @@ function renderPanel(token: string): string {
     <th>綜合ELO</th><th>調整</th><th>最終分</th><th>勝率</th><th>前三</th><th>賠率</th>
   </tr></thead><tbody></tbody></table>
 
-
 <script>
-  // ── 診斷：捕捉所有未處理的 JS 錯誤 ──
-  window.onerror = function(msg, src, line, col, err) {
-    document.getElementById('diagBox').style.display = 'block';
-    document.getElementById('diagMsg').textContent = 'JS 錯誤 [' + line + ':' + col + '] ' + msg + (err ? '\\n' + err.stack : '');
-    return false;
-  };
-  window.onunhandledrejection = function(e) {
-    document.getElementById('diagBox').style.display = 'block';
-    document.getElementById('diagMsg').textContent += '\\nUnhandled rejection: ' + (e.reason && (e.reason.message || e.reason));
-  };
-
+  // ── 伺服器端預載資料 (SSR) — 無需任何 fetch 呼叫 ──
+  const D = ${JSON.stringify(preloaded)};
   const TOKEN = ${JSON.stringify(token)};
-  const H = { 'Authorization': 'Bearer ' + TOKEN };
-  function apiPath(path) {
-    const sep = path.includes('?') ? '&' : '?';
-    return TOKEN ? path + sep + 'token=' + encodeURIComponent(TOKEN) : path;
-  }
-  async function json(path, opts = {}) {
-    try {
-      const res = await fetch(apiPath(path), { ...opts, headers: { ...(opts.headers || {}), ...H } });
-      const text = await res.text();
-      try { return JSON.parse(text); }
-      catch(e) { return { error: 'HTTP ' + res.status + ' (non-JSON): ' + text.slice(0, 300) }; }
-    } catch(e) { return { error: 'Fetch failed: ' + (e.message || e) }; }
-  }
   function fmtNum(n) { return n == null ? '—' : Number(n).toLocaleString() }
   function fmtDate(s) { return s || '—' }
 
@@ -608,11 +739,12 @@ function renderPanel(token: string): string {
       (level === 'ok' ? '✓' : level === 'warn' ? '▲' : '✗') + '</span>' + label + suffix + '</span>';
   }
 
-  async function loadCoverage() {
-    const c = await json('/admin/api/coverage');
+  // ── SSR render functions (read from D, no fetch needed) ──
+  function renderCoverage() {
+    const c = D.coverage || {};
     const ds = document.querySelector('#coverDS tbody');
-    if (!c || c.error) { ds.innerHTML = '<tr><td colspan="7" class="bad">' + (c && c.error || '未知錯誤') + '</td></tr>'; document.querySelector('#coverFac tbody').innerHTML = '<tr><td colspan="7" class="bad">—</td></tr>'; return; }
-    ds.innerHTML = c.datasets.map(d =>
+    if (!c.datasets) { ds.innerHTML = '<tr><td colspan="7" class="bad">資料載入失敗</td></tr>'; return; }
+    ds.innerHTML = (c.datasets || []).map(d =>
       '<tr>' +
       '<td><strong>' + d.label + '</strong><div class="muted-cell">' + d.key + '</div></td>' +
       '<td>' + chip(d.history, '歷史齊全 ✓', '部分歷史 ▲', '未達標 ✗') + '</td>' +
@@ -623,9 +755,8 @@ function renderPanel(token: string): string {
       '<td class="muted-cell">' + (d.workflows || []).join(' · ') + '</td>' +
       '</tr>'
     ).join('');
-
     const fc = document.querySelector('#coverFac tbody');
-    fc.innerHTML = c.factors.map(f =>
+    fc.innerHTML = (c.factors || []).map(f =>
       '<tr>' +
       '<td><strong>' + f.label + '</strong><div class="muted-cell">' + f.key + '</div></td>' +
       '<td>' + (f.used ? '<span class="used-yes">使用中</span>' : '<span class="used-no">stub（未啟用）</span>') + '</td>' +
@@ -638,12 +769,12 @@ function renderPanel(token: string): string {
     ).join('');
   }
 
-  async function loadStatus() {
-    const s = await json('/admin/api/status');
-    if (!s || s.error) { document.getElementById('status').innerHTML = '<div class="tile bad">' + (s && s.error || '未知錯誤') + '</div>'; return; }
+  function renderStatus() {
+    const s = D.status || {};
     const el = document.getElementById('status');
+    if (!s.counts) { el.innerHTML = '<div class="tile bad">資料載入失敗</div>'; return; }
     const tiles = [
-      ['賽馬日', s.counts.meetings, s.dates.earliestMeeting + ' → ' + s.dates.latestMeeting, ''],
+      ['賽馬日', s.counts.meetings, (s.dates.earliestMeeting||'?') + ' → ' + (s.dates.latestMeeting||'?'), ''],
       ['場次', s.counts.races, '', ''],
       ['賽果', s.counts.results, '', ''],
       ['馬匹', s.counts.horses, '', ''],
@@ -664,10 +795,9 @@ function renderPanel(token: string): string {
       (sub ? '<div class="sub">' + sub + '</div>' : '') + '</div>').join('');
   }
 
-  async function loadGaps() {
-    const g = await json('/admin/api/gaps');
+  function renderGaps() {
+    const g = D.gaps || {};
     const tb = document.querySelector('#gaps tbody');
-    if (!g || g.error) { tb.innerHTML = '<tr><td colspan="2" class="bad">' + (g && g.error || '未知錯誤') + '</td></tr>'; return; }
     if (!g.suspectMonths || !g.suspectMonths.length) {
       tb.innerHTML = '<tr><td colspan="2" class="ok">✓ 所有月份正常</td></tr>';
     } else {
@@ -675,10 +805,9 @@ function renderPanel(token: string): string {
     }
   }
 
-  async function loadAlerts() {
-    const a = await json('/admin/api/alerts');
+  function renderAlerts() {
+    const a = D.alerts || {};
     const bar = document.getElementById('alertbar');
-    if (!a || a.error) { bar.innerHTML = '<div class="alert red">⚠ API 錯誤：' + (a && a.error || '未知') + '</div>'; return; }
     if (!a.alerts || !a.alerts.length) {
       bar.innerHTML = '<div class="alert ok">✓ 系統正常 · 無告警</div>'; return;
     }
@@ -687,10 +816,10 @@ function renderPanel(token: string): string {
     ).join('');
   }
 
-  async function loadRuns() {
-    const r = await json('/admin/api/runs?limit=20');
+  function renderRuns() {
+    const r = D.runs || {};
     const tb = document.querySelector('#runs tbody');
-    if (!r || r.error) { tb.innerHTML = '<tr><td colspan="5" class="bad">' + (r && r.error || '未知錯誤') + '</td></tr>'; return; }
+    if (!r.runs || !r.runs.length) { tb.innerHTML = '<tr><td colspan="5" class="warn">無運行記錄</td></tr>'; return; }
     tb.innerHTML = r.runs.map(x => {
       const st = '<span class="pill ' + x.status + '">' + x.status + '</span>';
       const cc = x.conclusion ? '<span class="pill ' + x.conclusion + '">' + x.conclusion + '</span>' : '—';
@@ -700,28 +829,9 @@ function renderPanel(token: string): string {
     }).join('');
   }
 
-  async function dispatch() {
-    const wf = document.getElementById('wf').value;
-    const inputsRaw = document.getElementById('inputs').value.trim();
-    let inputs = {};
-    if (inputsRaw) { try { inputs = JSON.parse(inputsRaw); } catch (e) { alert('inputs JSON 格式錯誤'); return; } }
-    const logEl = document.getElementById('dispatchLog');
-    logEl.style.display = 'block';
-    logEl.textContent = 'POST /admin/api/dispatch ' + wf + '\\n' + JSON.stringify(inputs, null, 2) + '\\n\\n';
-    const res = await json('/admin/api/dispatch', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ workflow: wf, inputs }),
-    });
-    logEl.textContent += JSON.stringify(res, null, 2);
-    setTimeout(() => { loadRuns(); loadAlerts(); loadCoverage(); }, 2500);
-  }
-
-
-  // ── Recent meetings ──────────────────────────────────────────
-  async function loadRecentMeetings() {
-    const data = await json('/admin/api/meetings?limit=10');
+  function renderMeetings() {
+    const data = D.meetings || {};
     const tb = document.querySelector('#recentMeetings tbody');
-    if (!data || data.error) { tb.innerHTML = '<tr><td colspan="5" class="bad">' + (data && data.error || '未知錯誤') + '</td></tr>'; return; }
     if (!data.meetings || !data.meetings.length) {
       tb.innerHTML = '<tr><td colspan="5" class="warn">無賽事資料</td></tr>'; return;
     }
@@ -735,6 +845,26 @@ function renderPanel(token: string): string {
         '<td><button class="ghost" style="font-size:11px;padding:3px 8px" onclick="loadRacesForPredict(\'' + (m.id||'').replace(/'/g,'') + '\',\'' + (m.date||'') + '\',' + (m.race_count||0) + ')">預測此日</button></td>' +
         '</tr>';
     }).join('');
+  }
+
+  async function dispatch() {
+    const wf = document.getElementById('wf').value;
+    const inputsRaw = document.getElementById('inputs').value.trim();
+    let inputs = {};
+    if (inputsRaw) { try { inputs = JSON.parse(inputsRaw); } catch (e) { alert('inputs JSON 格式錯誤'); return; } }
+    const logEl = document.getElementById('dispatchLog');
+    logEl.style.display = 'block';
+    logEl.textContent = 'POST /admin/api/dispatch ' + wf + '\\n' + JSON.stringify(inputs, null, 2) + '\\n\\n';
+    const sep = '/admin/api/dispatch'.includes('?') ? '&' : '?';
+    const url = '/admin/api/dispatch' + sep + 'token=' + encodeURIComponent(TOKEN);
+    try {
+      const res = await fetch(url, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + TOKEN },
+        body: JSON.stringify({ workflow: wf, inputs }),
+      });
+      const text = await res.text();
+      logEl.textContent += text;
+    } catch(e) { logEl.textContent += '\\nFetch 失敗：' + e.message; }
   }
 
   async function loadRacesForPredict(meetingId, date, raceCount) {
@@ -811,58 +941,16 @@ function renderPanel(token: string): string {
     }
   }
 
-  // ── 快速 ping 測試（10s timeout，不查 D1） ──
-  (async function ping() {
-    const el = document.getElementById('pingResult');
-    const url = apiPath('/admin/api/ping');
-    el.innerHTML = 'JS 已啟動 · 測試 <a href="' + url + '" target="_blank" style="color:inherit">/admin/api/ping</a>…';
-    const ctrl = new AbortController();
-    const tid = setTimeout(() => ctrl.abort(), 10000);
-    try {
-      const res = await fetch(url, { signal: ctrl.signal });
-      clearTimeout(tid);
-      const text = await res.text();
-      if (res.ok) {
-        el.textContent = '✓ Worker 正常 (HTTP 200) · TOKEN=' + (TOKEN ? TOKEN.slice(0,8) + '…' : '（空）') + ' · ' + text.slice(0,60);
-        el.style.background = '#e8f5ec';
-        // Now test D1
-        el.textContent += ' · 測試 D1…';
-        try {
-          const ctrl2 = new AbortController();
-          const tid2 = setTimeout(() => ctrl2.abort(), 10000);
-          const r2 = await fetch(apiPath('/admin/api/status'), { signal: ctrl2.signal });
-          clearTimeout(tid2);
-          const t2 = await r2.text();
-          if (r2.ok) {
-            el.textContent = '✓ Worker + D1 正常 · 載入資料中…';
-            setTimeout(() => { if(el.style.display !== 'none') el.style.display = 'none'; }, 3000);
-          } else {
-            el.style.background = '#fdf0f2'; el.style.borderColor = '#c8102e'; el.style.color = '#7a0b1e';
-            el.textContent = '✓ Worker 正常，但 D1/status 失敗 HTTP ' + r2.status + '：' + t2.slice(0, 300);
-          }
-        } catch(e2) {
-          el.style.background = '#fff0c6'; el.style.borderColor = '#d9a40b'; el.style.color = '#6a4d05';
-          el.textContent = '✓ Worker 正常，但 D1 查詢逾時（10s）：' + (e2.message || e2) + ' — D1 資料庫可能未初始化';
-        }
-      } else {
-        el.style.background = '#fdf0f2'; el.style.borderColor = '#c8102e'; el.style.color = '#7a0b1e';
-        el.textContent = '✗ API 回傳 HTTP ' + res.status + '：' + text.slice(0, 200);
-      }
-    } catch(e) {
-      clearTimeout(tid);
-      el.style.background = '#fdf0f2'; el.style.borderColor = '#c8102e'; el.style.color = '#7a0b1e';
-      el.textContent = '✗ ' + (e.name === 'AbortError' ? 'Worker 逾時 10s 無回應（Worker 可能 crash 或 CPU 超限）' : 'Fetch 失敗：' + (e.message || e));
-    }
-  })();
-
-  async function refreshAll() {
-    await Promise.allSettled([
-      loadAlerts(), loadCoverage(), loadStatus(), loadGaps(), loadRuns(), loadRecentMeetings()
-    ]);
-    document.getElementById('refreshClock').textContent = '最近刷新：' + new Date().toLocaleTimeString('zh-HK');
-  }
-  refreshAll();
-  setInterval(refreshAll, 30000);
+  // ── 初始化：直接渲染伺服器端數據，無需 fetch ──
+  renderAlerts();
+  renderCoverage();
+  renderStatus();
+  renderGaps();
+  renderRuns();
+  renderMeetings();
+  document.getElementById('refreshClock').textContent = '載入時間：' + new Date().toLocaleTimeString('zh-HK') + ' · 每 60 秒自動刷新';
+  // Auto-reload page every 60s for fresh data
+  setTimeout(() => window.location.reload(), 60000);
 </script>
 </body></html>`;
 }
