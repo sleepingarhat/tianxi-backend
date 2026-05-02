@@ -396,6 +396,23 @@ adminRoutes.get('/api/runs', async (c) => {
   });
 });
 
+
+// ── /api/meetings — recent meetings for admin panel ──────────────────────
+adminRoutes.get('/api/meetings', async (c) => {
+  const limit = Math.min(Number(c.req.query('limit') || '10'), 30);
+  const { results } = await c.env.DB.prepare(`
+    SELECT m.id, m.date, m.venue, m.track_condition, m.total_races,
+           COUNT(r.id) AS race_count,
+           SUM(CASE WHEN r.id IS NOT NULL THEN 1 ELSE 0 END) AS has_races
+    FROM race_meetings m
+    LEFT JOIN races r ON r.meeting_id = m.id
+    GROUP BY m.id
+    ORDER BY m.date DESC
+    LIMIT ?
+  `).bind(limit).all();
+  return c.json({ meetings: results ?? [] });
+});
+
 // ── GET / — HTML dashboard (繁體) ──
 adminRoutes.get('/', (c) => c.html(renderPanel(c.req.query('token') || '')));
 
@@ -460,7 +477,7 @@ function renderPanel(token: string): string {
 
   <div id="alertbar"><div class="alert ok">讀取告警中…</div></div>
 
-  <h2>資料來源覆蓋（11 個核心表）</h2>
+  <h2>資料來源覆蓋（14 個核心表）</h2>
   <table id="coverDS"><thead><tr>
     <th>資料源</th><th>歷史齊全</th><th>自動更新</th><th>最新運行</th><th>最後成功</th><th>數量 / 最新</th><th>負責工作流</th>
   </tr></thead><tbody><tr><td colspan="7">載入中…</td></tr></tbody></table>
@@ -497,6 +514,26 @@ function renderPanel(token: string): string {
 
   <h2>最近工作流運行</h2>
   <table id="runs"><thead><tr><th>ID</th><th>名稱</th><th>狀態</th><th>結果</th><th>更新時間</th></tr></thead><tbody><tr><td colspan="5">載入中…</td></tr></tbody></table>
+
+  <h2>最近賽事</h2>
+  <table id="recentMeetings"><thead><tr>
+    <th>日期</th><th>場地</th><th>場地狀況</th><th>場數</th><th>操作</th>
+  </tr></thead><tbody><tr><td colspan="5">載入中…</td></tr></tbody></table>
+
+  <h2>即時預測工具</h2>
+  <div class="actions-row">
+    <select id="predictRaceId" style="min-width:320px">
+      <option value="">← 先從「最近賽事」選一場賽事</option>
+    </select>
+    <button onclick="runPredict()">運算預測</button>
+    <span id="predictStatus" style="font-size:12px;color:var(--mut)"></span>
+  </div>
+  <table id="predictTable" style="display:none"><thead><tr>
+    <th>排名</th><th>馬號</th><th>馬名</th><th>騎師 / 練馬師</th>
+    <th>馬匹ELO</th><th>騎師ELO</th><th>練馬師ELO</th>
+    <th>綜合ELO</th><th>調整</th><th>最終分</th><th>勝率</th><th>前三</th><th>賠率</th>
+  </tr></thead><tbody></tbody></table>
+
 
 <script>
   const TOKEN = ${JSON.stringify(token)};
@@ -637,8 +674,98 @@ function renderPanel(token: string): string {
     setTimeout(() => { loadRuns(); loadAlerts(); loadCoverage(); }, 2500);
   }
 
+
+  // ── Recent meetings ──────────────────────────────────────────
+  async function loadRecentMeetings() {
+    const data = await json('/admin/api/meetings?limit=10');
+    const tb = document.querySelector('#recentMeetings tbody');
+    if (!data.meetings || !data.meetings.length) {
+      tb.innerHTML = '<tr><td colspan="5" class="warn">無賽事資料</td></tr>'; return;
+    }
+    tb.innerHTML = data.meetings.map(m => {
+      const venue = m.venue === 'ST' ? '沙田' : m.venue === 'HV' ? '跑馬地' : (m.venue || '—');
+      return '<tr>' +
+        '<td><strong>' + (m.date || '—') + '</strong></td>' +
+        '<td>' + venue + '</td>' +
+        '<td class="muted-cell">' + (m.track_condition || '—') + '</td>' +
+        '<td>' + (m.race_count || 0) + ' 場</td>' +
+        '<td><button class="ghost" style="font-size:11px;padding:3px 8px" onclick="loadRacesForPredict(' + JSON.stringify(m.id) + ',' + JSON.stringify(m.date) + ',' + JSON.stringify(m.race_count) + ')">預測此日</button></td>' +
+        '</tr>';
+    }).join('');
+  }
+
+  async function loadRacesForPredict(meetingId, date, raceCount) {
+    const sel = document.getElementById('predictRaceId');
+    sel.innerHTML = '<option value="">載入中…</option>';
+    document.getElementById('predictStatus').textContent = '';
+    // Build race IDs: race_DATE_VENUE_N format
+    // Fetch via /api/meetings/:date
+    try {
+      const res = await fetch('/api/meetings/' + date);
+      const data = await res.json();
+      const races = data.races || [];
+      if (!races.length) {
+        sel.innerHTML = '<option value="">此日無場次資料</option>'; return;
+      }
+      sel.innerHTML = races.map(r =>
+        '<option value="' + r.id + '">第' + r.race_number + '場 · ' + (r.title || '') + ' · ' + (r.distance || '') + 'm · ' + (r.class || '') + '</option>'
+      ).join('');
+    } catch (e) {
+      sel.innerHTML = '<option value="">載入失敗</option>';
+    }
+  }
+
+  // ── Prediction tool ──────────────────────────────────────────
+  async function runPredict() {
+    const raceId = document.getElementById('predictRaceId').value;
+    if (!raceId) { alert('請先選擇場次'); return; }
+    const statusEl = document.getElementById('predictStatus');
+    const table = document.getElementById('predictTable');
+    statusEl.textContent = '運算中…';
+    table.style.display = 'none';
+    try {
+      // /api/analyze/top-picks is a public endpoint (no auth needed)
+      const res = await fetch('/api/analyze/top-picks?raceId=' + encodeURIComponent(raceId));
+      const data = await res.json();
+      if (data.error) { statusEl.textContent = '錯誤: ' + data.error; return; }
+      const picks = data.allPicks || data.picks || [];
+      if (!picks.length) { statusEl.textContent = '無預測資料'; return; }
+      const engineTag = data.eloEngine === 'v12' ? 'v1.2' : (data.eloEngine || '—');
+      statusEl.textContent = '✓ ' + (data.date || '') + ' 第' + (data.raceNumber || '') + '場 · ELO引擎 ' + engineTag + ' · ' + picks.length + ' 匹';
+      const tb = table.querySelector('tbody');
+      tb.innerHTML = picks.map(p => {
+        const fmtElo = v => v != null ? Math.round(v) : '<span class="muted-cell">—</span>';
+        const fmtPct = v => v != null ? (v * 100).toFixed(1) + '%' : '—';
+        const fmtScore = v => v != null ? Math.round(v * 10) / 10 : '—';
+        const fmtOdds = v => v != null ? v : '—';
+        const rankCls = p.rank === 1 ? 'style="color:var(--green);font-weight:700"' : p.rank <= 3 ? 'style="color:var(--warn);font-weight:600"' : '';
+        return '<tr>' +
+          '<td ' + rankCls + '>' + p.rank + '</td>' +
+          '<td>' + (p.horseNumber || '—') + '</td>' +
+          '<td><strong>' + (p.nameCh || p.nameEn || '—') + '</strong>' +
+            (p.horseFrozen ? ' <span class="pill queued">停賽</span>' : '') +
+            (p.horseRetired ? ' <span class="pill failure">退役</span>' : '') + '</td>' +
+          '<td class="muted-cell">' + (p.jockeyCh || '—') + ' / ' + (p.trainerCh || '—') + '</td>' +
+          '<td>' + fmtElo(p.horseElo) + '</td>' +
+          '<td>' + fmtElo(p.jockeyElo) + '</td>' +
+          '<td>' + fmtElo(p.trainerElo) + '</td>' +
+          '<td><strong>' + fmtElo(p.eloComposite) + '</strong></td>' +
+          '<td class="' + (p.factorBonus > 0 ? 'ok' : p.factorBonus < 0 ? 'bad' : '') + '">' +
+            (p.factorBonus != null ? (p.factorBonus >= 0 ? '+' : '') + Math.round(p.factorBonus * 10) / 10 : '—') + '</td>' +
+          '<td><strong>' + fmtScore(p.finalScore) + '</strong></td>' +
+          '<td class="' + (p.rank <= 2 ? 'ok' : '') + '">' + fmtPct(p.pWin) + '</td>' +
+          '<td>' + fmtPct(p.pTop3) + '</td>' +
+          '<td class="muted-cell">' + fmtOdds(p.winOdds) + '</td>' +
+          '</tr>';
+      }).join('');
+      table.style.display = 'table';
+    } catch (e) {
+      statusEl.textContent = '錯誤: ' + e.message;
+    }
+  }
+
   function refreshAll() {
-    loadAlerts(); loadCoverage(); loadStatus(); loadGaps(); loadRuns();
+    loadAlerts(); loadCoverage(); loadStatus(); loadGaps(); loadRuns(); loadRecentMeetings();
     document.getElementById('refreshClock').textContent = '最近刷新：' + new Date().toLocaleTimeString('zh-HK');
   }
   refreshAll();
