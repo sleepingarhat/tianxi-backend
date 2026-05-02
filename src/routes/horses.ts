@@ -277,21 +277,26 @@ horsesRoutes.get('/:id/form', async (c) => {
     LIMIT ?
   `).bind(horse.id, limit).all();
 
-  // 試閘記錄
+  // 試閘記錄 (v2: trial_runners + trial_sessions)
   const { results: trials } = await c.env.DB.prepare(`
-    SELECT * FROM barrier_trials
-    WHERE horse_id = ?
-    ORDER BY trial_date DESC
+    SELECT tr.id, tr.horse_id, tr.jockey, tr.draw, tr.finish_time_text AS time,
+           tr.finishing_position, tr.running_pos, tr.lbw, tr.gear, tr.commentary AS comment,
+           ts.trial_date, ts.venue, ts.distance_m AS distance, ts.going
+    FROM trial_runners tr
+    JOIN trial_sessions ts ON ts.id = tr.session_id
+    WHERE tr.horse_id = ?
+    ORDER BY ts.trial_date DESC
     LIMIT 5
-  `).bind(horse.id).all();
+  `).bind(horse.id).all().catch(() => ({ results: [] }));
 
-  // 晨操記錄
+  // 晨操記錄 (v2: horse_trackwork)
   const { results: trackwork } = await c.env.DB.prepare(`
-    SELECT * FROM trackwork
+    SELECT id, horse_id, trackwork_date, venue, batch, distance, time_text AS time, partner, comment
+    FROM horse_trackwork
     WHERE horse_id = ?
-    ORDER BY date DESC
+    ORDER BY trackwork_date DESC
     LIMIT 10
-  `).bind(horse.id).all();
+  `).bind(horse.id).all().catch(() => ({ results: [] }));
 
   return c.json({
     horse: {
@@ -340,7 +345,7 @@ horsesRoutes.get('/:id/form', async (c) => {
       comment: t.comment,
     })),
     trackwork: (trackwork ?? []).map((tw: any) => ({
-      date: tw.date,
+      date: tw.trackwork_date ?? tw.date,
       venue: tw.venue,
       batch: tw.batch,
       distance: tw.distance,
