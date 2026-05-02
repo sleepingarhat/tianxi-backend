@@ -416,7 +416,11 @@ adminRoutes.get('/api/meetings', async (c) => {
 });
 
 // ── GET / — HTML dashboard (繁體) ──
-adminRoutes.get('/', (c) => c.html(renderPanel(c.req.query('token') || '')));
+adminRoutes.get('/', (c) => {
+  c.header('Cache-Control', 'no-store, no-cache, must-revalidate');
+  c.header('Pragma', 'no-cache');
+  return c.html(renderPanel(c.req.query('token') || ''));
+});
 
 function renderPanel(token: string): string {
   return `<!doctype html>
