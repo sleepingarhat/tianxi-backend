@@ -540,8 +540,13 @@ function renderPanel(token: string): string {
 <script>
   const TOKEN = ${JSON.stringify(token)};
   const H = { 'Authorization': 'Bearer ' + TOKEN };
+  function apiPath(path) {
+    // Append token as query param so auth works even if headers are stripped
+    const sep = path.includes('?') ? '&' : '?';
+    return TOKEN ? path + sep + 'token=' + encodeURIComponent(TOKEN) : path;
+  }
   async function json(path, opts = {}) {
-    const res = await fetch(path, { ...opts, headers: { ...(opts.headers || {}), ...H } });
+    const res = await fetch(apiPath(path), { ...opts, headers: { ...(opts.headers || {}), ...H } });
     return await res.json();
   }
   function fmtNum(n) { return n == null ? '—' : Number(n).toLocaleString() }

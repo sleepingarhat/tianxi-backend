@@ -1,3 +1,4 @@
+account_id = "653a13852ac331972d14432741113f6f"
 name = "tianxi-backend"
 main = "src/index.ts"
 compatibility_date = "2025-04-14"
