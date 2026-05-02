@@ -467,8 +467,8 @@ async function computeComposite(
   // the same-day race being predicted). wins_pre/starts_pre count results
   // from meetings strictly before raceDate.
   const { results } = await db.prepare(`
-    SELECT rr.horse_id, rr.jockey_id, rr.trainer_id, rr.horse_number, rr.draw, rr.win_odds,
-           rr.actual_weight,
+    SELECT rr.horse_id, rr.jockey_id, rr.trainer_id, rr.jockey_name, rr.trainer_name,
+           rr.horse_number, rr.draw, rr.win_odds, rr.actual_weight,
            h.name_ch, h.name_en,
            (SELECT COUNT(*) FROM race_results rr2
              JOIN races r2 ON r2.id = rr2.race_id
@@ -496,8 +496,16 @@ async function computeComposite(
 
   const enriched = await Promise.all((results ?? []).map(async (r: any) => {
     const hRead = await fetchAxisEloReading(db, 'horse', r.horse_id, raceDate, engine);
-    const jRead = r.jockey_id ? await fetchAxisEloReading(db, 'jockey', r.jockey_id, raceDate, engine) : null;
-    const tRead = r.trainer_id ? await fetchAxisEloReading(db, 'trainer', r.trainer_id, raceDate, engine) : null;
+    // Fallback: if jockey_id FK is null, construct snapshot ID from jockey name
+    // (race_results.jockey_name is populated from CSV; ELO snapshots use 'jockey_<name>')
+    const jSnapshotId = r.jockey_id
+      ?? (r.jockey_name ? \`jockey_\${r.jockey_name}\` : null)
+      ?? (r.jockey_ch   ? \`jockey_\${r.jockey_ch}\`   : null);
+    const tSnapshotId = r.trainer_id
+      ?? (r.trainer_name ? \`trainer_\${r.trainer_name}\` : null)
+      ?? (r.trainer_ch   ? \`trainer_\${r.trainer_ch}\`   : null);
+    const jRead = jSnapshotId ? await fetchAxisEloReading(db, 'jockey', jSnapshotId, raceDate, engine) : null;
+    const tRead = tSnapshotId ? await fetchAxisEloReading(db, 'trainer', tSnapshotId, raceDate, engine) : null;
     const hElo = hRead?.rating ?? null;
     const jElo = jRead?.rating ?? null;
     const tElo = tRead?.rating ?? null;
