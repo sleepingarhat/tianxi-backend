@@ -4,6 +4,14 @@ main = "src/index.ts"
 compatibility_date = "2025-04-14"
 compatibility_flags = ["nodejs_compat"]
 
+[[routes]]
+pattern = "www.tianxi.racing"
+custom_domain = true
+
+[[routes]]
+pattern = "tianxi.racing"
+custom_domain = true
+
 [vars]
 ENVIRONMENT = "production"
 AI_API_URL = "https://api.x.ai/v1/chat/completions"
