@@ -73,7 +73,9 @@ adminRoutes.get('/api/status', async (c) => {
 adminRoutes.get('/api/gaps', async (c) => {
   const rows = await c.env.DB.prepare(`
     SELECT substr(date, 1, 7) AS ym, COUNT(*) AS n FROM race_meetings
-    GROUP BY ym HAVING n < 5 AND substr(ym, 6, 2) NOT IN ('06', '07', '08')
+    GROUP BY ym HAVING n < 5
+      AND substr(ym, 6, 2) NOT IN ('06', '07', '08')
+      AND ym < strftime('%Y-%m', 'now')
     ORDER BY ym`).all();
   return c.json({ suspectMonths: rows.results });
 });
@@ -689,7 +691,7 @@ function renderPanel(token: string): string {
         '<td>' + venue + '</td>' +
         '<td class="muted-cell">' + (m.track_condition || '—') + '</td>' +
         '<td>' + (m.race_count || 0) + ' 場</td>' +
-        '<td><button class="ghost" style="font-size:11px;padding:3px 8px" onclick="loadRacesForPredict(' + JSON.stringify(m.id) + ',' + JSON.stringify(m.date) + ',' + JSON.stringify(m.race_count) + ')">預測此日</button></td>' +
+        '<td><button class="ghost" style="font-size:11px;padding:3px 8px" onclick="loadRacesForPredict(\'' + (m.id||'').replace(/'/g,'') + '\',\'' + (m.date||'') + '\',' + (m.race_count||0) + ')">預測此日</button></td>' +
         '</tr>';
     }).join('');
   }
@@ -698,20 +700,24 @@ function renderPanel(token: string): string {
     const sel = document.getElementById('predictRaceId');
     sel.innerHTML = '<option value="">載入中…</option>';
     document.getElementById('predictStatus').textContent = '';
-    // Build race IDs: race_DATE_VENUE_N format
-    // Fetch via /api/meetings/:date
+    document.getElementById('predictTable').style.display = 'none';
     try {
-      const res = await fetch('/api/meetings/' + date);
+      const res = await fetch('/api/meetings/' + encodeURIComponent(date));
       const data = await res.json();
-      const races = data.races || [];
+      let races = data.races || [];
+      if (!races.length && data.upcomingRaces) races = data.upcomingRaces;
+      // If still no races, try smart/current for upcoming meetings
       if (!races.length) {
-        sel.innerHTML = '<option value="">此日無場次資料</option>'; return;
+        sel.innerHTML = '<option value="">此日無已入 D1 的場次（可能為未來賽事）</option>'; return;
       }
-      sel.innerHTML = races.map(r =>
-        '<option value="' + r.id + '">第' + r.race_number + '場 · ' + (r.title || '') + ' · ' + (r.distance || '') + 'm · ' + (r.class || '') + '</option>'
-      ).join('');
+      sel.innerHTML = '<option value="">選擇場次…</option>' + races.map(r => {
+        const raceId = r.id || ('race_' + date + '_' + (data.venue||'ST') + '_' + r.raceNumber);
+        const cls = r.class || r.raceClass || '';
+        const dist = r.distance || r.dist || '';
+        return '<option value="' + raceId + '">第' + (r.raceNumber||r.race_number) + '場 · ' + (r.title||r.raceName||'') + (dist?' · '+dist+'m':'') + (cls?' · '+cls:'') + '</option>';
+      }).join('');
     } catch (e) {
-      sel.innerHTML = '<option value="">載入失敗</option>';
+      sel.innerHTML = '<option value="">載入失敗：' + e.message + '</option>';
     }
   }
 
