@@ -481,6 +481,16 @@ function renderPanel(token: string): string {
   <h1>天喜 · 內部控制台 <span class="pulse" title="實時監控"></span></h1>
   <div class="bar">內部運營監控 · 每 30 秒自動刷新<span class="refresh" id="refreshClock">初始化中…</span></div>
 
+  <!-- 診斷框 — 有錯誤時才顯示 -->
+  <div id="diagBox" style="display:none;background:#fdf0f2;border:2px solid #c8102e;border-radius:4px;padding:10px 14px;margin-bottom:14px;font-size:12px">
+    <strong style="color:#c8102e">⚠ 診斷資訊</strong>
+    <pre id="diagMsg" style="margin:6px 0 0;white-space:pre-wrap;color:#333"></pre>
+  </div>
+  <!-- 快速 API 測試 — 確認 JS + fetch 正常運作 -->
+  <div id="pingResult" style="background:#e8f5ec;border:1px solid #18a355;border-radius:4px;padding:6px 12px;margin-bottom:10px;font-size:12px;color:#186e2e">
+    JS 已啟動，測試 API 連線中…
+  </div>
+
   <div id="alertbar"><div class="alert ok">讀取告警中…</div></div>
 
   <h2>資料來源覆蓋（14 個核心表）</h2>
@@ -542,10 +552,20 @@ function renderPanel(token: string): string {
 
 
 <script>
+  // ── 診斷：捕捉所有未處理的 JS 錯誤 ──
+  window.onerror = function(msg, src, line, col, err) {
+    document.getElementById('diagBox').style.display = 'block';
+    document.getElementById('diagMsg').textContent = 'JS 錯誤 [' + line + ':' + col + '] ' + msg + (err ? '\\n' + err.stack : '');
+    return false;
+  };
+  window.onunhandledrejection = function(e) {
+    document.getElementById('diagBox').style.display = 'block';
+    document.getElementById('diagMsg').textContent += '\\nUnhandled rejection: ' + (e.reason && (e.reason.message || e.reason));
+  };
+
   const TOKEN = ${JSON.stringify(token)};
   const H = { 'Authorization': 'Bearer ' + TOKEN };
   function apiPath(path) {
-    // Append token as query param so auth works even if headers are stripped
     const sep = path.includes('?') ? '&' : '?';
     return TOKEN ? path + sep + 'token=' + encodeURIComponent(TOKEN) : path;
   }
@@ -786,8 +806,29 @@ function renderPanel(token: string): string {
     }
   }
 
-  function refreshAll() {
-    loadAlerts(); loadCoverage(); loadStatus(); loadGaps(); loadRuns(); loadRecentMeetings();
+  // ── 快速 ping 測試 ──
+  (async function ping() {
+    const el = document.getElementById('pingResult');
+    try {
+      const res = await fetch(apiPath('/admin/api/status'));
+      const text = await res.text();
+      if (res.ok) {
+        el.textContent = '✓ API 連線正常 (HTTP ' + res.status + ') · TOKEN=' + (TOKEN ? TOKEN.slice(0,8) + '…' : '（空）');
+        el.style.display = 'none'; // hide if ok, already loading data
+      } else {
+        el.style.background = '#fdf0f2'; el.style.borderColor = '#c8102e'; el.style.color = '#7a0b1e';
+        el.textContent = '✗ API 回傳 HTTP ' + res.status + '：' + text.slice(0, 200);
+      }
+    } catch(e) {
+      el.style.background = '#fdf0f2'; el.style.borderColor = '#c8102e'; el.style.color = '#7a0b1e';
+      el.textContent = '✗ Fetch 失敗：' + (e.message || e);
+    }
+  })();
+
+  async function refreshAll() {
+    await Promise.allSettled([
+      loadAlerts(), loadCoverage(), loadStatus(), loadGaps(), loadRuns(), loadRecentMeetings()
+    ]);
     document.getElementById('refreshClock').textContent = '最近刷新：' + new Date().toLocaleTimeString('zh-HK');
   }
   refreshAll();
