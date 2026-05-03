@@ -835,14 +835,15 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
     if (!data.meetings || !data.meetings.length) {
       tb.innerHTML = '<tr><td colspan="5" class="warn">無賽事資料</td></tr>'; return;
     }
-    tb.innerHTML = data.meetings.map(m => {
+    window._meetingList = data.meetings;
+    tb.innerHTML = data.meetings.map((m, i) => {
       const venue = m.venue === 'ST' ? '沙田' : m.venue === 'HV' ? '跑馬地' : (m.venue || '—');
       return '<tr>' +
         '<td><strong>' + (m.date || '—') + '</strong></td>' +
         '<td>' + venue + '</td>' +
         '<td class="muted-cell">' + (m.track_condition || '—') + '</td>' +
         '<td>' + (m.race_count || 0) + ' 場</td>' +
-        '<td><button class="ghost" style="font-size:11px;padding:3px 8px" onclick="loadRacesForPredict(\'' + (m.id||'').replace(/'/g,'') + '\',\'' + (m.date||'') + '\',' + (m.race_count||0) + ')">預測此日</button></td>' +
+        '<td><button class="ghost" style="font-size:11px;padding:3px 8px" onclick="loadRacesForPredictByIndex(' + i + ')">預測此日</button></td>' +
         '</tr>';
     }).join('');
   }
@@ -867,7 +868,13 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
     } catch(e) { logEl.textContent += '\\nFetch 失敗：' + e.message; }
   }
 
-  async function loadRacesForPredict(meetingId, date, raceCount) {
+  function loadRacesForPredictByIndex(i) {
+      const m = window._meetingList && window._meetingList[i];
+      if (!m) return;
+      loadRacesForPredict(m.id || '', m.date || '', m.race_count || 0);
+    }
+
+    async function loadRacesForPredict(meetingId, date, raceCount) {
     const sel = document.getElementById('predictRaceId');
     sel.innerHTML = '<option value="">載入中…</option>';
     document.getElementById('predictStatus').textContent = '';
