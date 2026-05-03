@@ -410,7 +410,7 @@ adminRoutes.get('/api/meetings', async (c) => {
   const { results } = await c.env.DB.prepare(`
     SELECT m.id, m.date, m.venue, m.track_condition, m.total_races,
            COUNT(r.id) AS race_count,
-           SUM(CASE WHEN r.id IS NOT NULL THEN 1 ELSE 0 END) AS has_races
+           (SELECT COUNT(*) FROM entries_upcoming e WHERE e.race_date = m.date) AS entry_count
     FROM race_meetings m
     LEFT JOIN races r ON r.meeting_id = m.id
     GROUP BY m.id
@@ -562,7 +562,8 @@ async function fetchAdminPageData(env: AdminEnv): Promise<Record<string, any>> {
 
   // Meetings
   const { results: meetRows } = await db.prepare(`
-    SELECT m.id, m.date, m.venue, m.track_condition, m.total_races, COUNT(r.id) AS race_count
+    SELECT m.id, m.date, m.venue, m.track_condition, m.total_races, COUNT(r.id) AS race_count,
+           (SELECT COUNT(*) FROM entries_upcoming e WHERE e.race_date = m.date) AS entry_count
     FROM race_meetings m LEFT JOIN races r ON r.meeting_id = m.id
     GROUP BY m.id ORDER BY m.date DESC LIMIT 10
   `).all().catch(() => ({ results: [] as any[] }));
@@ -849,7 +850,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
         '<td><strong>' + (m.date || '—') + '</strong></td>' +
         '<td>' + venue + '</td>' +
         '<td class="muted-cell">' + (m.track_condition || '—') + '</td>' +
-        '<td>' + (m.race_count || 0) + ' 場</td>' +
+        '<td>' + (m.race_count > 0 ? m.race_count + ' 場' : m.total_races ? m.total_races + ' 場' : m.entry_count > 0 ? '今日 (待賽)' : '0 場') + '</td>' +
         '<td><button class="ghost" style="font-size:11px;padding:3px 8px" onclick="loadRacesForPredictByIndex(' + i + ')">預測此日</button></td>' +
         '</tr>';
     }).join('');
@@ -878,7 +879,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
   function loadRacesForPredictByIndex(i) {
       const m = window._meetingList && window._meetingList[i];
       if (!m) return;
-      loadRacesForPredict(m.id || '', m.date || '', m.race_count || 0);
+      loadRacesForPredict(m.id || '', m.date || '', m.race_count || m.total_races || 0);
     }
 
     async function loadRacesForPredict(meetingId, date, raceCount) {
