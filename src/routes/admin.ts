@@ -986,10 +986,10 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
   }
 
     function renderNextRaceDay() {
-        const nd = D.nextRaceDay;
-        const labelEl = document.getElementById('nrdLabel');
-        const racesEl = document.getElementById('nrdRaces');
-        const horsesEl = document.getElementById('nrdHorses');
+        var nd = D.nextRaceDay;
+        var labelEl = document.getElementById('nrdLabel');
+        var racesEl = document.getElementById('nrdRaces');
+        var horsesEl = document.getElementById('nrdHorses');
         if (!racesEl) return;
         if (!nd) {
           if (labelEl) labelEl.textContent = '';
@@ -997,7 +997,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
           if (horsesEl) horsesEl.innerHTML = '';
           return;
         }
-        const venueLabel = nd.venue === 'ST' ? '沙田' : nd.venue === 'HV' ? '跑馬地' : (nd.venue || '');
+        var venueLabel = nd.venue === 'ST' ? '沙田' : nd.venue === 'HV' ? '跑馬地' : (nd.venue || '');
         if (labelEl) labelEl.textContent = nd.date + ' · ' + venueLabel + (nd.trackCondition ? ' · ' + nd.trackCondition : '') + (nd.isUpcoming ? ' · 待賽' : ' · 已賽');
 
         function fmtForm(arr) {
@@ -1011,38 +1011,39 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
           }).join('<span class="pmut">/</span>');
         }
 
-        function fmtOdds(oddsMap, horseNum) {
-          const o = oddsMap ? oddsMap[String(horseNum)] : null;
+        function fmtOdds(oddsObj, horseNum) {
+          var o = oddsObj ? oddsObj[String(horseNum)] : null;
           if (o == null) return '<span class="nrd-odds-none">—</span>';
-          const n = Number(o);
-          // Find min odds in map to determine favourite
-          const vals = Object.values(oddsMap).map(Number).filter(x => x > 0);
-          const minOdds = vals.length ? Math.min(...vals) : 999;
+          var n = Number(o);
+          var vals = Object.keys(oddsObj).map(function(k) { return Number(oddsObj[k]); }).filter(function(x) { return x > 0; });
+          var minOdds = vals.length ? Math.min.apply(null, vals) : 999;
           if (n === minOdds && n < 10) return '<span class="nrd-odds-fav">' + n + '</span>';
           if (n < 5) return '<span class="nrd-odds-low">' + n + '</span>';
           return '<span class="nrd-odds-norm">' + n + '</span>';
         }
 
         function buildRaceHtml(r) {
-          const trackStr = [r.track, r.course].filter(Boolean).join(', ');
-          const subStr = [r.class, r.distance ? r.distance + '米' : null, trackStr].filter(Boolean).join(' · ');
-          const entries = r.entries || [];
-          const hasEntries = entries.length > 0;
-
-          let entriesHtml = '';
-          if (hasEntries) {
-            const rows = entries.map(function(e) {
-              const name = e.name_ch || e.horse_code || '—';
-              const jt = [e.jockey_name, e.trainer_name].filter(Boolean).join(' / ');
-              const draw = e.draw != null ? e.draw : '—';
-              const wt = e.declared_weight || e.actual_weight;
-              const wtStr = wt != null ? wt : '—';
-              const rating = e.rating || e.current_rating;
-              const ratingStr = rating != null ? rating : '—';
-              const badge = e.priority_order && e.priority_order !== '正選' ?
-                '<span class="nrd-badge rsv">' + e.priority_order + '</span>' : '';
+          var parts = [];
+          if (r.class) parts.push(r.class);
+          if (r.distance) parts.push(r.distance + '米');
+          var trackStr = [r.track, r.course].filter(Boolean).join(', ');
+          if (trackStr) parts.push(trackStr);
+          var subStr = parts.join(' · ');
+          var timeStr = r.startTime ? r.startTime.substring(0, 5) : '';
+          var entries = r.entries || [];
+          var entriesHtml;
+          if (entries.length > 0) {
+            var rows = entries.map(function(e) {
+              var name = e.name_ch || e.horse_code || '—';
+              var jt = [e.jockey_name, e.trainer_name].filter(Boolean).join(' / ');
+              var draw = e.draw != null ? e.draw : '—';
+              var wt = e.declared_weight || e.actual_weight;
+              var wtStr = wt != null ? wt : '—';
+              var rating = e.rating || e.current_rating;
+              var ratingStr = rating != null ? rating : '—';
+              var badge = (e.priority_order && e.priority_order !== '正選') ? '<span class="nrd-badge rsv">' + e.priority_order + '</span>' : '';
               return '<tr>' +
-                '<td style="color:var(--mut);font-size:11px;white-space:nowrap">' + (e.horse_number || '—') + '</td>' +
+                '<td style="color:var(--mut);font-size:11px">' + (e.horse_number || '—') + '</td>' +
                 '<td><div class="nrd-hname">' + badge + name + '</div><div class="nrd-jt">' + (jt || '—') + '</div></td>' +
                 '<td style="text-align:center">' + fmtOdds(r.odds, e.horse_number) + '</td>' +
                 '<td style="text-align:center;color:var(--mut)">' + draw + '</td>' +
@@ -1051,14 +1052,13 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
                 '<td><div class="nrd-form">' + fmtForm(e.recentForm) + '</div></td>' +
                 '</tr>';
             }).join('');
-            entriesHtml = '<div class="nrd-table-wrap">' +
-              '<table class="nrd-table"><thead><tr>' +
-              '<th>馬號</th><th>馬名 · 騎師 / 練馬師</th><th>獨贏</th><th>檔</th><th style="text-align:right">負磅</th><th style="text-align:right">評分</th><th>近績</th>' +
+            entriesHtml = '<div class="nrd-table-wrap"><table class="nrd-table"><thead><tr>' +
+              '<th>馬號</th><th>馬名 / 騎師 / 練馬師</th><th>獨贏</th><th>檔</th>' +
+              '<th style="text-align:right">負磅</th><th style="text-align:right">評分</th><th>近績</th>' +
               '</tr></thead><tbody>' + rows + '</tbody></table></div>';
           } else {
             entriesHtml = '<div class="nrd-table-wrap" style="padding:8px 14px;font-size:12px;color:var(--mut)">排位表資料暫未同步</div>';
           }
-
           return '<div class="nrd-race" id="nrd-r' + r.raceNumber + '">' +
             '<div class="nrd-race-hd" onclick="toggleNrdRace(' + r.raceNumber + ')">' +
             '<div class="nrd-rnum">' + r.raceNumber + '</div>' +
@@ -1066,33 +1066,30 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
             '<div class="nrd-race-title">' + (r.title || '第' + r.raceNumber + '場') + '</div>' +
             '<div class="nrd-race-sub">' + subStr + '</div>' +
             '</div>' +
-            '<span class="nrd-race-time">' + (r.startTime ? r.startTime.replace(/^(d{2}:d{2}).*/, '$1') : '') + '</span>' +
-            '<span class="nrd-chevron">›</span>' +
-            '</div>' +
-            entriesHtml +
-            '</div>';
+            '<span class="nrd-race-time">' + timeStr + '</span>' +
+            '<span class="nrd-chevron">&#x203A;</span>' +
+            '</div>' + entriesHtml + '</div>';
         }
 
         if (!nd.races || !nd.races.length) {
           racesEl.innerHTML = '<p style="color:var(--mut);font-size:13px">排位表資料暫未同步</p>';
         } else {
           racesEl.innerHTML = nd.races.map(buildRaceHtml).join('');
-          // Auto-open first race
-          const firstRace = nd.races[0];
+          var firstRace = nd.races[0];
           if (firstRace) {
-            const el = document.getElementById('nrd-r' + firstRace.raceNumber);
-            if (el) el.classList.add('open');
+            var firstEl = document.getElementById('nrd-r' + firstRace.raceNumber);
+            if (firstEl) firstEl.classList.add('open');
           }
         }
         if (horsesEl) horsesEl.innerHTML = '';
       }
 
       function toggleNrdRace(raceNum) {
-        const el = document.getElementById('nrd-r' + raceNum);
+        var el = document.getElementById('nrd-r' + raceNum);
         if (el) el.classList.toggle('open');
       }
-    }
 
+  
     // ── 初始化：直接渲染伺服器端數據，無需 fetch ──
   function safeRender(name, fn) {
     try { fn(); } catch (e) { console.error('[admin] ' + name + ' 渲染失敗:', e.message, e); }
