@@ -716,7 +716,36 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
     .nrd-badge.trump { background:#fff0c6; color:#7a5900 }
     .nrd-badge.pri { background:#e8f5ec; color:#186e2e }
     .nrd-badge.rsv { background:#e4e0d6; color:var(--mut) }
-  </style></head>
+    /* ── 即日預測結果面板 ── */
+      .tp-race { margin-bottom:10px; border:1px solid var(--rule); border-radius:6px; background:#fff; overflow:hidden }
+      .tp-race-hd { display:flex; align-items:center; gap:12px; padding:10px 14px; background:#fafaf8; cursor:pointer; user-select:none }
+      .tp-race-hd:hover { background:#f2ede6 }
+      .tp-rnum { width:34px; height:34px; border-radius:50%; background:var(--blue); color:#fff; font-size:15px; font-weight:700; display:flex; align-items:center; justify-content:center; flex-shrink:0 }
+      .tp-race-meta { flex:1 }
+      .tp-race-title { font-size:13px; font-weight:600; margin:0 0 1px }
+      .tp-race-sub { font-size:11px; color:var(--mut) }
+      .tp-chevron { color:var(--mut); font-size:12px; margin-left:6px; transition:transform .2s }
+      .tp-race.open .tp-chevron { transform:rotate(90deg) }
+      .tp-table-wrap { display:none }
+      .tp-race.open .tp-table-wrap { display:block }
+      .tp-table { width:100%; border-collapse:collapse; font-size:12px }
+      .tp-table th { background:#f0ede8; font-size:11px; font-weight:500; letter-spacing:.04em; padding:5px 8px; text-align:left; border-bottom:1px solid var(--rule); white-space:nowrap }
+      .tp-table td { padding:6px 8px; border-bottom:1px solid var(--rule); vertical-align:top }
+      .tp-table tr:last-child td { border-bottom:0 }
+      .tp-rank-1 { color:var(--green); font-weight:700; font-size:15px }
+      .tp-rank-2, .tp-rank-3 { color:var(--warn); font-weight:600 }
+      .tp-hname { font-size:13px; font-weight:600 }
+      .tp-sub { font-size:11px; color:var(--mut); margin-top:1px }
+      .tp-elo { font-family:"JetBrains Mono",ui-monospace,monospace; font-size:12px }
+      .tp-bonus-pos { color:var(--green); font-weight:600 }
+      .tp-bonus-neg { color:var(--red); font-weight:600 }
+      .tp-prob { font-weight:600; font-variant-numeric:tabular-nums }
+      .tp-prob-hi { color:var(--green) }
+      .tp-factor-detail { font-size:10px; line-height:1.8; margin-top:4px }
+      button.tp-run { background:var(--blue); font-size:13px; padding:7px 16px }
+      button.tp-run:hover { opacity:.9 }
+      button.tp-run:disabled { opacity:.5; cursor:wait }
+    </style></head>
 <body>
   <h1>天喜 · 內部控制台 <span class="pulse" title="實時監控"></span></h1>
   <div class="bar">伺服器端渲染 · 每 60 秒自動刷新<span class="refresh" id="refreshClock"></span></div>
@@ -758,6 +787,13 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
     <th>馬匹ELO</th><th>騎師ELO</th><th>練馬師ELO</th>
     <th>綜合ELO</th><th>調整</th><th>最終分</th><th>勝率</th><th>前三</th><th>賠率</th>
   </tr></thead><tbody></tbody></table>
+
+    <h2>即日賽事全因子預測</h2>
+    <div class="actions-row">
+      <button class="tp-run" id="btnTodayPredict" onclick="runTodayPredictions()">▶ 運算即日賽事全因子預測（ELO v1.2 + 7 因子）</button>
+      <span id="todayPredictStatus" style="font-size:12px;color:var(--mut)"></span>
+    </div>
+    <div id="todayPredictResults"></div>
 
     <h2>即日賽事排位表 + 即時賠率 <span id="nrdLabel" style="font-size:13px;font-weight:400;color:var(--mut)"></span></h2>
     <div id="nrdRaces"></div>
@@ -1091,6 +1127,104 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
       }
 
   
+    // ── 即日全因子預測 ──
+    async function runTodayPredictions() {
+      var btn = document.getElementById('btnTodayPredict');
+      var statusEl = document.getElementById('todayPredictStatus');
+      var resultsEl = document.getElementById('todayPredictResults');
+      btn.disabled = true;
+      statusEl.textContent = '運算中，請稍候（每場約 5-10 秒）…';
+      resultsEl.innerHTML = '';
+      try {
+        var res = await fetch('/api/analyze/today-picks');
+        var data = await res.json();
+        if (data.error) { statusEl.textContent = '錯誤：' + data.error; return; }
+        var engTag = data.eloEngine === 'v12' ? 'v1.2' : (data.eloEngine || '—');
+        statusEl.textContent = (data.date||'') + ' ' + (data.venue||'') + ' · '
+          + data.races.length + ' 場 · ELO引擎 ' + engTag
+          + (data.eloReady ? ' · ✓ ELO就緒' : ' · ⚠ ELO資料未就緒')
+          + ' · 運算完成 ' + new Date().toLocaleTimeString('zh-HK');
+        renderTodayPredictions(data);
+      } catch (e) {
+        statusEl.textContent = '錯誤：' + e.message;
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    function renderTodayPredictions(data) {
+      var el = document.getElementById('todayPredictResults');
+      if (!el) return;
+      function fmtElo(v) { return v != null ? '<span class="tp-elo">' + Math.round(v) + '</span>' : '<span style="color:var(--mut)">—</span>'; }
+      function fmtBonus(v, fb) {
+        if (v == null) return '—';
+        var cls = v > 0 ? 'tp-bonus-pos' : v < 0 ? 'tp-bonus-neg' : '';
+        var s = '<span class="' + cls + '">' + (v >= 0 ? '+' : '') + v + '</span>';
+        if (fb) {
+          var lines = ['recency','distance','going','draw','weight','condition','injury','jtCombo'].map(function(k){
+            var f = fb[k]; if (!f) return null;
+            var col = f.bonus > 0 ? 'var(--green)' : f.bonus < 0 ? 'var(--red)' : 'var(--mut)';
+            var sign = f.bonus >= 0 ? '+' : '';
+            return '<span style="color:' + col + '">' + sign + f.bonus.toFixed(1) + '</span>'
+                 + '<span style="color:var(--mut);font-size:10px"> ' + f.note + '</span>';
+          }).filter(Boolean);
+          if (lines.length) {
+            s += '<details><summary style="font-size:10px;color:var(--mut);cursor:pointer">明細</summary>'
+               + '<div class="tp-factor-detail">' + lines.join('<br>') + '</div></details>';
+          }
+        }
+        return s;
+      }
+      function fmtPct(v) { return v != null ? (v*100).toFixed(1)+'%' : '—'; }
+      el.innerHTML = (data.races || []).map(function(race, ri) {
+        var picks = race.picks || [];
+        var isOpen = ri < 3 ? ' open' : '';
+        var topHorse = picks[0] ? ('<strong>' + (picks[0].nameCh || picks[0].nameEn || '—') + '</strong> ' + fmtPct(picks[0].pWin)) : '無資料';
+        var rows = !picks.length
+          ? '<tr><td colspan="12" style="padding:12px;color:var(--mut)">無排位資料</td></tr>'
+          : picks.map(function(p) {
+            var rc = p.rank===1 ? 'tp-rank-1' : p.rank<=3 ? 'tp-rank-2' : '';
+            var probCls = 'tp-prob' + (p.rank===1 ? ' tp-prob-hi' : '');
+            return '<tr>'
+              + '<td class="' + rc + '">' + p.rank + '</td>'
+              + '<td style="font-variant-numeric:tabular-nums">' + (p.horseNumber||'—') + '</td>'
+              + '<td><div class="tp-hname">' + (p.nameCh||p.nameEn||'—') + '</div>'
+                + '<div class="tp-sub">' + (p.jockeyCh||'—') + ' / ' + (p.trainerCh||'—') + '</div></td>'
+              + '<td style="text-align:center">' + (p.draw!=null?p.draw:'—') + '</td>'
+              + '<td>' + fmtElo(p.horseElo) + '</td>'
+              + '<td>' + fmtElo(p.jockeyElo) + '</td>'
+              + '<td>' + fmtElo(p.trainerElo) + '</td>'
+              + '<td><strong>' + fmtElo(p.eloComposite) + '</strong></td>'
+              + '<td>' + fmtBonus(p.factorBonus, p.factorBreakdown) + '</td>'
+              + '<td><strong>' + fmtElo(p.finalScore) + '</strong></td>'
+              + '<td class="' + probCls + (p.rank<=2?' ok':'') + '">' + fmtPct(p.pWin) + '</td>'
+              + '<td>' + fmtPct(p.pTop3) + '</td>'
+              + '</tr>';
+          }).join('');
+        return '<div class="tp-race' + isOpen + '" id="tp-r' + race.raceNumber + '">'
+          + '<div class="tp-race-hd" onclick="document.getElementById('tp-r' + race.raceNumber + '').classList.toggle('open')">'
+            + '<div class="tp-rnum">' + race.raceNumber + '</div>'
+            + '<div class="tp-race-meta">'
+              + '<div class="tp-race-title">' + (race.title||'第'+race.raceNumber+'場') + '</div>'
+              + '<div class="tp-race-sub">'
+                + (race.distance?race.distance+'m':'') + (race.going?' · '+race.going:'')
+                + (race.class?' · '+race.class:'') + ' · ' + picks.length + ' 匹'
+              + '</div>'
+            + '</div>'
+            + '<div style="margin-left:auto;font-size:12px;color:var(--mut);white-space:nowrap">' + topHorse + '</div>'
+            + '<span class="tp-chevron">▶</span>'
+          + '</div>'
+          + '<div class="tp-table-wrap">'
+            + '<table class="tp-table"><thead><tr>'
+              + '<th>排名</th><th>馬號</th><th>馬名 / 騎師 / 練馬師</th><th>檔</th>'
+              + '<th>馬ELO</th><th>騎ELO</th><th>練ELO</th><th>綜合ELO</th>'
+              + '<th>因子調整</th><th>最終分</th><th>勝率</th><th>前三</th>'
+            + '</tr></thead><tbody>' + rows + '</tbody></table>'
+          + '</div>'
+        + '</div>';
+      }).join('');
+    }
+
     // ── 初始化：直接渲染伺服器端數據，無需 fetch ──
   function safeRender(name, fn) {
     try { fn(); } catch (e) { console.error('[admin] ' + name + ' 渲染失敗:', e.message, e); }
