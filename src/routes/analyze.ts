@@ -855,6 +855,7 @@ analyzeRoutes.get('/factors', (c) => {
 
   // GET /api/analyze/today-picks — 即日排位全因子預測
   analyzeRoutes.get('/today-picks', async (c) => {
+    try {
     const db = c.env.DB;
     const engine: EloEngine = c.req.query('engine') === 'v11' ? 'v11' : 'v12';
     const todayStr = new Date().toISOString().split('T')[0];
@@ -976,5 +977,8 @@ analyzeRoutes.get('/factors', (c) => {
     }));
     const eloReady = racePredictions.some((r) => r.picks?.some((p: any) => p.eloComposite != null));
     return c.json({ date: targetDate, venue: meeting.venue, trackCondition: meeting.track_condition, eloEngine: engine, eloWeights: ELO_WEIGHTS, eloReady, races: racePredictions, generatedAt: new Date().toISOString() });
+    } catch (err: any) {
+      return c.json({ error: 'today-picks failed', detail: err?.message ?? String(err) }, 500);
+    }
   });
   
