@@ -81,7 +81,7 @@
     }
 
     const db = new Database(dbPath);
-    db.exec('PRAGMA foreign_keys = ON;');
+    db.exec('PRAGMA foreign_keys = OFF;'); // scratch DB: FK off, push-delta handles referential ordering
 
     const deleteSentinels = db.prepare(
       'DELETE FROM entries_upcoming WHERE race_date = ? AND venue = ? AND race_number = 0',
