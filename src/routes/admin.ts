@@ -375,7 +375,7 @@ adminRoutes.post('/api/dispatch', async (c) => {
     'capy_race_daily.yml', 'capy_pool_a.yml', 'capy_odds.yml',
     'capy_d1_sync.yml', 'capy_d1_sync_entries.yml', 'capy_d1_sync_pool_a.yml',
     'capy_d1_bulk_backfill.yml', 'capy_entries.yml',
-    'capy_fixture_weekly.yml', 'capy_integrity_audit.yml',
+    'capy_fixture_weekly.yml', 'capy_integrity_audit.yml', 'capy_racecard.yml',
   ]);
   if (!ALLOWED.has(body.workflow)) return c.json({ error: `workflow ${body.workflow} not whitelisted` }, 400);
   const res = await fetch(
