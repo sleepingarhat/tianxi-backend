@@ -1125,6 +1125,10 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
         var el = document.getElementById('nrd-r' + raceNum);
         if (el) el.classList.toggle('open');
       }
+      function toggleTpRace(raceNum) {
+        var el = document.getElementById('tp-r' + raceNum);
+        if (el) el.classList.toggle('open');
+      }
 
   
     // ── 即日全因子預測 ──
