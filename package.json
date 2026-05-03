@@ -8,7 +8,8 @@
     "db:migrate": "wrangler d1 execute tianxi-db --local --file=./src/db/schema.sql && wrangler d1 execute tianxi-db --local --file=./src/db/schema_v2.sql",
     "db:migrate:remote": "wrangler d1 execute tianxi-db --remote --file=./src/db/schema.sql && wrangler d1 execute tianxi-db --remote --file=./src/db/schema_v2.sql",
     "db:seed": "tsx scripts/import-csv.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "scrape-racecard": "tsx scripts/scrape-racecard.ts"
   },
   "dependencies": {
     "hkjc-api": "^1.0.5",
