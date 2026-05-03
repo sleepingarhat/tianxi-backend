@@ -658,15 +658,46 @@ analyzeRoutes.get('/top-picks', async (c) => {
       WHERE rr.race_id = ? ORDER BY rr.horse_number
     `).bind(raceId).all<any>();
     picks = (results ?? []).map((r: any, i: number) => ({
-      horseId: r.horse_id, horseNumber: r.horse_number,
-      nameCh: r.name_ch, nameEn: r.name_en, draw: r.draw, winOdds: r.win_odds,
-      horseElo: null, jockeyElo: null, trainerElo: null,
-      eloComposite: null, factorBonus: 0, finalScore: null,
-      pWin: null, pTop3: null, valueDelta: null, rank: i + 1,
-    }));
-  }
+        horseId: r.horse_id, horseNumber: r.horse_number,
+        nameCh: r.name_ch, nameEn: r.name_en, draw: r.draw, winOdds: r.win_odds,
+        horseElo: null, jockeyElo: null, trainerElo: null,
+        eloComposite: null, factorBonus: 0, finalScore: null,
+        pWin: null, pTop3: null, valueDelta: null, rank: i + 1,
+      }));
+    }
 
-  const eloReady = picks.some((p: any) => p.eloComposite != null);
+    // Upcoming race fallback: race_results empty → try entries_upcoming (ELO-only ranking)
+    if (!picks.length) {
+      const { results: euRows } = await c.env.DB.prepare(`
+        SELECT e.horse_id, e.horse_number, h.name_ch, h.name_en
+        FROM entries_upcoming e JOIN horses h ON h.id = e.horse_id
+        WHERE e.race_date = ? AND (e.race_number = ? OR e.race_number IS NULL)
+        ORDER BY e.horse_number
+      `).bind(race.date, race.race_number).all<any>().catch(() => ({ results: [] as any[] }));
+      if (euRows?.length) {
+        const euEnriched = await Promise.all((euRows ?? []).map(async (r: any) => {
+          const hRead = await fetchAxisEloReading(c.env.DB, 'horse', r.horse_id, race.date, engine).catch(() => null);
+          return {
+            horseId: r.horse_id, horseNumber: r.horse_number,
+            nameCh: r.name_ch, nameEn: r.name_en, jockeyCh: null, trainerCh: null,
+            draw: null, winOdds: null,
+            horseElo: hRead?.rating != null ? Math.round(hRead.rating * 10) / 10 : null,
+            jockeyElo: null, trainerElo: null,
+            eloComposite: hRead?.rating != null ? Math.round(hRead.rating * 10) / 10 : null,
+            eloEngine: engine, horseConfidence: hRead?.confidence ?? null,
+            horseFrozen: hRead?.isFrozen ?? false, horseRetired: hRead?.isRetired ?? false,
+            factorBonus: 0, factorBreakdown: null,
+            finalScore: hRead?.rating != null ? Math.round(hRead.rating * 10) / 10 : null,
+            daysSinceLast: null, pWin: null, pTop3: null, valueDelta: null, rank: 0,
+          };
+        }));
+        euEnriched.sort((a, b) => (b.horseElo ?? 0) - (a.horseElo ?? 0));
+        euEnriched.forEach((p, i) => { p.rank = i + 1; });
+        picks = euEnriched;
+      }
+    }
+
+    const eloReady = picks.some((p: any) => p.eloComposite != null);
   const engineInUse = picks.find((p: any) => p.eloEngine)?.eloEngine ?? engine;
   return c.json({
     raceId,
