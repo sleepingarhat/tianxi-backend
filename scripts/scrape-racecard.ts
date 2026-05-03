@@ -199,9 +199,9 @@
           const tNameEn: string = runner.trainer?.name_en ?? '';
           const tId: string | null = tCode ? `trainer_${tCode}` : null;
 
-          // Seed FK stubs so FK constraints pass (horses id convention: 'horse_<CODE>')
-          if (horseId && horseCode) {
-            upsertHorse.run(horseId, horseCode, runner.name_en ?? horseCode, runner.name_ch ?? null);
+          // Horse stub uses prefixed id 'horse_CODE' so push-delta horseRef ('horse_' || horse_id) matches
+          if (horseCode) {
+            upsertHorse.run(`horse_${horseCode}`, horseCode, runner.name_en ?? horseCode, runner.name_ch ?? null);
           }
           if (jId) upsertJockey.run(jId, jNameEn || jCode, jNameCh || null);
           if (tId) upsertTrainer.run(tId, tNameEn || tCode, tNameCh || null);
@@ -210,8 +210,8 @@
           upsert.run(
             id, meetingDate, venueCode, raceNo, raceClass, distance, track, course,
             horseId, horseNo, horseCode,
-            draw, jNameCh || null, jId,
-            tNameCh || null, tId,
+            draw, jNameCh || null, null, // jockey_id = null (avoids FK; name kept for display)
+            tNameCh || null, null, // trainer_id = null (avoids FK; name kept for display)
             actualWeight, declaredWeight, gear,
             rating, priorityOrder,
             new Date().toISOString(), sourceCommit,
