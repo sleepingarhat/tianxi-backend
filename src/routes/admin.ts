@@ -135,7 +135,8 @@ type Status = 'ok' | 'warn' | 'bad';
 function assessHistory(count: number | null, latest: string | null, minCount: number, maxStaleDays: number): Status {
   if (count == null || count === 0) return 'bad';
   if (count < minCount * 0.3) return 'bad';
-  const ageDays = latest ? (Date.now() - new Date(latest).getTime()) / 86400000 : 999;
+  if (!latest) return count >= minCount ? 'ok' : 'warn';
+  const ageDays = (Date.now() - new Date(latest).getTime()) / 86400000;
   if (ageDays > maxStaleDays * 3) return 'bad';
   return 'ok';
 }
