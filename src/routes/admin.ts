@@ -743,6 +743,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
   function renderCoverage() {
     const c = D.coverage || {};
     const ds = document.querySelector('#coverDS tbody');
+    if (!ds) { console.error('[admin] #coverDS tbody not found'); return; }
     if (!c.datasets) { ds.innerHTML = '<tr><td colspan="7" class="bad">資料載入失敗</td></tr>'; return; }
     ds.innerHTML = (c.datasets || []).map(d =>
       '<tr>' +
@@ -756,6 +757,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
       '</tr>'
     ).join('');
     const fc = document.querySelector('#coverFac tbody');
+    if (!fc) { console.error('[admin] #coverFac tbody not found'); return; }
     fc.innerHTML = (c.factors || []).map(f =>
       '<tr>' +
       '<td><strong>' + f.label + '</strong><div class="muted-cell">' + f.key + '</div></td>' +
@@ -772,6 +774,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
   function renderStatus() {
     const s = D.status || {};
     const el = document.getElementById('status');
+    if (!el) { console.error('[admin] #status not found'); return; }
     if (!s.counts) { el.innerHTML = '<div class="tile bad">資料載入失敗</div>'; return; }
     const tiles = [
       ['賽馬日', s.counts.meetings, (s.dates.earliestMeeting||'?') + ' → ' + (s.dates.latestMeeting||'?'), ''],
@@ -798,6 +801,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
   function renderGaps() {
     const g = D.gaps || {};
     const tb = document.querySelector('#gaps tbody');
+    if (!tb) { console.error('[admin] #gaps tbody not found'); return; }
     if (!g.suspectMonths || !g.suspectMonths.length) {
       tb.innerHTML = '<tr><td colspan="2" class="ok">✓ 所有月份正常</td></tr>';
     } else {
@@ -808,6 +812,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
   function renderAlerts() {
     const a = D.alerts || {};
     const bar = document.getElementById('alertbar');
+    if (!bar) { console.error('[admin] #alertbar not found'); return; }
     if (!a.alerts || !a.alerts.length) {
       bar.innerHTML = '<div class="alert ok">✓ 系統正常 · 無告警</div>'; return;
     }
@@ -819,6 +824,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
   function renderRuns() {
     const r = D.runs || {};
     const tb = document.querySelector('#runs tbody');
+    if (!tb) { console.error('[admin] #runs tbody not found'); return; }
     if (!r.runs || !r.runs.length) { tb.innerHTML = '<tr><td colspan="5" class="warn">無運行記錄</td></tr>'; return; }
     tb.innerHTML = r.runs.map(x => {
       const st = '<span class="pill ' + x.status + '">' + x.status + '</span>';
@@ -832,6 +838,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
   function renderMeetings() {
     const data = D.meetings || {};
     const tb = document.querySelector('#recentMeetings tbody');
+    if (!tb) { console.error('[admin] #recentMeetings tbody not found'); return; }
     if (!data.meetings || !data.meetings.length) {
       tb.innerHTML = '<tr><td colspan="5" class="warn">無賽事資料</td></tr>'; return;
     }
@@ -949,12 +956,15 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
   }
 
   // ── 初始化：直接渲染伺服器端數據，無需 fetch ──
-  renderAlerts();
-  renderCoverage();
-  renderStatus();
-  renderGaps();
-  renderRuns();
-  renderMeetings();
+  function safeRender(name, fn) {
+    try { fn(); } catch (e) { console.error('[admin] ' + name + ' 渲染失敗:', e.message, e); }
+  }
+  safeRender('renderAlerts', renderAlerts);
+  safeRender('renderCoverage', renderCoverage);
+  safeRender('renderStatus', renderStatus);
+  safeRender('renderGaps', renderGaps);
+  safeRender('renderRuns', renderRuns);
+  safeRender('renderMeetings', renderMeetings);
   document.getElementById('refreshClock').textContent = '載入時間：' + new Date().toLocaleTimeString('zh-HK') + ' · 每 60 秒自動刷新';
   // Auto-reload page every 60s for fresh data
   setTimeout(() => window.location.reload(), 60000);
