@@ -576,26 +576,40 @@ async function fetchAdminPageData(env: AdminEnv): Promise<Record<string, any>> {
       ).bind(todayStr).first<any>().catch(() => null)
       ?? await db.prepare(`SELECT * FROM race_meetings ORDER BY date DESC LIMIT 1`).first<any>().catch(() => null);
       if (tm) {
-        const [racesRes, euRes, oddsRes] = await Promise.all([
-          db.prepare(`SELECT id, race_number, title, class, distance, start_time FROM races WHERE meeting_id = ? ORDER BY race_number`).bind(tm.id).all<any>().catch(() => ({ results: [] as any[] })),
-          db.prepare(`SELECT DISTINCT e.horse_code, h.name_ch, h.name_en FROM entries_upcoming e LEFT JOIN horses h ON h.id = e.horse_id WHERE e.race_date = ? ORDER BY e.horse_code`).bind(tm.date).all<any>().catch(() => ({ results: [] as any[] })),
-          db.prepare(`SELECT o.race_number, o.combination, o.odds FROM odds_snapshots o INNER JOIN (SELECT race_number, MAX(snapshot_at) AS ls FROM odds_snapshots WHERE race_date = ? AND venue = ? AND pool_type = 'WIN' GROUP BY race_number) lt ON o.race_number = lt.race_number AND o.snapshot_at = lt.ls WHERE o.race_date = ? AND o.venue = ? AND o.pool_type = 'WIN' ORDER BY o.race_number, CAST(o.combination AS INTEGER)`).bind(tm.date, tm.venue, tm.date, tm.venue).all<any>().catch(() => ({ results: [] as any[] })),
-        ]);
-        const oddsMap: Record<number, Record<string, number>> = {};
-        for (const o of (oddsRes.results ?? [])) {
-          const oo = o as any;
-          if (!oddsMap[oo.race_number]) oddsMap[oo.race_number] = {};
-          oddsMap[oo.race_number][oo.combination] = oo.odds;
-        }
-        nextRaceDay = {
-          date: tm.date, venue: tm.venue, trackCondition: tm.track_condition,
-          isUpcoming: tm.date >= todayStr,
-          races: (racesRes.results ?? []).map((r: any) => ({
-            id: r.id, raceNumber: r.race_number, title: r.title, class: r.class,
-            distance: r.distance, startTime: r.start_time, odds: oddsMap[r.race_number] ?? {},
-          })),
-          horses: euRes.results ?? [],
-        };
+        const [racesRes, euRes, oddsRes, formRes] = await Promise.all([
+            db.prepare(`SELECT id, race_number, title, class, distance, start_time, track, course, going FROM races WHERE meeting_id = ? ORDER BY race_number`).bind(tm.id).all<any>().catch(() => ({ results: [] as any[] })),
+            db.prepare(`SELECT e.race_number, e.horse_number, e.horse_code, e.horse_id, e.draw, e.declared_weight, e.actual_weight, e.jockey_name, e.trainer_name, e.gear, e.rating, e.priority_order, h.name_ch, h.name_en, h.age, h.sex, h.current_rating FROM entries_upcoming e LEFT JOIN horses h ON h.id = e.horse_id WHERE e.race_date = ? AND e.venue = ? ORDER BY e.race_number, e.horse_number`).bind(tm.date, tm.venue).all<any>().catch(() => ({ results: [] as any[] })),
+            db.prepare(`SELECT o.race_number, o.combination, o.odds FROM odds_snapshots o INNER JOIN (SELECT race_number, MAX(snapshot_at) AS ls FROM odds_snapshots WHERE race_date = ? AND venue = ? AND pool_type = 'WIN' GROUP BY race_number) lt ON o.race_number = lt.race_number AND o.snapshot_at = lt.ls WHERE o.race_date = ? AND o.venue = ? AND o.pool_type = 'WIN' ORDER BY o.race_number, CAST(o.combination AS INTEGER)`).bind(tm.date, tm.venue, tm.date, tm.venue).all<any>().catch(() => ({ results: [] as any[] })),
+            db.prepare(`SELECT rr.horse_id, rr.finishing_position FROM race_results rr INNER JOIN races ra ON ra.id = rr.race_id WHERE rr.horse_id IN (SELECT horse_id FROM entries_upcoming WHERE race_date = ? AND venue = ? AND horse_id IS NOT NULL) AND ra.date < ? ORDER BY rr.horse_id, ra.date DESC LIMIT 600`).bind(tm.date, tm.venue, tm.date).all<any>().catch(() => ({ results: [] as any[] })),
+          ]);
+          const oddsMap: Record<number, Record<string, number>> = {};
+          for (const o of (oddsRes.results ?? [])) {
+            const oo = o as any;
+            if (!oddsMap[oo.race_number]) oddsMap[oo.race_number] = {};
+            oddsMap[oo.race_number][oo.combination] = oo.odds;
+          }
+          const formMap: Record<string, number[]> = {};
+          for (const f of (formRes.results ?? [])) {
+            const ff = f as any;
+            if (!formMap[ff.horse_id]) formMap[ff.horse_id] = [];
+            if (formMap[ff.horse_id].length < 6) formMap[ff.horse_id].push(ff.finishing_position);
+          }
+          const entriesByRace: Record<number, any[]> = {};
+          for (const e of (euRes.results ?? [])) {
+            const en = e as any;
+            if (!entriesByRace[en.race_number]) entriesByRace[en.race_number] = [];
+            entriesByRace[en.race_number].push({ ...en, recentForm: formMap[en.horse_id] ?? [] });
+          }
+          nextRaceDay = {
+            date: tm.date, venue: tm.venue, trackCondition: tm.track_condition,
+            isUpcoming: tm.date >= todayStr,
+            races: (racesRes.results ?? []).map((r: any) => ({
+              id: r.id, raceNumber: r.race_number, title: r.title, class: r.class,
+              distance: r.distance, startTime: r.start_time, track: r.track, course: r.course,
+              going: r.going, odds: oddsMap[r.race_number] ?? {},
+              entries: entriesByRace[r.race_number] ?? [],
+            })),
+          };
       }
     } catch {}
   
@@ -671,7 +685,37 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
   .used-yes { color:var(--green); font-weight:600 }
   .used-no { color:var(--mut) }
   .weight { font-family: "JetBrains Mono", ui-monospace, monospace; font-size:12px }
-</style></head>
+    /* ── 即日排位表 ── */
+    .nrd-race { margin-bottom:10px; border:1px solid var(--rule); border-radius:6px; background:#fff; overflow:hidden }
+    .nrd-race-hd { display:flex; align-items:center; gap:12px; padding:10px 14px; background:#fafaf8; cursor:pointer; user-select:none }
+    .nrd-race-hd:hover { background:#f2ede6 }
+    .nrd-rnum { width:34px; height:34px; border-radius:50%; background:var(--blue); color:#fff; font-size:15px; font-weight:700; display:flex; align-items:center; justify-content:center; flex-shrink:0 }
+    .nrd-race-meta { flex:1 }
+    .nrd-race-title { font-size:13px; font-weight:600; margin:0 0 1px }
+    .nrd-race-sub { font-size:11px; color:var(--mut) }
+    .nrd-race-time { margin-left:auto; font-size:12px; color:var(--mut); font-variant-numeric:tabular-nums; white-space:nowrap }
+    .nrd-chevron { color:var(--mut); font-size:12px; margin-left:6px; transition:transform .2s }
+    .nrd-race.open .nrd-chevron { transform:rotate(90deg) }
+    .nrd-table-wrap { display:none }
+    .nrd-race.open .nrd-table-wrap { display:block }
+    .nrd-table { width:100%; border-collapse:collapse; font-size:12px }
+    .nrd-table th { background:#f0ede8; font-size:11px; font-weight:500; letter-spacing:.04em; padding:5px 8px; text-align:left; border-bottom:1px solid var(--rule); white-space:nowrap }
+    .nrd-table td { padding:6px 8px; border-bottom:1px solid var(--rule); vertical-align:middle }
+    .nrd-table tr:last-child td { border-bottom:0 }
+    .nrd-hname { font-size:13px; font-weight:700 }
+    .nrd-jt { font-size:11px; color:var(--mut); margin-top:1px }
+    .nrd-odds-fav  { display:inline-block; padding:2px 7px; border-radius:4px; font-weight:700; font-size:13px; background:#c8102e; color:#fff; font-variant-numeric:tabular-nums }
+    .nrd-odds-low  { display:inline-block; padding:2px 7px; border-radius:4px; font-weight:700; font-size:13px; background:#18a355; color:#fff; font-variant-numeric:tabular-nums }
+    .nrd-odds-norm { font-size:13px; font-weight:500; font-variant-numeric:tabular-nums }
+    .nrd-odds-none { font-size:11px; color:var(--mut) }
+    .nrd-form { font-size:11px; font-family:"JetBrains Mono",ui-monospace,monospace; white-space:nowrap; letter-spacing:.01em }
+    .nrd-form .p1 { color:#18a355; font-weight:700 } .nrd-form .p2 { color:#1d5dca; font-weight:600 }
+    .nrd-form .p3 { color:#d9a40b; font-weight:600 } .nrd-form .pdnf { color:#c8102e } .nrd-form .pmut { color:var(--mut) }
+    .nrd-badge { display:inline-block; padding:1px 5px; border-radius:3px; font-size:10px; font-weight:600; margin-right:3px }
+    .nrd-badge.trump { background:#fff0c6; color:#7a5900 }
+    .nrd-badge.pri { background:#e8f5ec; color:#186e2e }
+    .nrd-badge.rsv { background:#e4e0d6; color:var(--mut) }
+  </style></head>
 <body>
   <h1>天喜 · 內部控制台 <span class="pulse" title="實時監控"></span></h1>
   <div class="bar">伺服器端渲染 · 每 60 秒自動刷新<span class="refresh" id="refreshClock"></span></div>
@@ -941,59 +985,111 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
     }
   }
 
-  // ── Next Race Day: 即日排位表 + 即時賠率 ──
     function renderNextRaceDay() {
-      const nd = D.nextRaceDay;
-      const labelEl = document.getElementById('nrdLabel');
-      const racesEl = document.getElementById('nrdRaces');
-      const horsesEl = document.getElementById('nrdHorses');
-      if (!racesEl) return;
-      if (!nd) {
-        if (labelEl) labelEl.textContent = '';
-        racesEl.innerHTML = '<p style="color:var(--mut);font-size:13px">暫無即日賽事資料</p>';
-        if (horsesEl) horsesEl.innerHTML = '';
-        return;
-      }
-      const venueLabel = nd.venue === 'ST' ? '沙田' : nd.venue === 'HV' ? '跑馬地' : (nd.venue || '');
-      if (labelEl) labelEl.textContent = nd.date + ' · ' + venueLabel + (nd.trackCondition ? ' · ' + nd.trackCondition : '') + (nd.isUpcoming ? ' · 待賽' : ' · 已賽');
-      if (!nd.races || !nd.races.length) {
-        racesEl.innerHTML = '<p style="color:var(--mut);font-size:13px">排位表資料暫未同步</p>';
-      } else {
-        racesEl.innerHTML = nd.races.map(function(r) {
-          const oddsEntries = r.odds ? Object.entries(r.odds) : [];
-          const hasOdds = oddsEntries.length > 0;
-          let oddsHtml = '';
-          if (hasOdds) {
-            oddsHtml = '<div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:4px 12px">' +
-              oddsEntries.map(function(e) {
-                const hn = e[0], o = Number(e[1]);
-                const low = o > 0 && o < 5;
-                return '<span style="font-size:12px' + (low ? ';color:var(--green);font-weight:700' : '') + '">' +
-                  '<strong>' + hn + '</strong> <span style="color:var(--mut)">' + o + '</span></span>';
-              }).join('') + '</div>';
-          } else {
-            oddsHtml = '<div style="font-size:11px;color:var(--mut);margin-top:4px">暫無即時賠率</div>';
-          }
-          return '<div style="margin-bottom:10px;padding:10px 14px;border:1px solid var(--rule);border-radius:6px;background:var(--card)">' +
-            '<div style="font-size:13px"><strong>第' + r.raceNumber + '場</strong>' +
-            (r.title ? ' · ' + r.title : '') +
-            (r.distance ? ' · ' + r.distance + 'm' : '') +
-            (r.class ? ' <span style="color:var(--mut)">' + r.class + '</span>' : '') +
-            (r.startTime ? ' <span style="font-size:11px;color:var(--mut);margin-left:4px">' + r.startTime + '</span>' : '') +
-            '</div>' + oddsHtml + '</div>';
-        }).join('');
-      }
-      if (horsesEl) {
-        if (nd.horses && nd.horses.length) {
-          horsesEl.innerHTML = '<div style="margin-top:8px"><div style="font-size:12px;color:var(--mut);margin-bottom:6px">入稟馬匹（' + nd.horses.length + ' 匹，未分場次）</div>' +
-            '<div style="display:flex;flex-wrap:wrap;gap:4px">' +
-            nd.horses.map(function(h) {
-              return '<span style="font-size:11px;padding:2px 7px;border:1px solid var(--rule);border-radius:4px;background:var(--card)">' +
-                h.horse_code + (h.name_ch ? ' ' + h.name_ch : '') + '</span>';
-            }).join('') + '</div></div>';
-        } else {
-          horsesEl.innerHTML = '';
+        const nd = D.nextRaceDay;
+        const labelEl = document.getElementById('nrdLabel');
+        const racesEl = document.getElementById('nrdRaces');
+        const horsesEl = document.getElementById('nrdHorses');
+        if (!racesEl) return;
+        if (!nd) {
+          if (labelEl) labelEl.textContent = '';
+          racesEl.innerHTML = '<p style="color:var(--mut);font-size:13px">暫無即日賽事資料</p>';
+          if (horsesEl) horsesEl.innerHTML = '';
+          return;
         }
+        const venueLabel = nd.venue === 'ST' ? '沙田' : nd.venue === 'HV' ? '跑馬地' : (nd.venue || '');
+        if (labelEl) labelEl.textContent = nd.date + ' · ' + venueLabel + (nd.trackCondition ? ' · ' + nd.trackCondition : '') + (nd.isUpcoming ? ' · 待賽' : ' · 已賽');
+
+        function fmtForm(arr) {
+          if (!arr || !arr.length) return '<span class="pmut">—</span>';
+          return arr.map(function(p) {
+            if (p === 999 || p === null) return '<span class="pdnf">U</span>';
+            if (p === 1) return '<span class="p1">1</span>';
+            if (p === 2) return '<span class="p2">2</span>';
+            if (p === 3) return '<span class="p3">3</span>';
+            return '<span class="pmut">' + p + '</span>';
+          }).join('<span class="pmut">/</span>');
+        }
+
+        function fmtOdds(oddsMap, horseNum) {
+          const o = oddsMap ? oddsMap[String(horseNum)] : null;
+          if (o == null) return '<span class="nrd-odds-none">—</span>';
+          const n = Number(o);
+          // Find min odds in map to determine favourite
+          const vals = Object.values(oddsMap).map(Number).filter(x => x > 0);
+          const minOdds = vals.length ? Math.min(...vals) : 999;
+          if (n === minOdds && n < 10) return '<span class="nrd-odds-fav">' + n + '</span>';
+          if (n < 5) return '<span class="nrd-odds-low">' + n + '</span>';
+          return '<span class="nrd-odds-norm">' + n + '</span>';
+        }
+
+        function buildRaceHtml(r) {
+          const trackStr = [r.track, r.course].filter(Boolean).join(', ');
+          const subStr = [r.class, r.distance ? r.distance + '米' : null, trackStr].filter(Boolean).join(' · ');
+          const entries = r.entries || [];
+          const hasEntries = entries.length > 0;
+
+          let entriesHtml = '';
+          if (hasEntries) {
+            const rows = entries.map(function(e) {
+              const name = e.name_ch || e.horse_code || '—';
+              const jt = [e.jockey_name, e.trainer_name].filter(Boolean).join(' / ');
+              const draw = e.draw != null ? e.draw : '—';
+              const wt = e.declared_weight || e.actual_weight;
+              const wtStr = wt != null ? wt : '—';
+              const rating = e.rating || e.current_rating;
+              const ratingStr = rating != null ? rating : '—';
+              const badge = e.priority_order && e.priority_order !== '正選' ?
+                '<span class="nrd-badge rsv">' + e.priority_order + '</span>' : '';
+              return '<tr>' +
+                '<td style="color:var(--mut);font-size:11px;white-space:nowrap">' + (e.horse_number || '—') + '</td>' +
+                '<td><div class="nrd-hname">' + badge + name + '</div><div class="nrd-jt">' + (jt || '—') + '</div></td>' +
+                '<td style="text-align:center">' + fmtOdds(r.odds, e.horse_number) + '</td>' +
+                '<td style="text-align:center;color:var(--mut)">' + draw + '</td>' +
+                '<td style="text-align:right;color:var(--mut)">' + wtStr + '</td>' +
+                '<td style="text-align:right;color:var(--mut)">' + ratingStr + '</td>' +
+                '<td><div class="nrd-form">' + fmtForm(e.recentForm) + '</div></td>' +
+                '</tr>';
+            }).join('');
+            entriesHtml = '<div class="nrd-table-wrap">' +
+              '<table class="nrd-table"><thead><tr>' +
+              '<th>馬號</th><th>馬名 · 騎師 / 練馬師</th><th>獨贏</th><th>檔</th><th style="text-align:right">負磅</th><th style="text-align:right">評分</th><th>近績</th>' +
+              '</tr></thead><tbody>' + rows + '</tbody></table></div>';
+          } else {
+            entriesHtml = '<div class="nrd-table-wrap" style="padding:8px 14px;font-size:12px;color:var(--mut)">排位表資料暫未同步</div>';
+          }
+
+          return '<div class="nrd-race" id="nrd-r' + r.raceNumber + '">' +
+            '<div class="nrd-race-hd" onclick="toggleNrdRace(' + r.raceNumber + ')">' +
+            '<div class="nrd-rnum">' + r.raceNumber + '</div>' +
+            '<div class="nrd-race-meta">' +
+            '<div class="nrd-race-title">' + (r.title || '第' + r.raceNumber + '場') + '</div>' +
+            '<div class="nrd-race-sub">' + subStr + '</div>' +
+            '</div>' +
+            '<span class="nrd-race-time">' + (r.startTime ? r.startTime.replace(/^(d{2}:d{2}).*/, '$1') : '') + '</span>' +
+            '<span class="nrd-chevron">›</span>' +
+            '</div>' +
+            entriesHtml +
+            '</div>';
+        }
+
+        if (!nd.races || !nd.races.length) {
+          racesEl.innerHTML = '<p style="color:var(--mut);font-size:13px">排位表資料暫未同步</p>';
+        } else {
+          racesEl.innerHTML = nd.races.map(buildRaceHtml).join('');
+          // Auto-open first race
+          const firstRace = nd.races[0];
+          if (firstRace) {
+            const el = document.getElementById('nrd-r' + firstRace.raceNumber);
+            if (el) el.classList.add('open');
+          }
+        }
+        if (horsesEl) horsesEl.innerHTML = '';
+      }
+
+      function toggleNrdRace(raceNum) {
+        const el = document.getElementById('nrd-r' + raceNum);
+        if (el) el.classList.toggle('open');
       }
     }
 
