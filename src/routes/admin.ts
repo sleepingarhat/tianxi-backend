@@ -296,31 +296,31 @@ adminRoutes.get('/api/coverage', async (c) => {
       history: minOf(getDs('races').history, getDs('results').history),
       auto: getDs('results').auto,
       sourceLabel: 'races + race_results', note: '使用中（days since last race sweet spot 14-28）' },
-    { key: 'distance_fit', label: '途程適應', used: false, weight: 0,
+    { key: 'distance_fit', label: '途程適應', used: true, weight: 20,
       history: getDs('results').history, auto: getDs('results').auto,
-      sourceLabel: 'race_results × distance', note: 'stub 0 · 未寫入 analyze.ts' },
-    { key: 'going_fit', label: '場地適應', used: false, weight: 0,
+      sourceLabel: 'race_results × races.distance', note: '使用中 · 同途程 ±200m 歷史上位率 · 最大調整 ±20 ELO' },
+    { key: 'going_fit', label: '場地適應', used: true, weight: 15,
       history: getDs('results').history, auto: getDs('results').auto,
-      sourceLabel: 'race_results × going', note: 'stub 0' },
-    { key: 'draw_bias', label: '檔位偏差', used: false, weight: 0,
+      sourceLabel: 'race_results × races.going', note: '使用中 · 該場地狀況歷史上位率 · 最大調整 ±15 ELO' },
+    { key: 'draw_bias', label: '檔位偏差', used: true, weight: 10,
       history: getDs('results').history, auto: getDs('results').auto,
-      sourceLabel: 'race_results × venue × distance × draw', note: 'stub 0' },
-    { key: 'weight_delta', label: '負磅變化', used: false, weight: 0,
+      sourceLabel: 'race_results × venue × distance × draw', note: '使用中 · 需 ≥20 樣本方啟效 · 最大調整 ±10 ELO' },
+    { key: 'weight_delta', label: '負磅變化', used: true, weight: 8,
       history: getDs('results').history, auto: getDs('results').auto,
-      sourceLabel: 'race_results.horse_weight', note: 'stub 0' },
-    { key: 'trackwork_fit', label: '晨操狀態', used: false, weight: 0,
+      sourceLabel: 'race_results.actual_weight', note: '使用中 · 與近4 5 戰均磅比較 · 最大調整 ±8 ELO' },
+    { key: 'trackwork_fit', label: '晨操狀態', used: true, weight: 8,
       history: getDs('trackwork').history, auto: getDs('trackwork').auto,
-      sourceLabel: 'horse_trackwork', note: 'stub 0 · 資料本身亦未齊' },
-    { key: 'injury', label: '傷患', used: false, weight: 0,
+      sourceLabel: 'horse_trackwork (14d window)', note: '使用中 · 甜區 4-6 課/14天 +8 · 過操減分 · 最大調整 ±8 ELO' },
+    { key: 'injury', label: '傷患', used: true, weight: 15,
       history: getDs('injury').history, auto: getDs('injury').auto,
-      sourceLabel: 'horse_injury', note: 'stub 0' },
-    { key: 'jt_combo', label: '騎練配對', used: false, weight: 0,
+      sourceLabel: 'horse_injury (180d lookback)', note: '使用中 · 指數衰減 45 天半衰期 · 未復原最大 -15 ELO' },
+    { key: 'jt_combo', label: '騎練配對', used: true, weight: 12,
       history: minOf(getDs('races').history, getDs('jockeys').history, getDs('trainers').history),
       auto: getDs('races').auto,
-      sourceLabel: 'races × jockeys × trainers', note: 'stub 0' },
+      sourceLabel: 'race_results × jockey_id × trainer_id', note: '使用中 · 需 ≥10 合作場次 · 最大調整 ±12 ELO' },
   ];
 
-  return c.json({ datasets, factors: factors.filter((f: any) => f.used), checkedAt: new Date().toISOString() });
+  return c.json({ datasets, factors, checkedAt: new Date().toISOString() });
 });
 
 // ── /api/alerts (unchanged) ──
@@ -525,13 +525,13 @@ async function fetchAdminPageData(env: AdminEnv): Promise<Record<string, any>> {
     { key: 'jockey_elo', label: '騎師 ELO', used: true, weight: 0.2, history: getDs('jockeyElo').history, auto: getDs('jockeyElo').auto, sourceLabel: 'jockey_elo_snapshots', note: '使用中' },
     { key: 'trainer_elo', label: '練馬師 ELO', used: true, weight: 0.1, history: getDs('trainerElo').history, auto: getDs('trainerElo').auto, sourceLabel: 'trainer_elo_snapshots', note: '使用中' },
     { key: 'recency', label: '近戰狀態', used: true, weight: null, history: minOf(getDs('races').history, getDs('results').history), auto: getDs('results').auto, sourceLabel: 'races + race_results', note: '使用中（days since last race sweet spot 14-28）' },
-    { key: 'distance_fit', label: '途程適應', used: false, weight: 0, history: getDs('results').history, auto: getDs('results').auto, sourceLabel: 'race_results × distance', note: 'stub 0 · 未寫入 analyze.ts' },
-    { key: 'going_fit', label: '場地適應', used: false, weight: 0, history: getDs('results').history, auto: getDs('results').auto, sourceLabel: 'race_results × going', note: 'stub 0' },
-    { key: 'draw_bias', label: '檔位偏差', used: false, weight: 0, history: getDs('results').history, auto: getDs('results').auto, sourceLabel: 'race_results × venue × distance × draw', note: 'stub 0' },
-    { key: 'weight_delta', label: '負磅變化', used: false, weight: 0, history: getDs('results').history, auto: getDs('results').auto, sourceLabel: 'race_results.horse_weight', note: 'stub 0' },
-    { key: 'trackwork_fit', label: '晨操狀態', used: false, weight: 0, history: getDs('trackwork').history, auto: getDs('trackwork').auto, sourceLabel: 'horse_trackwork', note: 'stub 0 · 資料本身亦未齊' },
-    { key: 'injury', label: '傷患', used: false, weight: 0, history: getDs('injury').history, auto: getDs('injury').auto, sourceLabel: 'horse_injury', note: 'stub 0' },
-    { key: 'jt_combo', label: '騎練配對', used: false, weight: 0, history: minOf(getDs('races').history, getDs('jockeys').history, getDs('trainers').history), auto: getDs('races').auto, sourceLabel: 'races × jockeys × trainers', note: 'stub 0' },
+    { key: 'distance_fit', label: '途程適應', used: true, weight: 20, history: getDs('results').history, auto: getDs('results').auto, sourceLabel: 'race_results × races.distance', note: '使用中 · 同途程 ±200m 歷史上位率 · 最大調整 ±20 ELO' },
+    { key: 'going_fit', label: '場地適應', used: true, weight: 15, history: getDs('results').history, auto: getDs('results').auto, sourceLabel: 'race_results × races.going', note: '使用中 · 該場地狀況歷史上位率 · 最大調整 ±15 ELO' },
+    { key: 'draw_bias', label: '檔位偏差', used: true, weight: 10, history: getDs('results').history, auto: getDs('results').auto, sourceLabel: 'race_results × venue × distance × draw', note: '使用中 · 需 ≥20 樣本方啟效 · 最大調整 ±10 ELO' },
+    { key: 'weight_delta', label: '負磅變化', used: true, weight: 8, history: getDs('results').history, auto: getDs('results').auto, sourceLabel: 'race_results.actual_weight', note: '使用中 · 與近 5 戰均磅比較 · 最大調整 ±8 ELO' },
+    { key: 'trackwork_fit', label: '晨操狀態', used: true, weight: 8, history: getDs('trackwork').history, auto: getDs('trackwork').auto, sourceLabel: 'horse_trackwork (14d window)', note: '使用中 · 甜區 4-6 課/14天 +8 · 過操減分 · 最大調整 ±8 ELO' },
+    { key: 'injury', label: '傷患', used: true, weight: 15, history: getDs('injury').history, auto: getDs('injury').auto, sourceLabel: 'horse_injury (180d lookback)', note: '使用中 · 指數衰減 45 天半衰期 · 未復原最大 -15 ELO' },
+    { key: 'jt_combo', label: '騎練配對', used: true, weight: 12, history: minOf(getDs('races').history, getDs('jockeys').history, getDs('trainers').history), auto: getDs('races').auto, sourceLabel: 'race_results × jockey_id × trainer_id', note: '使用中 · 需 ≥10 合作場次 · 最大調整 ±12 ELO' },
   ];
 
   // Alerts
@@ -797,7 +797,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
   </div>
 
   <!-- Factor coverage -->
-  <h2 class="reveal reveal-d2"><span class="grad-text">預測因子覆蓋</span><span style="color:var(--mut);font-size:10px"> 使用中因子</span><span class="h2-line"></span></h2>
+  <h2 class="reveal reveal-d2"><span class="grad-text">預測因子覆蓋</span><span id="factorCovPct" style="color:var(--cyan);font-size:11px;font-weight:600;margin-left:8px"></span><span class="h2-line"></span></h2>
   <div class="tbl-wrap reveal reveal-d3">
     <table id="coverFac"><thead><tr>
       <th>因子</th><th>使用</th><th>權重</th><th>歷史齊全</th><th>自動更新</th><th>資料來源</th><th>備註</th>
@@ -904,7 +904,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
     fc.innerHTML=(c.factors||[]).map(f=>
       '<tr>'+
       '<td><strong>'+f.label+'</strong><div class="muted-cell">'+f.key+'</div></td>'+
-      '<td>'+(f.used?'<span class="used-yes">使用中</span>':'<span class="used-no">stub</span>')+'</td>'+
+      '<td>'+(f.used?'<span class="used-yes">使用中</span>':'<span class="chip bad" style="font-size:11px">停用</span>')+'</td>'+
       '<td class="weight">'+(f.weight!=null?f.weight:'—')+'</td>'+
       '<td>'+chip(f.history,'歷史齊全',null,'未達標')+'</td>'+
       '<td>'+chip(f.auto,'自動更新',null,'停止更新')+'</td>'+
@@ -912,6 +912,12 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
       '<td class="muted-cell">'+f.note+'</td>'+
       '</tr>'
     ).join('');
+    // Show coverage % in section heading
+    const usedCount=(c.factors||[]).filter(f=>f.used).length;
+    const totalCount=(c.factors||[]).length;
+    const pct=totalCount>0?Math.round(usedCount/totalCount*100):0;
+    const pctEl=document.getElementById('factorCovPct');
+    if(pctEl)pctEl.textContent=usedCount+'/'+totalCount+' 因子使用中 · '+pct+'% 覆蓋率';
   }
 
   /* ── Render status tiles ── */
