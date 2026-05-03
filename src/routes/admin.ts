@@ -725,9 +725,8 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
   function fmtDate(s) { return s || '—' }
 
   function chip(level, okLabel, warnLabel, badLabel) {
-    const label = level === 'ok' ? (okLabel || '齊全 ✓') : level === 'warn' ? (warnLabel || '部分 ▲') : (badLabel || '未達標 ✗');
-    return '<span class="chip ' + level + '"><span class="icon">' +
-      (level === 'ok' ? '✓' : level === 'warn' ? '▲' : '✗') + '</span>' + label + '</span>';
+    const label = level === 'ok' ? (okLabel || '齊全') : level === 'warn' ? (warnLabel || '部分') : (badLabel || '未達標');
+    return '<span class="chip ' + level + '">' + label + '</span>';
   }
 
   function fmtTs(s) {
@@ -738,13 +737,12 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
     return m[2] + '-' + m[3] + ' ' + m[4] + ':' + m[5];
   }
   function fmtSuccess(s, ageH) {
-    if (!s) return '<span class="chip bad"><span class="icon">✗</span>從未成功</span>';
+    if (!s) return '<span class="chip bad">從未成功</span>';
     const label = fmtTs(s);
     // ageH thresholds: ≤26h ok, ≤72h warn, >72h bad
     const level = ageH == null ? 'bad' : ageH <= 26 ? 'ok' : ageH <= 72 ? 'warn' : 'bad';
     const suffix = ageH == null ? '' : ' (' + (ageH < 24 ? ageH.toFixed(1) + 'h' : Math.floor(ageH/24) + 'd') + ')';
-    return '<span class="chip ' + level + '"><span class="icon">' +
-      (level === 'ok' ? '✓' : level === 'warn' ? '▲' : '✗') + '</span>' + label + suffix + '</span>';
+    return '<span class="chip ' + level + '">' + label + suffix + '</span>';
   }
 
   // ── SSR render functions (read from D, no fetch needed) ──
@@ -756,8 +754,8 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
     ds.innerHTML = (c.datasets || []).map(d =>
       '<tr>' +
       '<td><strong>' + d.label + '</strong><div class="muted-cell">' + d.key + '</div></td>' +
-      '<td>' + chip(d.history, '歷史齊全 ✓', null, '未達標 ✗') + '</td>' +
-      '<td>' + chip(d.auto, '自動更新 ✓', null, '停止更新 ✗') + '</td>' +
+      '<td>' + chip(d.history, '歷史齊全', null, '未達標') + '</td>' +
+      '<td>' + chip(d.auto, '自動更新', null, '停止更新') + '</td>' +
       '<td class="muted-cell">' + fmtTs(d.lastRunAt) + '</td>' +
       '<td>' + fmtSuccess(d.lastSuccessAt, d.lastSuccessAgeH) + '</td>' +
       '<td class="muted-cell">' + d.detail + '</td>' +
@@ -771,8 +769,8 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
       '<td><strong>' + f.label + '</strong><div class="muted-cell">' + f.key + '</div></td>' +
       '<td>' + (f.used ? '<span class="used-yes">使用中</span>' : '<span class="used-no">stub（未啟用）</span>') + '</td>' +
       '<td class="weight">' + (f.weight != null ? f.weight : '—') + '</td>' +
-      '<td>' + chip(f.history, '歷史齊全 ✓', null, '未達標 ✗') + '</td>' +
-      '<td>' + chip(f.auto, '自動更新 ✓', null, '停止更新 ✗') + '</td>' +
+      '<td>' + chip(f.history, '歷史齊全', null, '未達標') + '</td>' +
+      '<td>' + chip(f.auto, '自動更新', null, '停止更新') + '</td>' +
       '<td class="muted-cell">' + f.sourceLabel + '</td>' +
       '<td class="muted-cell">' + f.note + '</td>' +
       '</tr>'
@@ -812,10 +810,10 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
     const bar = document.getElementById('alertbar');
     if (!bar) { console.error('[admin] #alertbar not found'); return; }
     if (!a.alerts || !a.alerts.length) {
-      bar.innerHTML = '<div class="alert ok">✓ 系統正常 · 無告警</div>'; return;
+      bar.innerHTML = '<div class="alert ok">系統正常 · 無告警</div>'; return;
     }
     bar.innerHTML = a.alerts.map(x =>
-      '<div class="alert ' + x.level + '">' + (x.level === 'red' ? '⚠ ' : '▲ ') + x.msg + '</div>'
+      '<div class="alert ' + x.level + '">' + x.msg + '</div>'
     ).join('');
   }
 
@@ -904,7 +902,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
       const picks = data.allPicks || data.picks || [];
       if (!picks.length) { statusEl.textContent = '無預測資料'; return; }
       const engineTag = data.eloEngine === 'v12' ? 'v1.2' : (data.eloEngine || '—');
-      statusEl.textContent = '✓ ' + (data.date || '') + ' 第' + (data.raceNumber || '') + '場 · ELO引擎 ' + engineTag + ' · ' + picks.length + ' 匹';
+      statusEl.textContent = (data.date || '') + ' 第' + (data.raceNumber || '') + '場 · ELO引擎 ' + engineTag + ' · ' + picks.length + ' 匹';
       const tb = table.querySelector('tbody');
       tb.innerHTML = picks.map(p => {
         const fmtElo = v => v != null ? Math.round(v) : '<span class="muted-cell">—</span>';
