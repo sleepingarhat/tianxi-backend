@@ -259,7 +259,7 @@ adminRoutes.get('/api/coverage', async (c) => {
         'Capy Entries — Race Card (排位表)', 'Capy D1 Sync Entries — forward-looking racecards']),
       workflows: ['capy_entries', 'capy_d1_sync_entries'], detail: `${ec} 行 · 最新 ${fd(latestE)}` },
     { key: 'odds', label: '賠率', count: oc, latest: latestOdds,
-      history: assessHistory(oc, latestOdds, 1000, 1),
+      history: assessHistory(oc, latestOdds, 1000, 3),
       ...rowAuto(wf, ['capy_odds.yml', 'Capy Odds — live snapshot (hkjc-api GraphQL)']),
       workflows: ['capy_odds'], detail: `${oc} 行 · 最新 ${fd(latestOdds)}` },
     { key: 'horseElo', label: '馬匹 ELO', count: heC, latest: latestElo,
@@ -333,7 +333,7 @@ adminRoutes.get('/api/alerts', async (c) => {
 
   const oddsLatest = await scalar<string>(db, `SELECT MAX(snapshot_at) FROM odds_snapshots`);
   const oddsCount = await scalar<number>(db, `SELECT COUNT(*) FROM odds_snapshots`);
-  if (!oddsCount) alerts.push({ level: 'red', msg: '賠率表 odds_snapshots 完全冇資料' });
+  if (!oddsCount) alerts.push({ level: 'yellow', msg: '賠率表 odds_snapshots 未有資料（賽事期間自動填充）' });
   else if (oddsLatest) {
     const hrs = (now.getTime() - new Date(oddsLatest).getTime()) / 3600000;
     if (hrs > 6) alerts.push({ level: 'red', msg: `賠率已停更新 ${hrs.toFixed(1)} 小時` });
