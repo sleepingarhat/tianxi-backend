@@ -868,35 +868,45 @@ analyzeRoutes.get('/factors', (c) => {
     if (!ids.length) return map;
     const col = `${entityTable}_id`;
     const table = `${entityTable}_elo_snapshots`;
-    const ph = ids.map(() => '?').join(', ');
-    // Use ORDER BY + JS first-per-entity (simpler than INNER JOIN subquery; avoids D1 compat issues)
+    // D1 bind-param limit = 100 per statement; chunk IDs into batches of 80 (1 slot reserved for asOf)
+    const CHUNK = 80;
+    const chunks: string[][] = [];
+    for (let i = 0; i < ids.length; i += CHUNK) chunks.push(ids.slice(i, i + CHUNK));
+    // Use ORDER BY + JS first-per-entity (avoids problematic INNER JOIN subquery in D1)
     if (engine === 'v12') {
-      try {
-        const { results } = await db.prepare(
-          `SELECT ${col}, rating, confidence, is_frozen, is_retired, is_provisional
-           FROM ${table}
-           WHERE ${col} IN (${ph}) AND axis_key = 'overall' AND as_of_date <= ? AND id LIKE 'v12:%'
-           ORDER BY ${col}, as_of_date DESC`
-        ).bind(...ids, asOf).all<any>();
-        for (const row of (results ?? [])) {
-          if (!map.has(row[col])) map.set(row[col], { rating: row.rating, confidence: row.confidence ?? null, isFrozen: !!row.is_frozen, isRetired: !!row.is_retired, isProvisional: !!row.is_provisional, engine: 'v12' });
-        }
-      } catch { /* v12 columns missing */ }
+      for (const chunk of chunks) {
+        try {
+          const ph = chunk.map(() => '?').join(', ');
+          const { results } = await db.prepare(
+            `SELECT ${col}, rating, confidence, is_frozen, is_retired, is_provisional
+             FROM ${table}
+             WHERE ${col} IN (${ph}) AND axis_key = 'overall' AND as_of_date <= ? AND id LIKE 'v12:%'
+             ORDER BY ${col}, as_of_date DESC`
+          ).bind(...chunk, asOf).all<any>();
+          for (const row of (results ?? [])) {
+            if (!map.has(row[col])) map.set(row[col], { rating: row.rating, confidence: row.confidence ?? null, isFrozen: !!row.is_frozen, isRetired: !!row.is_retired, isProvisional: !!row.is_provisional, engine: 'v12' });
+          }
+        } catch { /* v12 columns missing or query error — try v11 fallback below */ }
+      }
     }
     const missing = ids.filter(id => !map.has(id));
     if (missing.length) {
-      try {
-        const ph2 = missing.map(() => '?').join(', ');
-        const { results } = await db.prepare(
-          `SELECT ${col}, rating
-           FROM ${table}
-           WHERE ${col} IN (${ph2}) AND axis_key = 'overall' AND as_of_date <= ? AND id NOT LIKE 'v12:%'
-           ORDER BY ${col}, as_of_date DESC`
-        ).bind(...missing, asOf).all<any>();
-        for (const row of (results ?? [])) {
-          if (!map.has(row[col])) map.set(row[col], { rating: row.rating, confidence: null, isFrozen: false, isRetired: false, isProvisional: false, engine: 'v11' });
-        }
-      } catch { /* skip */ }
+      const chunks2: string[][] = [];
+      for (let i = 0; i < missing.length; i += CHUNK) chunks2.push(missing.slice(i, i + CHUNK));
+      for (const chunk of chunks2) {
+        try {
+          const ph2 = chunk.map(() => '?').join(', ');
+          const { results } = await db.prepare(
+            `SELECT ${col}, rating
+             FROM ${table}
+             WHERE ${col} IN (${ph2}) AND axis_key = 'overall' AND as_of_date <= ? AND id NOT LIKE 'v12:%'
+             ORDER BY ${col}, as_of_date DESC`
+          ).bind(...chunk, asOf).all<any>();
+          for (const row of (results ?? [])) {
+            if (!map.has(row[col])) map.set(row[col], { rating: row.rating, confidence: null, isFrozen: false, isRetired: false, isProvisional: false, engine: 'v11' });
+          }
+        } catch { /* skip */ }
+      }
     }
     return map;
   }
