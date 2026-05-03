@@ -3,6 +3,7 @@ name = "tianxi-backend"
 main = "src/index.ts"
 compatibility_date = "2025-04-14"
 compatibility_flags = ["nodejs_compat"]
+usage_model = "unbound"
 
 [vars]
 ENVIRONMENT = "production"
