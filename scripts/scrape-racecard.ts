@@ -179,7 +179,7 @@
           if (!horseNo) continue;
 
           const horseCode: string = runner.horse?.code ?? '';
-          const horseId: string | null = horseCode ? `horse_${horseCode}` : null;
+          const horseId: string | null = horseCode ? horseCode : null; // bare code, push-delta prefixes for D1
           const draw: number | null = runner.barrierDrawNumber ?? null;
           const declaredWeight: number | null = runner.handicapWeight ?? null;
           const actualWeight: number | null = runner.currentWeight ?? null;
