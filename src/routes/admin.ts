@@ -204,7 +204,7 @@ adminRoutes.get('/api/coverage', async (c) => {
     scalar<string>(db, `SELECT MAX(trackwork_date) FROM horse_trackwork`),
     scalar<string>(db, `SELECT MAX(as_of_date) FROM horse_elo_snapshots`),
     scalar<string>(db, `SELECT MAX(snapshot_at) FROM odds_snapshots`),
-    scalar<string>(db, `SELECT MAX(m.date) FROM race_results rr JOIN races r ON rr.race_id = r.id JOIN race_meetings m ON r.meeting_id = m.id`),
+    scalar<string>(db, `SELECT m.date FROM race_results rr JOIN races r ON rr.race_id = r.id JOIN race_meetings m ON r.meeting_id = m.id ORDER BY m.date DESC LIMIT 1`),
     scalar<string>(db, `SELECT MAX(injury_date) FROM horse_injury`),
     scalar<string>(db, `SELECT MAX(race_date) FROM horse_form_records`),
   ]);
