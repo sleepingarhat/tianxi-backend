@@ -1106,7 +1106,7 @@ analyzeRoutes.get('/factors', (c) => {
                      e.trainer_name, e.trainer_id, e.rating, e.priority_order,
                      e.distance, e.track, e.course, e.race_class,
                      h.name_ch, h.name_en
-               FROM entries_upcoming e LEFT JOIN horses h ON h.id = 'horse_' || e.horse_id
+               FROM entries_upcoming e LEFT JOIN horses h ON h.id = e.horse_id
                WHERE e.race_date = ? AND e.venue = ?
                ORDER BY e.race_number, e.horse_number`
             : `SELECT e.race_number, e.horse_number, e.horse_id, e.horse_code,
@@ -1114,7 +1114,7 @@ analyzeRoutes.get('/factors', (c) => {
                      e.trainer_name, e.trainer_id, e.rating, e.priority_order,
                      e.distance, e.track, e.course, e.race_class,
                      h.name_ch, h.name_en
-               FROM entries_upcoming e LEFT JOIN horses h ON h.id = 'horse_' || e.horse_id
+               FROM entries_upcoming e LEFT JOIN horses h ON h.id = e.horse_id
                WHERE e.race_date = ?
                ORDER BY e.race_number, e.horse_number`;
           const stmt = withVenue ? db.prepare(q).bind(targetDate, meeting.venue) : db.prepare(q).bind(targetDate);
