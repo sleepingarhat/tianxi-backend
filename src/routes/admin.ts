@@ -136,8 +136,7 @@ function assessHistory(count: number | null, latest: string | null, minCount: nu
   if (count == null || count === 0) return 'bad';
   if (count < minCount * 0.3) return 'bad';
   const ageDays = latest ? (Date.now() - new Date(latest).getTime()) / 86400000 : 999;
-  if (count < minCount * 0.7 || ageDays > maxStaleDays * 3) return 'warn';
-  if (ageDays > maxStaleDays) return 'warn';
+  if (ageDays > maxStaleDays * 3) return 'bad';
   return 'ok';
 }
 // Scan last 5 runs per workflow — transient states (in_progress / cancelled
@@ -321,7 +320,7 @@ adminRoutes.get('/api/coverage', async (c) => {
       sourceLabel: 'races × jockeys × trainers', note: 'stub 0' },
   ];
 
-  return c.json({ datasets, factors, checkedAt: new Date().toISOString() });
+  return c.json({ datasets, factors: factors.filter((f: any) => f.used), checkedAt: new Date().toISOString() });
 });
 
 // ── /api/alerts (unchanged) ──
@@ -567,13 +566,6 @@ async function fetchAdminPageData(env: AdminEnv): Promise<Record<string, any>> {
     GROUP BY m.id ORDER BY m.date DESC LIMIT 10
   `).all().catch(() => ({ results: [] as any[] }));
 
-  // Gap months
-  const { results: gapRows } = await db.prepare(`
-    SELECT substr(date,1,7) AS ym, COUNT(*) AS n FROM race_meetings
-    GROUP BY ym HAVING n < 5 AND substr(ym,6,2) NOT IN ('06','07','08')
-      AND ym < strftime('%Y-%m','now') ORDER BY ym
-  `).all().catch(() => ({ results: [] as any[] }));
-
   return {
     coverage: { datasets, factors },
     status: {
@@ -587,7 +579,6 @@ async function fetchAdminPageData(env: AdminEnv): Promise<Record<string, any>> {
     alerts: { alerts },
     runs: { runs: runs.slice(0, 20).map((r: any) => ({ id: r.id, name: r.name, status: r.status, conclusion: r.conclusion, updatedAt: r.updated_at, htmlUrl: r.html_url })) },
     meetings: { meetings: meetRows ?? [] },
-    gaps: { suspectMonths: gapRows ?? [] },
   };
 }
 
@@ -665,27 +656,6 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
   <h2>D1 即時計數</h2>
   <div id="status" class="grid"></div>
 
-  <h2>可疑月份（香港賽季內但場次不足 5 場）</h2>
-  <table id="gaps"><thead><tr><th>年-月</th><th>場次</th></tr></thead><tbody></tbody></table>
-
-  <h2>觸發工作流</h2>
-  <div class="actions-row">
-    <select id="wf">
-      <option value="capy_race_daily.yml">capy_race_daily（指定日期或每日）</option>
-      <option value="capy_pool_a.yml">capy_pool_a（馬匹資料＋晨操＋傷患）</option>
-      <option value="capy_odds.yml">capy_odds（即時賠率快照）</option>
-      <option value="capy_d1_sync.yml">capy_d1_sync（賽事）</option>
-      <option value="capy_d1_sync_entries.yml">capy_d1_sync_entries（排位表）</option>
-      <option value="capy_d1_sync_pool_a.yml">capy_d1_sync_pool_a（晨操／傷患）</option>
-      <option value="capy_d1_bulk_backfill.yml">capy_d1_bulk_backfill（整年補數）</option>
-      <option value="capy_entries.yml">capy_entries（明日排位）</option>
-      <option value="capy_fixture_weekly.yml">capy_fixture_weekly（每週賽期）</option>
-      <option value="capy_integrity_audit.yml">capy_integrity_audit（完整性審計）</option>
-    </select>
-    <input id="inputs" style="flex:1;min-width:240px" placeholder='inputs JSON，例：{"force":"true","date":"2017-06-14"}'>
-    <button onclick="dispatch()">觸發</button>
-  </div>
-  <div id="dispatchLog" class="log" style="display:none"></div>
 
   <h2>最近工作流運行</h2>
   <table id="runs"><thead><tr><th>ID</th><th>名稱</th><th>狀態</th><th>結果</th><th>更新時間</th></tr></thead><tbody></tbody></table>
@@ -748,8 +718,8 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
     ds.innerHTML = (c.datasets || []).map(d =>
       '<tr>' +
       '<td><strong>' + d.label + '</strong><div class="muted-cell">' + d.key + '</div></td>' +
-      '<td>' + chip(d.history, '歷史齊全 ✓', '部分歷史 ▲', '未達標 ✗') + '</td>' +
-      '<td>' + chip(d.auto, '自動更新 ✓', '間歇失敗 ▲', '無自動 ✗') + '</td>' +
+      '<td>' + chip(d.history, '歷史齊全 ✓', null, '未達標 ✗') + '</td>' +
+      '<td>' + chip(d.auto, '自動更新 ✓', null, '停止更新 ✗') + '</td>' +
       '<td class="muted-cell">' + fmtTs(d.lastRunAt) + '</td>' +
       '<td>' + fmtSuccess(d.lastSuccessAt, d.lastSuccessAgeH) + '</td>' +
       '<td class="muted-cell">' + d.detail + '</td>' +
@@ -763,8 +733,8 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
       '<td><strong>' + f.label + '</strong><div class="muted-cell">' + f.key + '</div></td>' +
       '<td>' + (f.used ? '<span class="used-yes">使用中</span>' : '<span class="used-no">stub（未啟用）</span>') + '</td>' +
       '<td class="weight">' + (f.weight != null ? f.weight : '—') + '</td>' +
-      '<td>' + chip(f.history, '歷史齊全 ✓', '部分歷史 ▲', '未達標 ✗') + '</td>' +
-      '<td>' + chip(f.auto, '自動更新 ✓', '間歇失敗 ▲', '無自動 ✗') + '</td>' +
+      '<td>' + chip(f.history, '歷史齊全 ✓', null, '未達標 ✗') + '</td>' +
+      '<td>' + chip(f.auto, '自動更新 ✓', null, '停止更新 ✗') + '</td>' +
       '<td class="muted-cell">' + f.sourceLabel + '</td>' +
       '<td class="muted-cell">' + f.note + '</td>' +
       '</tr>'
@@ -798,16 +768,6 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
       (sub ? '<div class="sub">' + sub + '</div>' : '') + '</div>').join('');
   }
 
-  function renderGaps() {
-    const g = D.gaps || {};
-    const tb = document.querySelector('#gaps tbody');
-    if (!tb) { console.error('[admin] #gaps tbody not found'); return; }
-    if (!g.suspectMonths || !g.suspectMonths.length) {
-      tb.innerHTML = '<tr><td colspan="2" class="ok">✓ 所有月份正常</td></tr>';
-    } else {
-      tb.innerHTML = g.suspectMonths.map(r => '<tr><td>' + r.ym + '</td><td class="warn">' + r.n + '</td></tr>').join('');
-    }
-  }
 
   function renderAlerts() {
     const a = D.alerts || {};
@@ -855,25 +815,6 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
     }).join('');
   }
 
-  async function dispatch() {
-    const wf = document.getElementById('wf').value;
-    const inputsRaw = document.getElementById('inputs').value.trim();
-    let inputs = {};
-    if (inputsRaw) { try { inputs = JSON.parse(inputsRaw); } catch (e) { alert('inputs JSON 格式錯誤'); return; } }
-    const logEl = document.getElementById('dispatchLog');
-    logEl.style.display = 'block';
-    logEl.textContent = 'POST /admin/api/dispatch ' + wf + '\\n' + JSON.stringify(inputs, null, 2) + '\\n\\n';
-    const sep = '/admin/api/dispatch'.includes('?') ? '&' : '?';
-    const url = '/admin/api/dispatch' + sep + 'token=' + encodeURIComponent(TOKEN);
-    try {
-      const res = await fetch(url, {
-        method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + TOKEN },
-        body: JSON.stringify({ workflow: wf, inputs }),
-      });
-      const text = await res.text();
-      logEl.textContent += text;
-    } catch(e) { logEl.textContent += '\\nFetch 失敗：' + e.message; }
-  }
 
   function loadRacesForPredictByIndex(i) {
       const m = window._meetingList && window._meetingList[i];
@@ -962,7 +903,6 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
   safeRender('renderAlerts', renderAlerts);
   safeRender('renderCoverage', renderCoverage);
   safeRender('renderStatus', renderStatus);
-  safeRender('renderGaps', renderGaps);
   safeRender('renderRuns', renderRuns);
   safeRender('renderMeetings', renderMeetings);
   document.getElementById('refreshClock').textContent = '載入時間：' + new Date().toLocaleTimeString('zh-HK') + ' · 每 60 秒自動刷新';
