@@ -1125,7 +1125,8 @@ analyzeRoutes.get('/factors', (c) => {
         if (!entries.length) entries = await loadEntries(false);
         if (!entries.length) return c.json({ error: `${targetDate} 排位表無資料` }, 404);
         const allHorseIds = [...new Set(entries.map(e => e.horse_id ?? e.horse_code).filter(Boolean) as string[])];
-        const horseEloIds = allHorseIds.map(id => id.startsWith('horse_') ? id : `horse_${id}`);
+        // horse_elo_snapshots.horse_id = bare code 'J243' (no prefix)
+      const horseEloIds = allHorseIds.map(id => id.startsWith('horse_') ? id.substring(6) : id);
         const allJockeyIds = [...new Set(entries.map(e => e.jockey_id ?? (e.jockey_name ? `jockey_${e.jockey_name}` : null)).filter(Boolean) as string[])];
         const allTrainerIds = [...new Set(entries.map(e => e.trainer_id ?? (e.trainer_name ? `trainer_${e.trainer_name}` : null)).filter(Boolean) as string[])];
         const [horseEloMap, jockeyEloMap, trainerEloMap, recencyMap, distMap, goingMap, drawMap, condMap, injMap, wtMap, jtMap] = await Promise.all([
@@ -1162,7 +1163,8 @@ analyzeRoutes.get('/factors', (c) => {
           const enriched = raceEntries.map((e: any) => {
             const horseId: string | null = e.horse_id ?? e.horse_code ?? null;
             if (!horseId) return { horseId: null, horseNumber: e.horse_number, nameCh: e.name_ch ?? String(e.horse_number), nameEn: e.name_en, jockeyCh: e.jockey_name, trainerCh: e.trainer_name, draw: e.draw, declaredWeight: e.declared_weight, rating: e.rating, horseElo: null, jockeyElo: null, trainerElo: null, eloComposite: null, eloEngine: engine, horseConfidence: null, horseFrozen: false, horseRetired: false, factorBonus: 0, factorBreakdown: null, finalScore: null, daysSinceLast: null, _score: 0 };
-            const horseEloId = horseId.startsWith('horse_') ? horseId : `horse_${horseId}`;
+            // horse_elo_snapshots uses bare code 'J243'
+          const horseEloId = horseId.startsWith('horse_') ? horseId.substring(6) : horseId;
             const jSnapshotId: string | null = e.jockey_id ?? (e.jockey_name ? `jockey_${e.jockey_name}` : null);
             const tSnapshotId: string | null = e.trainer_id ?? (e.trainer_name ? `trainer_${e.trainer_name}` : null);
             const hRead = horseEloMap.get(horseEloId) ?? null;
