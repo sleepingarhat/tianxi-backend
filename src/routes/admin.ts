@@ -1202,7 +1202,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
               + '</tr>';
           }).join('');
         return '<div class="tp-race' + isOpen + '" id="tp-r' + race.raceNumber + '">'
-          + '<div class="tp-race-hd" onclick="document.getElementById('tp-r' + race.raceNumber + '').classList.toggle('open')">'
+          + '<div class="tp-race-hd" onclick="toggleTpRace(' + race.raceNumber + ')">'
             + '<div class="tp-rnum">' + race.raceNumber + '</div>'
             + '<div class="tp-race-meta">'
               + '<div class="tp-race-title">' + (race.title||'第'+race.raceNumber+'場') + '</div>'
