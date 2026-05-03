@@ -143,20 +143,19 @@ function assessHistory(count: number | null, latest: string | null, minCount: nu
 // Scan last 5 runs per workflow — transient states (in_progress / cancelled
 // in the latest slot) no longer mask a healthy stream of successes.
 function assessAuto(wfMap: Record<string, WfInfo>, wfNames: string[]): Status {
-  let anyFound = false, anySuccess = false, anyFail = false;
+  let anyFound = false, anySuccess = false, conclusiveCount = 0;
   for (const n of wfNames) {
     const m = wfMap[n];
     if (!m) continue;
     anyFound = true;
     for (const run of m.recent.slice(0, 5)) {
-      if (run.conclusion === 'success') anySuccess = true;
-      if (run.conclusion === 'failure') anyFail = true;
+      if (run.conclusion === 'success') { anySuccess = true; conclusiveCount++; }
+      else if (run.conclusion === 'failure') { conclusiveCount++; }
     }
   }
   if (!anyFound) return 'bad';
-  if (anySuccess && !anyFail) return 'ok';
-  if (anySuccess && anyFail) return 'warn';
-  return 'warn';  // found but running-only → transient, not broken
+  if (!anySuccess && conclusiveCount >= 5) return 'bad';
+  return 'ok';
 }
 // Pull lastRun/lastSuccess times + staleness for per-row dashboard badges.
 function lastRunInfo(wfMap: Record<string, WfInfo>, wfNames: string[]):
