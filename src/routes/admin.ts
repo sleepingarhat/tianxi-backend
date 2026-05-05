@@ -449,6 +449,30 @@ adminRoutes.get('/api/runs', async (c) => {
       // Check race_meetings IDs format
       const mtgSample = await db.prepare(`SELECT id, date, venue FROM race_meetings ORDER BY date DESC LIMIT 5`).all<any>();
       out.meetings_sample = mtgSample.results;
+      // Find races by race_id pattern (likely '2026-05-03_R1' or 'mtg_2026-05-03_HV_R1')
+      const races0503Like = await db.prepare(`SELECT id, meeting_id, race_number FROM races WHERE id LIKE '2026-05-03%' OR id LIKE 'mtg_2026-05-03%' LIMIT 20`).all<any>();
+      out.races_2026_05_03_by_id = races0503Like.results;
+      // Race-results for 2026-05-03
+      const rr0503 = await db.prepare(`SELECT COUNT(*) AS n, MIN(race_id) AS sample FROM race_results rr JOIN races r ON r.id = rr.race_id JOIN race_meetings m ON m.id = r.meeting_id WHERE m.date = '2026-05-03'`).first<any>();
+      out.results_for_2026_05_03 = rr0503;
+      // Direct: race_results joined to races by date if races table has date column
+      const racesCols = await db.prepare(`SELECT name FROM pragma_table_info('races')`).all<any>();
+      out.races_columns = racesCols.results?.map((r: any) => r.name);
+      // Sample races to see ID format
+      const racesSampleNew = await db.prepare(`SELECT id, meeting_id, race_number FROM races ORDER BY id DESC LIMIT 5`).all<any>();
+      out.races_recent_sample = racesSampleNew.results;
+      // Check jockey_elo_snapshots for v12 vs v11 split
+      const jeV12 = await db.prepare(`SELECT COUNT(*) AS n FROM jockey_elo_snapshots WHERE id LIKE 'v12:%'`).first<any>();
+      const jeV11 = await db.prepare(`SELECT COUNT(*) AS n FROM jockey_elo_snapshots WHERE id NOT LIKE 'v12:%'`).first<any>();
+      out.jockey_elo_engines = { v12: jeV12?.n, v11: jeV11?.n };
+      // Probe specific ELO lookup for known jockey
+      const probe = await db.prepare(`SELECT * FROM jockey_elo_snapshots WHERE jockey_id = 'jockey_潘頓' AND axis_key = 'overall' AND as_of_date <= '2026-05-06' ORDER BY as_of_date DESC LIMIT 3`).all<any>();
+      out.probe_jockey_pan_dun = probe.results;
+      const probeT = await db.prepare(`SELECT * FROM trainer_elo_snapshots WHERE trainer_id = 'trainer_姚本輝' AND axis_key = 'overall' AND as_of_date <= '2026-05-06' ORDER BY as_of_date DESC LIMIT 3`).all<any>();
+      out.probe_trainer = probeT.results;
+      // Trackwork window check — what dates are available for an active horse?
+      const twProbe = await db.prepare(`SELECT trackwork_date, COUNT(*) AS n FROM horse_trackwork WHERE trackwork_date >= '2026-04-15' GROUP BY trackwork_date ORDER BY trackwork_date DESC LIMIT 20`).all<any>();
+      out.trackwork_recent_dates = twProbe.results;
     } catch (e: any) {
       out.error = e.message;
     }
