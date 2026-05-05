@@ -1040,7 +1040,8 @@ analyzeRoutes.get('/factors', (c) => {
 
   async function batchJtComboFit(db: D1Database, entries: any[], asOf: string): Promise<Map<string, FactorResult>> {
     const map = new Map<string, FactorResult>();
-    const pairs = [...new Set(entries.filter(e => e.jockey_id && e.trainer_id).map(e => `${e.jockey_id}|${e.trainer_id}`))].map(s => s.split('|') as [string, string]);
+    const prefix = (raw: string, kind: 'jockey' | 'trainer') => raw.startsWith(`${kind}_`) ? raw : `${kind}_${raw}`;
+      const pairs = [...new Set(entries.filter(e => (e.jockey_id || e.jockey_name) && (e.trainer_id || e.trainer_name)).map(e => `${prefix(e.jockey_id ?? e.jockey_name, 'jockey')}|${prefix(e.trainer_id ?? e.trainer_name, 'trainer')}`))].map(s => s.split('|') as [string, string]);
     for (const [jId, tId] of pairs) {
       try {
         const row = await db.prepare(
