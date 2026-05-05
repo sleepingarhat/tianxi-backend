@@ -479,6 +479,31 @@ adminRoutes.get('/api/runs', async (c) => {
     return c.json(out);
   });
 
+  // ── /api/diag-elo — TEMP: probe ELO lookup with individual try-catches ───
+  adminRoutes.get('/api/diag-elo', async (c) => {
+    const db = c.env.DB;
+    const out: any = {};
+    const probe = async (label: string, q: string, ...binds: any[]) => {
+      try { out[label] = await db.prepare(q).bind(...binds).all<any>().then(r => r.results); }
+      catch (e: any) { out[label + '_err'] = e.message; }
+    };
+    await probe('cols_jockey_elo', `SELECT name FROM pragma_table_info('jockey_elo_snapshots')`);
+    await probe('jockey_pan_any', `SELECT * FROM jockey_elo_snapshots WHERE jockey_id = ? ORDER BY as_of_date DESC LIMIT 3`, 'jockey_潘頓');
+    await probe('jockey_pan_v12', `SELECT * FROM jockey_elo_snapshots WHERE jockey_id = ? AND id LIKE 'v12:%' ORDER BY as_of_date DESC LIMIT 3`, 'jockey_潘頓');
+    await probe('jockey_pan_v11', `SELECT * FROM jockey_elo_snapshots WHERE jockey_id = ? AND id NOT LIKE 'v12:%' ORDER BY as_of_date DESC LIMIT 3`, 'jockey_潘頓');
+    await probe('jockey_pan_overall', `SELECT * FROM jockey_elo_snapshots WHERE jockey_id = ? AND axis_key = 'overall' ORDER BY as_of_date DESC LIMIT 3`, 'jockey_潘頓');
+    await probe('axis_keys_jockey', `SELECT axis_key, COUNT(*) AS n FROM jockey_elo_snapshots GROUP BY axis_key`);
+    await probe('axis_keys_horse', `SELECT axis_key, COUNT(*) AS n FROM horse_elo_snapshots GROUP BY axis_key`);
+    await probe('axis_keys_trainer', `SELECT axis_key, COUNT(*) AS n FROM trainer_elo_snapshots GROUP BY axis_key`);
+    await probe('latest_jockey_dates', `SELECT MAX(as_of_date) AS mx, MIN(as_of_date) AS mn, COUNT(*) AS n FROM jockey_elo_snapshots`);
+    await probe('latest_horse_dates', `SELECT MAX(as_of_date) AS mx FROM horse_elo_snapshots`);
+    await probe('latest_trainer_dates', `SELECT MAX(as_of_date) AS mx FROM trainer_elo_snapshots`);
+    await probe('trackwork_recent', `SELECT trackwork_date, COUNT(*) AS n FROM horse_trackwork WHERE trackwork_date >= '2026-04-15' GROUP BY trackwork_date ORDER BY trackwork_date DESC LIMIT 15`);
+    await probe('horse_trackwork_for_J213', `SELECT * FROM horse_trackwork WHERE horse_id = ? AND trackwork_date >= '2026-04-15' ORDER BY trackwork_date DESC LIMIT 5`, 'horse_J213');
+    await probe('rr_for_J213', `SELECT rr.horse_id, rm.date, r.distance, rr.finishing_position FROM race_results rr JOIN races r ON r.id = rr.race_id JOIN race_meetings rm ON rm.id = r.meeting_id WHERE rr.horse_id = ? ORDER BY rm.date DESC LIMIT 5`, 'horse_J213');
+    return c.json(out);
+  });
+
   // ── /api/meetings — recent meetings for admin panel ──────────────────────
 adminRoutes.get('/api/meetings', async (c) => {
   const limit = Math.min(Number(c.req.query('limit') || '10'), 30);
