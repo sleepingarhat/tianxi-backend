@@ -1110,7 +1110,98 @@ analyzeRoutes.get('/factors', (c) => {
     return map;
   }
 
-    // GET /api/analyze/today-picks — 即日排位全因子預測 (batch-query version; ~20 D1 queries)
+    // ── computePicksFromEntries: shared helper for today-picks / picks-by-date / hit-rate ──
+      async function computePicksFromEntries(
+        db: D1Database,
+        targetDate: string,
+        meeting: any,
+        entries: any[],
+        engine: EloEngine,
+      ): Promise<any> {
+        const prefixId = (raw: string | null | undefined, kind: 'horse' | 'jockey' | 'trainer'): string | null => {
+          if (!raw) return null;
+          const p = kind + '_';
+          return raw.startsWith(p) ? raw : p + raw;
+        };
+        const allHorseIds = [...new Set(entries.map(e => prefixId(e.horse_id ?? e.horse_code, 'horse')).filter(Boolean) as string[])];
+        const horseEloIds = allHorseIds;
+        const allJockeyIds = [...new Set(entries.map(e => prefixId(e.jockey_id ?? e.jockey_name, 'jockey')).filter(Boolean) as string[])];
+        const allTrainerIds = [...new Set(entries.map(e => prefixId(e.trainer_id ?? e.trainer_name, 'trainer')).filter(Boolean) as string[])];
+        const [horseEloMap, jockeyEloMap, trainerEloMap, recencyMap, distMap, goingMap, drawMap, condMap, injMap, wtMap, jtMap] = await Promise.all([
+          batchEloReadings(db, 'horse', horseEloIds, targetDate, engine),
+          batchEloReadings(db, 'jockey', allJockeyIds, targetDate, engine),
+          batchEloReadings(db, 'trainer', allTrainerIds, targetDate, engine),
+          batchLastRaceDate(db, allHorseIds, targetDate),
+          batchDistanceFit(db, allHorseIds, targetDate),
+          batchGoingFit(db, allHorseIds, targetDate),
+          batchDrawBias(db, entries, meeting.venue, targetDate),
+          batchConditionFit(db, allHorseIds, targetDate),
+          batchInjuryFlag(db, allHorseIds, targetDate),
+          batchWeightDelta(db, allHorseIds, entries, targetDate),
+          batchJtComboFit(db, entries, targetDate),
+        ]);
+        const { results: racesFromDB } = await db.prepare(
+          `SELECT race_number, id, title, going FROM races WHERE meeting_id = ? ORDER BY race_number`
+        ).bind(meeting.id).all<any>().catch(() => ({ results: [] as any[] }));
+        const racesDBMap = new Map((racesFromDB ?? []).map((r: any) => [r.race_number, r]));
+        const raceMap = new Map<number, any[]>();
+        for (const e of entries) { const rn = e.race_number ?? 0; if (!raceMap.has(rn)) raceMap.set(rn, []); raceMap.get(rn)!.push(e); }
+        const raceNumbers = Array.from(raceMap.keys()).sort((a, b) => a - b);
+        const racePredictions = raceNumbers.map(raceNum => {
+          const raceEntries = raceMap.get(raceNum)!;
+          const firstE = raceEntries[0];
+          const raceDB = racesDBMap.get(raceNum);
+          const raceId = raceDB?.id ?? null;
+          const raceTitle = raceDB?.title ?? (raceNum > 0 ? `第 ${raceNum} 場` : `${targetDate} 排位`);
+          const raceDistance: number | null = firstE.distance ?? null;
+          const raceGoing: string | null = raceDB?.going ?? meeting.track_condition ?? null;
+          const raceTrack: string | null = firstE.track ?? null;
+          const raceCourse: string | null = firstE.course ?? null;
+          const raceClass: string | null = firstE.race_class ?? null;
+          const enriched = raceEntries.map((e: any) => {
+            const horseId: string | null = e.horse_id ?? e.horse_code ?? null;
+            if (!horseId) return { horseId: null, horseNumber: e.horse_number, nameCh: e.name_ch ?? String(e.horse_number), nameEn: e.name_en, jockeyCh: e.jockey_name, trainerCh: e.trainer_name, draw: e.draw, declaredWeight: e.declared_weight, rating: e.rating, horseElo: null, jockeyElo: null, trainerElo: null, eloComposite: null, eloEngine: engine, horseConfidence: null, horseFrozen: false, horseRetired: false, factorBonus: 0, factorBreakdown: null, finalScore: null, daysSinceLast: null, _score: 0 };
+            const horseEloId = horseId;
+            const jSnapshotId: string | null = prefixId(e.jockey_id ?? e.jockey_name, 'jockey');
+            const tSnapshotId: string | null = prefixId(e.trainer_id ?? e.trainer_name, 'trainer');
+            const hRead = horseEloMap.get(horseEloId) ?? null;
+            const jRead = jSnapshotId ? (jockeyEloMap.get(jSnapshotId) ?? null) : null;
+            const tRead = tSnapshotId ? (trainerEloMap.get(tSnapshotId) ?? null) : null;
+            const hElo = hRead?.rating ?? null; const jElo = jRead?.rating ?? null; const tElo = tRead?.rating ?? null;
+            const parts: number[] = [];
+            if (hElo != null) parts.push(hElo * ELO_WEIGHTS.horse);
+            if (jElo != null) parts.push(jElo * ELO_WEIGHTS.jockey);
+            if (tElo != null) parts.push(tElo * ELO_WEIGHTS.trainer);
+            const wSum = (hElo != null ? ELO_WEIGHTS.horse : 0) + (jElo != null ? ELO_WEIGHTS.jockey : 0) + (tElo != null ? ELO_WEIGHTS.trainer : 0);
+            const eloComposite = wSum > 0 ? parts.reduce((a, b) => a + b, 0) / wSum : null;
+            const lastDate = recencyMap.get(horseId) ?? null;
+            const daysSince = lastDate ? Math.round((new Date(targetDate).getTime() - new Date(lastDate).getTime()) / 86400000) : null;
+            const recency = recencyBonus(daysSince);
+            const fDist = distMap.get(`${horseId}:${distBucket(raceDistance)}`) ?? { bonus: 0, conf: 0, note: '無距離往績' };
+            const fGoing = goingMap.get(`${horseId}:${raceGoing ?? ''}`) ?? { bonus: 0, conf: 0, note: '無場地往績' };
+            const fDraw = drawMap.get(`${e.draw}:${meeting.venue}:${distBucket(raceDistance)}`) ?? { bonus: 0, conf: 0, note: '檔位資料不全' };
+            const fWeight = wtMap.get(horseId) ?? { bonus: 0, conf: 0, note: '無體重往績' };
+            const fCond = condMap.get(horseId) ?? { bonus: 0, conf: 0, note: '無晨操記錄' };
+            const fInjury = injMap.get(horseId) ?? { bonus: 0, conf: 0, note: '無傷病記錄' };
+            const fJT = jtMap.get(`${jSnapshotId ?? ''}:${tSnapshotId ?? ''}`) ?? { bonus: 0, conf: 0, note: '騎練配對資料不全' };
+            const factorBreakdown = { recency: { bonus: recency, conf: daysSince != null ? 1 : 0, note: daysSince != null ? `距上次 ${daysSince} 天` : '無上次紀錄' }, distance: fDist, going: fGoing, draw: fDraw, weight: fWeight, condition: fCond, injury: fInjury, jtCombo: fJT };
+            const factorBonus = recency + fDist.bonus + fGoing.bonus + fDraw.bonus + fWeight.bonus + fCond.bonus + fInjury.bonus + fJT.bonus;
+            const base = eloComposite != null ? (eloComposite - 1500) / 200 : 0;
+            const finalScore = eloComposite != null ? eloComposite + factorBonus : null;
+            return { horseId, horseNumber: e.horse_number, nameCh: e.name_ch, nameEn: e.name_en, jockeyCh: e.jockey_name, trainerCh: e.trainer_name, draw: e.draw, declaredWeight: e.declared_weight, rating: e.rating, horseElo: hElo != null ? Math.round(hElo*10)/10 : null, jockeyElo: jElo != null ? Math.round(jElo*10)/10 : null, trainerElo: tElo != null ? Math.round(tElo*10)/10 : null, eloComposite: eloComposite != null ? Math.round(eloComposite*10)/10 : null, eloEngine: hRead?.engine ?? engine, horseConfidence: hRead?.confidence != null ? Math.round(hRead.confidence*100)/100 : null, horseFrozen: hRead?.isFrozen ?? false, horseRetired: hRead?.isRetired ?? false, factorBonus: Math.round(factorBonus*10)/10, factorBreakdown, finalScore: finalScore != null ? Math.round(finalScore*10)/10 : null, daysSinceLast: daysSince, _score: base + factorBonus / 100 };
+          });
+          const expScores = enriched.map((s) => Math.exp(s._score));
+          const Z = expScores.reduce((a, b) => a + b, 0) || 1;
+          const picks = enriched.map((s, i) => { const { _score, ...rest } = s as any; return { ...rest, pWin: Math.round((expScores[i]/Z)*1000)/1000, pTop3: Math.round(Math.min((expScores[i]/Z)*3,0.99)*1000)/1000 }; });
+          picks.sort((a: any, b: any) => b.pWin - a.pWin);
+          picks.forEach((p: any, i: number) => { p.rank = i + 1; });
+          return { raceId, raceNumber: raceNum, title: raceTitle, class: raceClass, distance: raceDistance, going: raceGoing, track: raceTrack, course: raceCourse, picks };
+        });
+        const eloReady = racePredictions.some((r) => r.picks?.some((p: any) => p.eloComposite != null));
+        return { date: targetDate, venue: meeting.venue, trackCondition: meeting.track_condition, eloEngine: engine, eloWeights: ELO_WEIGHTS, eloReady, races: racePredictions, generatedAt: new Date().toISOString() };
+      }
+
+      // GET /api/analyze/today-picks — 即日排位全因子預測 (batch-query version; ~20 D1 queries)
     analyzeRoutes.get('/today-picks', async (c) => {
       try {
         const db = c.env.DB;
@@ -1236,3 +1327,152 @@ analyzeRoutes.get('/factors', (c) => {
       }
     });
     
+
+      // GET /api/analyze/picks-by-date?date=YYYY-MM-DD — 指定賽事日全因子預測（支援未來/過去日期）
+      analyzeRoutes.get('/picks-by-date', async (c) => {
+        try {
+          const db = c.env.DB;
+          const date = c.req.query('date');
+          if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return c.json({ error: '請提供 YYYY-MM-DD 格式日期' }, 400);
+          const engine: EloEngine = c.req.query('engine') === 'v11' ? 'v11' : 'v12';
+          const meeting = await db.prepare(`SELECT * FROM race_meetings WHERE date = ? LIMIT 1`).bind(date).first<any>().catch(() => null);
+          if (!meeting) return c.json({ error: `${date} 賽馬日記錄不存在` }, 404);
+          // Try entries_upcoming first (works for upcoming dates)
+          const { results: euRows } = await db.prepare(
+            `SELECT e.race_number, e.horse_number, e.horse_id, e.horse_code,
+                    e.draw, e.declared_weight, e.actual_weight, e.jockey_name, e.jockey_id,
+                    e.trainer_name, e.trainer_id, e.rating, e.priority_order,
+                    e.distance, e.track, e.course, e.race_class,
+                    h.name_ch, h.name_en
+             FROM entries_upcoming e LEFT JOIN horses h ON h.id = e.horse_id
+             WHERE e.race_date = ? AND e.race_number > 0
+             ORDER BY e.race_number, e.horse_number`
+          ).bind(date).all<any>().catch(() => ({ results: [] as any[] }));
+          let entries = euRows ?? [];
+          let source: 'upcoming' | 'historical' = 'upcoming';
+          // Fallback to race_results for past meetings
+          if (!entries.length) {
+            const { results: rrRows } = await db.prepare(
+              `SELECT r.race_number, rr.horse_number, rr.horse_id, rr.draw, rr.actual_weight,
+                      rr.actual_weight AS declared_weight, rr.jockey_id, rr.trainer_id,
+                      r.distance, r.going, r.class AS race_class,
+                      NULL AS track, NULL AS course,
+                      h.name_ch, h.name_en,
+                      j.name_ch AS jockey_name, t.name_ch AS trainer_name
+               FROM race_results rr
+               JOIN races r ON r.id = rr.race_id
+               JOIN race_meetings rm ON rm.id = r.meeting_id
+               LEFT JOIN horses h ON h.id = rr.horse_id
+               LEFT JOIN jockeys j ON j.id = rr.jockey_id
+               LEFT JOIN trainers t ON t.id = rr.trainer_id
+               WHERE rm.date = ?
+               ORDER BY r.race_number, rr.horse_number`
+            ).bind(date).all<any>().catch(() => ({ results: [] as any[] }));
+            entries = rrRows ?? [];
+            source = 'historical';
+          }
+          if (!entries.length) return c.json({ error: `${date} 排位/賽果無資料` }, 404);
+          const result = await computePicksFromEntries(db, date, meeting, entries, engine);
+          return c.json({ ...result, source });
+        } catch (err: any) {
+          return c.json({ error: 'picks-by-date failed', detail: err?.message ?? String(err) }, 500);
+        }
+      });
+
+      // GET /api/analyze/hit-rate?date=YYYY-MM-DD — 過去賽事日預測 vs 實際結果比對
+      analyzeRoutes.get('/hit-rate', async (c) => {
+        try {
+          const db = c.env.DB;
+          const date = c.req.query('date');
+          if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return c.json({ error: '請提供 YYYY-MM-DD 格式日期' }, 400);
+          const engine: EloEngine = c.req.query('engine') === 'v11' ? 'v11' : 'v12';
+          const meeting = await db.prepare(`SELECT * FROM race_meetings WHERE date = ? LIMIT 1`).bind(date).first<any>().catch(() => null);
+          if (!meeting) return c.json({ error: `${date} 賽馬日記錄不存在` }, 404);
+          // Reconstruct entries from race_results (this endpoint targets past meetings)
+          const { results: entries } = await db.prepare(
+            `SELECT r.race_number, rr.horse_number, rr.horse_id, rr.draw, rr.actual_weight,
+                    rr.actual_weight AS declared_weight, rr.jockey_id, rr.trainer_id,
+                    r.distance, r.going, r.class AS race_class,
+                    NULL AS track, NULL AS course,
+                    h.name_ch, h.name_en,
+                    j.name_ch AS jockey_name, t.name_ch AS trainer_name
+             FROM race_results rr
+             JOIN races r ON r.id = rr.race_id
+             JOIN race_meetings rm ON rm.id = r.meeting_id
+             LEFT JOIN horses h ON h.id = rr.horse_id
+             LEFT JOIN jockeys j ON j.id = rr.jockey_id
+             LEFT JOIN trainers t ON t.id = rr.trainer_id
+             WHERE rm.date = ?
+             ORDER BY r.race_number, rr.horse_number`
+          ).bind(date).all<any>().catch(() => ({ results: [] as any[] }));
+          if (!entries?.length) return c.json({ error: `${date} 賽果無資料 — 可能為未來賽事或結果未同步` }, 404);
+          // Get actual finishing positions
+          const { results: actual } = await db.prepare(
+            `SELECT r.race_number, rr.horse_number, rr.horse_id, rr.finishing_position, rr.win_odds, h.name_ch
+             FROM race_results rr
+             JOIN races r ON r.id = rr.race_id
+             JOIN race_meetings rm ON rm.id = r.meeting_id
+             LEFT JOIN horses h ON h.id = rr.horse_id
+             WHERE rm.date = ? AND rr.finishing_position IS NOT NULL AND rr.finishing_position > 0
+             ORDER BY r.race_number, rr.finishing_position`
+          ).bind(date).all<any>().catch(() => ({ results: [] as any[] }));
+          const actualByRace = new Map<number, any[]>();
+          for (const r of (actual ?? [])) {
+            if (!actualByRace.has(r.race_number)) actualByRace.set(r.race_number, []);
+            actualByRace.get(r.race_number)!.push(r);
+          }
+          const picksData = await computePicksFromEntries(db, date, meeting, entries, engine);
+          let top1Hits = 0, top3AnyHits = 0, top3SumIntersect = 0, racesEvaluated = 0;
+          const races = picksData.races.map((race: any) => {
+            const actualSorted = (actualByRace.get(race.raceNumber) ?? []).sort((a: any, b: any) => a.finishing_position - b.finishing_position);
+            const predictedTop3 = (race.picks ?? []).slice(0, 3);
+            const actualTop3 = actualSorted.slice(0, 3);
+            const predTopIds = new Set(predictedTop3.map((p: any) => p.horseId));
+            const actualTop1Id = actualTop3[0]?.horse_id ?? null;
+            const actualTop3Ids = new Set(actualTop3.map((a: any) => a.horse_id));
+            const top1Hit = actualTop1Id != null && predictedTop3[0]?.horseId === actualTop1Id;
+            const intersect = [...predTopIds].filter((id: any) => actualTop3Ids.has(id)).length;
+            const top3AnyHit = intersect > 0;
+            if (actualTop3.length >= 3) {
+              racesEvaluated++;
+              if (top1Hit) top1Hits++;
+              if (top3AnyHit) top3AnyHits++;
+              top3SumIntersect += intersect;
+            }
+            return {
+              raceNumber: race.raceNumber,
+              title: race.title,
+              distance: race.distance,
+              going: race.going,
+              predictedTop3: predictedTop3.map((p: any) => ({
+                rank: p.rank, horseNumber: p.horseNumber, horseId: p.horseId,
+                nameCh: p.nameCh, jockeyCh: p.jockeyCh, trainerCh: p.trainerCh,
+                horseElo: p.horseElo, jockeyElo: p.jockeyElo, trainerElo: p.trainerElo,
+                eloComposite: p.eloComposite, finalScore: p.finalScore, pWin: p.pWin,
+              })),
+              actualTop3: actualTop3.map((a: any) => ({
+                position: a.finishing_position, horseNumber: a.horse_number, horseId: a.horse_id,
+                nameCh: a.name_ch, winOdds: a.win_odds,
+              })),
+              top1Hit,
+              top3IntersectCount: intersect,
+              top3AnyHit,
+            };
+          });
+          return c.json({
+            date, venue: meeting.venue, eloEngine: engine,
+            summary: {
+              racesEvaluated,
+              top1HitRate: racesEvaluated ? Math.round(top1Hits/racesEvaluated*1000)/10 : null,
+              top3AnyHitRate: racesEvaluated ? Math.round(top3AnyHits/racesEvaluated*1000)/10 : null,
+              top3AvgIntersect: racesEvaluated ? Math.round(top3SumIntersect/racesEvaluated*100)/100 : null,
+              top1Hits, top3AnyHits, top3SumIntersect,
+            },
+            races,
+            generatedAt: new Date().toISOString(),
+          });
+        } catch (err: any) {
+          return c.json({ error: 'hit-rate failed', detail: err?.message ?? String(err) }, 500);
+        }
+      });
+  
