@@ -1109,7 +1109,7 @@ analyzeRoutes.get('/factors', (c) => {
                      e.distance, e.track, e.course, e.race_class,
                      h.name_ch, h.name_en
                FROM entries_upcoming e LEFT JOIN horses h ON h.id = e.horse_id
-               WHERE e.race_date = ? AND e.venue = ?
+               WHERE e.race_date = ? AND e.venue = ? AND e.race_number > 0
                ORDER BY e.race_number, e.horse_number`
             : `SELECT e.race_number, e.horse_number, e.horse_id, e.horse_code,
                      e.draw, e.declared_weight, e.actual_weight, e.jockey_name, e.jockey_id,
@@ -1117,7 +1117,7 @@ analyzeRoutes.get('/factors', (c) => {
                      e.distance, e.track, e.course, e.race_class,
                      h.name_ch, h.name_en
                FROM entries_upcoming e LEFT JOIN horses h ON h.id = e.horse_id
-               WHERE e.race_date = ?
+               WHERE e.race_date = ? AND e.race_number > 0
                ORDER BY e.race_number, e.horse_number`;
           const stmt = withVenue ? db.prepare(q).bind(targetDate, meeting.venue) : db.prepare(q).bind(targetDate);
           const { results } = await stmt.all<any>().catch(() => ({ results: [] as any[] }));
@@ -1126,10 +1126,15 @@ analyzeRoutes.get('/factors', (c) => {
         let entries = await loadEntries(true);
         if (!entries.length) entries = await loadEntries(false);
         if (!entries.length) return c.json({ error: `${targetDate} 排位表無資料` }, 404);
-        const allHorseIds = [...new Set(entries.map(e => e.horse_id ?? e.horse_code).filter(Boolean) as string[])];
-        const horseEloIds = allHorseIds; // already prefixed 'horse_J243' — matches D1 horse_elo_snapshots.horse_id
-        const allJockeyIds = [...new Set(entries.map(e => e.jockey_id ?? (e.jockey_name ? `jockey_${e.jockey_name}` : null)).filter(Boolean) as string[])];
-        const allTrainerIds = [...new Set(entries.map(e => e.trainer_id ?? (e.trainer_name ? `trainer_${e.trainer_name}` : null)).filter(Boolean) as string[])];
+        const prefixId = (raw: string | null | undefined, kind: 'horse' | 'jockey' | 'trainer'): string | null => {
+          if (!raw) return null;
+          const p = kind + '_';
+          return raw.startsWith(p) ? raw : p + raw;
+        };
+        const allHorseIds = [...new Set(entries.map(e => prefixId(e.horse_id ?? e.horse_code, 'horse')).filter(Boolean) as string[])];
+        const horseEloIds = allHorseIds; // prefixed 'horse_J243' — matches D1 horse_elo_snapshots.horse_id
+        const allJockeyIds = [...new Set(entries.map(e => prefixId(e.jockey_id ?? e.jockey_name, 'jockey')).filter(Boolean) as string[])];
+        const allTrainerIds = [...new Set(entries.map(e => prefixId(e.trainer_id ?? e.trainer_name, 'trainer')).filter(Boolean) as string[])];
         const [horseEloMap, jockeyEloMap, trainerEloMap, recencyMap, distMap, goingMap, drawMap, condMap, injMap, wtMap, jtMap] = await Promise.all([
           batchEloReadings(db, 'horse', horseEloIds, targetDate, engine),
           batchEloReadings(db, 'jockey', allJockeyIds, targetDate, engine),
@@ -1165,8 +1170,8 @@ analyzeRoutes.get('/factors', (c) => {
             const horseId: string | null = e.horse_id ?? e.horse_code ?? null;
             if (!horseId) return { horseId: null, horseNumber: e.horse_number, nameCh: e.name_ch ?? String(e.horse_number), nameEn: e.name_en, jockeyCh: e.jockey_name, trainerCh: e.trainer_name, draw: e.draw, declaredWeight: e.declared_weight, rating: e.rating, horseElo: null, jockeyElo: null, trainerElo: null, eloComposite: null, eloEngine: engine, horseConfidence: null, horseFrozen: false, horseRetired: false, factorBonus: 0, factorBreakdown: null, finalScore: null, daysSinceLast: null, _score: 0 };
             const horseEloId = horseId; // 'horse_J243' — matches D1 horse_elo_snapshots.horse_id
-            const jSnapshotId: string | null = e.jockey_id ?? (e.jockey_name ? `jockey_${e.jockey_name}` : null);
-            const tSnapshotId: string | null = e.trainer_id ?? (e.trainer_name ? `trainer_${e.trainer_name}` : null);
+            const jSnapshotId: string | null = prefixId(e.jockey_id ?? e.jockey_name, 'jockey');
+            const tSnapshotId: string | null = prefixId(e.trainer_id ?? e.trainer_name, 'trainer');
             const hRead = horseEloMap.get(horseEloId) ?? null;
             const jRead = jSnapshotId ? (jockeyEloMap.get(jSnapshotId) ?? null) : null;
             const tRead = tSnapshotId ? (trainerEloMap.get(tSnapshotId) ?? null) : null;
