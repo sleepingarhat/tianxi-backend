@@ -771,22 +771,9 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
 
   <h2>最近賽事</h2>
   <table id="recentMeetings"><thead><tr>
-    <th>日期</th><th>場地</th><th>場地狀況</th><th>場數</th><th>操作</th>
+    <th>日期</th><th>場地</th><th>場地狀況</th><th>場數</th><th>命中率 (Top1 / Top3)</th><th>操作</th>
   </tr></thead><tbody></tbody></table>
-
-  <h2>即時預測工具</h2>
-  <div class="actions-row">
-    <select id="predictRaceId" style="min-width:320px">
-      <option value="">← 先從「最近賽事」選一場賽事</option>
-    </select>
-    <button onclick="runPredict()">運算預測</button>
-    <span id="predictStatus" style="font-size:12px;color:var(--mut)"></span>
-  </div>
-  <table id="predictTable" style="display:none"><thead><tr>
-    <th>排名</th><th>馬號</th><th>馬名</th><th>騎師 / 練馬師</th>
-    <th>馬匹ELO</th><th>騎師ELO</th><th>練馬師ELO</th>
-    <th>綜合ELO</th><th>調整</th><th>最終分</th><th>勝率</th><th>前三</th><th>賠率</th>
-  </tr></thead><tbody></tbody></table>
+  <div id="meetingPanel" style="margin-top:14px"></div>
 
     <h2>即日賽事全因子預測</h2>
     <div class="actions-row">
@@ -923,103 +910,172 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
     const tb = document.querySelector('#recentMeetings tbody');
     if (!tb) { console.error('[admin] #recentMeetings tbody not found'); return; }
     if (!data.meetings || !data.meetings.length) {
-      tb.innerHTML = '<tr><td colspan="5" class="warn">無賽事資料</td></tr>'; return;
+      tb.innerHTML = '<tr><td colspan="6" class="warn">無賽事資料</td></tr>'; return;
     }
     window._meetingList = data.meetings;
+    window._meetingHits = window._meetingHits || {};
     const today = (D.status && D.status.serverTime ? D.status.serverTime : new Date().toISOString()).substring(0, 10);
     tb.innerHTML = data.meetings.map((m, i) => {
       const venue = m.venue === 'ST' ? '沙田' : m.venue === 'HV' ? '跑馬地' : (m.venue || '—');
       const isUpcoming = m.date >= today && m.entry_count > 0;
+      const isPast = m.date < today && m.race_count > 0;
       const raceCountTxt = m.race_count > 0 ? m.race_count + ' 場' : m.total_races ? m.total_races + ' 場' : m.entry_count > 0 ? '待賽' : '0 場';
+      const hit = window._meetingHits[m.date];
+      let hitCell;
+      if (hit === 'loading') hitCell = '<span style="color:var(--mut);font-size:11px">運算中…</span>';
+      else if (hit && hit.summary) {
+        const t1 = hit.summary.top1HitRate; const t3 = hit.summary.top3AnyHitRate;
+        const t1cls = t1 != null && t1 >= 30 ? 'ok' : t1 != null && t1 < 15 ? 'bad' : '';
+        const t3cls = t3 != null && t3 >= 60 ? 'ok' : t3 != null && t3 < 40 ? 'bad' : '';
+        hitCell = '<span class="' + t1cls + '" style="font-variant-numeric:tabular-nums">' + (t1 != null ? t1.toFixed(1) + '%' : '—') + '</span>'
+                + ' <span class="muted-cell">/</span> '
+                + '<span class="' + t3cls + '" style="font-variant-numeric:tabular-nums">' + (t3 != null ? t3.toFixed(1) + '%' : '—') + '</span>'
+                + '<div style="font-size:10px;color:var(--mut)">' + hit.summary.racesEvaluated + ' 場已評</div>';
+      }
+      else if (isPast) hitCell = '<span class="muted-cell" style="font-size:11px">點「比對報告」</span>';
+      else hitCell = '<span class="muted-cell">—</span>';
+      const buttons = [];
+      if (isUpcoming || isPast) buttons.push('<button class="ghost" style="font-size:11px;padding:3px 8px;margin-right:4px" onclick="runPicksForDate(' + i + ')">預測此日</button>');
+      if (isPast) buttons.push('<button class="ghost" style="font-size:11px;padding:3px 8px" onclick="runHitReport(' + i + ')">比對報告</button>');
       return '<tr>' +
         '<td><strong>' + (m.date || '—') + '</strong></td>' +
         '<td>' + venue + '</td>' +
         '<td class="muted-cell">' + (m.track_condition || '—') + '</td>' +
         '<td>' + raceCountTxt + '</td>' +
-        '<td>' + (isUpcoming ? '<button class="ghost" style="font-size:11px;padding:3px 8px" onclick="loadRacesForPredictByIndex(' + i + ')">預測此日</button>' : '') + '</td>' +
+        '<td>' + hitCell + '</td>' +
+        '<td>' + buttons.join('') + '</td>' +
         '</tr>';
     }).join('');
   }
 
-
-  function loadRacesForPredictByIndex(i) {
-      const m = window._meetingList && window._meetingList[i];
-      if (!m) return;
-      loadRacesForPredict(m.id || '', m.date || '', m.race_count || m.total_races || 0);
-    }
-
-    async function loadRacesForPredict(meetingId, date, raceCount) {
-    const sel = document.getElementById('predictRaceId');
-    sel.innerHTML = '<option value="">載入中…</option>';
-    document.getElementById('predictStatus').textContent = '';
-    document.getElementById('predictTable').style.display = 'none';
+  // ── 賽事日預測 / 比對報告 ──────────────────────────────────────────
+  async function runPicksForDate(i) {
+    const m = window._meetingList && window._meetingList[i];
+    if (!m) return;
+    const panel = document.getElementById('meetingPanel');
+    panel.innerHTML = '<div style="padding:10px;color:var(--mut);font-size:12px">運算 ' + m.date + ' 預測中（每場約 5-10 秒）…</div>';
     try {
-      const res = await fetch('/api/meetings/' + encodeURIComponent(date));
+      const res = await fetch('/api/analyze/picks-by-date?date=' + encodeURIComponent(m.date));
       const data = await res.json();
-      let races = data.races || [];
-      if (!races.length && data.upcomingRaces) races = data.upcomingRaces;
-      // If still no races, try smart/current for upcoming meetings
-      if (!races.length) {
-        sel.innerHTML = '<option value="">此日無已入 D1 的場次（可能為未來賽事）</option>'; return;
-      }
-      sel.innerHTML = '<option value="">選擇場次…</option>' + races.map(r => {
-        const raceId = r.id || ('race_' + date + '_' + (data.venue||'ST') + '_' + r.raceNumber);
-        const cls = r.class || r.raceClass || '';
-        const dist = r.distance || r.dist || '';
-        return '<option value="' + raceId + '">第' + (r.raceNumber||r.race_number) + '場 · ' + (r.title||r.raceName||'') + (dist?' · '+dist+'m':'') + (cls?' · '+cls:'') + '</option>';
-      }).join('');
+      if (data.error) { panel.innerHTML = '<div style="padding:10px;color:var(--red)">錯誤：' + data.error + '</div>'; return; }
+      renderMeetingPicksPanel(panel, data, m);
     } catch (e) {
-      sel.innerHTML = '<option value="">載入失敗：' + e.message + '</option>';
+      panel.innerHTML = '<div style="padding:10px;color:var(--red)">錯誤：' + e.message + '</div>';
     }
   }
 
-  // ── Prediction tool ──────────────────────────────────────────
-  async function runPredict() {
-    const raceId = document.getElementById('predictRaceId').value;
-    if (!raceId) { alert('請先選擇場次'); return; }
-    const statusEl = document.getElementById('predictStatus');
-    const table = document.getElementById('predictTable');
-    statusEl.textContent = '運算中…';
-    table.style.display = 'none';
+  async function runHitReport(i) {
+    const m = window._meetingList && window._meetingList[i];
+    if (!m) return;
+    const panel = document.getElementById('meetingPanel');
+    panel.innerHTML = '<div style="padding:10px;color:var(--mut);font-size:12px">運算 ' + m.date + ' 比對報告中…</div>';
+    window._meetingHits[m.date] = 'loading';
+    renderMeetings();
     try {
-      // /api/analyze/top-picks is a public endpoint (no auth needed)
-      const res = await fetch('/api/analyze/top-picks?raceId=' + encodeURIComponent(raceId));
+      const res = await fetch('/api/analyze/hit-rate?date=' + encodeURIComponent(m.date));
       const data = await res.json();
-      if (data.error) { statusEl.textContent = '錯誤: ' + data.error; return; }
-      const picks = data.allPicks || data.picks || [];
-      if (!picks.length) { statusEl.textContent = '無預測資料'; return; }
-      const engineTag = data.eloEngine === 'v12' ? 'v1.2' : (data.eloEngine || '—');
-      statusEl.textContent = (data.date || '') + ' 第' + (data.raceNumber || '') + '場 · ELO引擎 ' + engineTag + ' · ' + picks.length + ' 匹';
-      const tb = table.querySelector('tbody');
-      tb.innerHTML = picks.map(p => {
-        const fmtElo = v => v != null ? Math.round(v) : '<span class="muted-cell">—</span>';
-        const fmtPct = v => v != null ? (v * 100).toFixed(1) + '%' : '—';
-        const fmtScore = v => v != null ? Math.round(v * 10) / 10 : '—';
-        const fmtOdds = v => v != null ? v : '—';
-        const rankCls = p.rank === 1 ? 'style="color:var(--green);font-weight:700"' : p.rank <= 3 ? 'style="color:var(--warn);font-weight:600"' : '';
-        return '<tr>' +
-          '<td ' + rankCls + '>' + p.rank + '</td>' +
-          '<td>' + (p.horseNumber || '—') + '</td>' +
-          '<td><strong>' + (p.nameCh || p.nameEn || '—') + '</strong>' +
-            (p.horseFrozen ? ' <span class="pill queued">停賽</span>' : '') +
-            (p.horseRetired ? ' <span class="pill failure">退役</span>' : '') + '</td>' +
-          '<td class="muted-cell">' + (p.jockeyCh || '—') + ' / ' + (p.trainerCh || '—') + '</td>' +
-          '<td>' + fmtElo(p.horseElo) + '</td>' +
-          '<td>' + fmtElo(p.jockeyElo) + '</td>' +
-          '<td>' + fmtElo(p.trainerElo) + '</td>' +
-          '<td><strong>' + fmtElo(p.eloComposite) + '</strong></td>' +
-          '<td class="' + (p.factorBonus > 0 ? 'ok' : p.factorBonus < 0 ? 'bad' : '') + '">' +
-            (p.factorBonus != null ? (p.factorBonus >= 0 ? '+' : '') + Math.round(p.factorBonus * 10) / 10 : '—') + '</td>' +
-          '<td><strong>' + fmtScore(p.finalScore) + '</strong></td>' +
-          '<td class="' + (p.rank <= 2 ? 'ok' : '') + '">' + fmtPct(p.pWin) + '</td>' +
-          '<td>' + fmtPct(p.pTop3) + '</td>' +
-          '<td class="muted-cell">' + fmtOdds(p.winOdds) + '</td>' +
-          '</tr>';
-      }).join('');
-      table.style.display = 'table';
+      if (data.error) {
+        panel.innerHTML = '<div style="padding:10px;color:var(--red)">錯誤：' + data.error + '</div>';
+        delete window._meetingHits[m.date]; renderMeetings(); return;
+      }
+      window._meetingHits[m.date] = data;
+      renderMeetings();
+      renderHitReportPanel(panel, data, m);
     } catch (e) {
-      statusEl.textContent = '錯誤: ' + e.message;
+      panel.innerHTML = '<div style="padding:10px;color:var(--red)">錯誤：' + e.message + '</div>';
+      delete window._meetingHits[m.date]; renderMeetings();
     }
+  }
+
+  function renderMeetingPicksPanel(el, data, m) {
+    var venueLabel = m.venue === 'ST' ? '沙田' : m.venue === 'HV' ? '跑馬地' : m.venue;
+    var srcTag = data.source === 'historical' ? '<span class="pill queued">歷史重算</span>' : '<span class="pill success">即時排位</span>';
+    var engineTag = data.eloEngine === 'v12' ? 'v1.2' : (data.eloEngine || '—');
+    var fmtElo = function(v) { return v != null ? '<span class="tp-elo">' + Math.round(v) + '</span>' : '<span class="muted-cell">—</span>'; };
+    var fmtPct = function(v) { return v != null ? (v*100).toFixed(1) + '%' : '—'; };
+    var fmtBonus = function(v) { if (v == null) return '—'; var c = v > 0 ? 'tp-bonus-pos' : v < 0 ? 'tp-bonus-neg' : ''; return '<span class="' + c + '">' + (v >= 0 ? '+' : '') + v + '</span>'; };
+    var raceBlocks = (data.races || []).map(function(race, ri) {
+      var picks = race.picks || [];
+      var topHorse = picks[0] ? '<strong>' + (picks[0].nameCh || picks[0].nameEn || '—') + '</strong> ' + fmtPct(picks[0].pWin) : '無資料';
+      var rows = picks.map(function(p) {
+        var rc = p.rank === 1 ? 'tp-rank-1' : p.rank <= 3 ? 'tp-rank-2' : '';
+        return '<tr>'
+          + '<td class="' + rc + '">' + p.rank + '</td>'
+          + '<td>' + (p.horseNumber || '—') + '</td>'
+          + '<td><div class="tp-hname">' + (p.nameCh || p.nameEn || '—') + '</div><div class="tp-sub">' + (p.jockeyCh || '—') + ' / ' + (p.trainerCh || '—') + '</div></td>'
+          + '<td style="text-align:center">' + (p.draw != null ? p.draw : '—') + '</td>'
+          + '<td>' + fmtElo(p.horseElo) + '</td>'
+          + '<td>' + fmtElo(p.jockeyElo) + '</td>'
+          + '<td>' + fmtElo(p.trainerElo) + '</td>'
+          + '<td><strong>' + fmtElo(p.eloComposite) + '</strong></td>'
+          + '<td>' + fmtBonus(p.factorBonus) + '</td>'
+          + '<td><strong>' + fmtElo(p.finalScore) + '</strong></td>'
+          + '<td class="' + (p.rank === 1 ? 'ok' : '') + '">' + fmtPct(p.pWin) + '</td>'
+          + '<td>' + fmtPct(p.pTop3) + '</td>'
+          + '</tr>';
+      }).join('');
+      var isOpen = ri < 2 ? ' open' : '';
+      return '<div class="tp-race' + isOpen + '" id="mp-r' + race.raceNumber + '">'
+        + '<div class="tp-race-hd" onclick="document.getElementById(&quot;mp-r' + race.raceNumber + '&quot;).classList.toggle(&quot;open&quot;)">'
+          + '<div class="tp-rnum">' + race.raceNumber + '</div>'
+          + '<div class="tp-race-meta"><div class="tp-race-title">' + (race.title || '第' + race.raceNumber + '場') + '</div>'
+            + '<div class="tp-race-sub">' + (race.distance ? race.distance + 'm' : '') + (race.going ? ' · ' + race.going : '') + (race.class ? ' · ' + race.class : '') + ' · ' + picks.length + ' 匹</div></div>'
+          + '<div style="margin-left:auto;font-size:12px;color:var(--mut);white-space:nowrap">' + topHorse + '</div>'
+          + '<span class="tp-chevron">▶</span></div>'
+        + '<div class="tp-table-wrap"><table class="tp-table"><thead><tr>'
+          + '<th>排名</th><th>馬號</th><th>馬名 / 騎師 / 練馬師</th><th>檔</th>'
+          + '<th>馬ELO</th><th>騎ELO</th><th>練ELO</th><th>綜合ELO</th>'
+          + '<th>因子</th><th>最終分</th><th>勝率</th><th>前三</th>'
+        + '</tr></thead><tbody>' + rows + '</tbody></table></div></div>';
+    }).join('');
+    el.innerHTML = '<div style="padding:10px 12px;background:#fff;border:1px solid var(--rule);border-radius:4px;margin-bottom:8px;font-size:12px">'
+      + '<strong>' + data.date + '</strong> · ' + venueLabel + ' · ' + (data.races || []).length + ' 場 · ' + srcTag + ' · ELO引擎 ' + engineTag
+      + (data.eloReady ? ' · <span class="ok">✓ ELO就緒</span>' : ' · <span class="warn">⚠ ELO資料不全</span>')
+      + ' <button class="ghost" style="float:right;font-size:11px;padding:2px 8px" onclick="document.getElementById(&quot;meetingPanel&quot;).innerHTML=&quot;&quot;">關閉</button>'
+      + '</div>' + raceBlocks;
+  }
+
+  function renderHitReportPanel(el, data, m) {
+    var venueLabel = m.venue === 'ST' ? '沙田' : m.venue === 'HV' ? '跑馬地' : m.venue;
+    var s = data.summary || {};
+    var t1cls = s.top1HitRate != null && s.top1HitRate >= 30 ? 'ok' : s.top1HitRate != null && s.top1HitRate < 15 ? 'bad' : '';
+    var t3cls = s.top3AnyHitRate != null && s.top3AnyHitRate >= 60 ? 'ok' : s.top3AnyHitRate != null && s.top3AnyHitRate < 40 ? 'bad' : '';
+    var fmtElo = function(v) { return v != null ? '<span class="tp-elo">' + Math.round(v) + '</span>' : '<span class="muted-cell">—</span>'; };
+    var rows = (data.races || []).map(function(race) {
+      var pred = race.predictedTop3 || [];
+      var act = race.actualTop3 || [];
+      var predHtml = pred.map(function(p, i) {
+        var hit = act.some(function(a) { return a.horseId === p.horseId; });
+        var cls = hit ? 'ok' : 'muted-cell';
+        return '<div class="' + cls + '" style="font-size:11px">' + (i + 1) + '. ' + (p.nameCh || '—') + ' (#' + (p.horseNumber || '?') + ') ' + fmtElo(p.eloComposite) + '</div>';
+      }).join('') || '<div class="muted-cell">—</div>';
+      var actHtml = act.map(function(a) {
+        var hit = pred.some(function(p) { return p.horseId === a.horseId; });
+        var cls = hit ? 'ok' : '';
+        return '<div class="' + cls + '" style="font-size:11px">' + a.position + '. ' + (a.nameCh || '—') + ' (#' + (a.horseNumber || '?') + ')' + (a.winOdds != null ? ' <span class="muted-cell">$' + a.winOdds + '</span>' : '') + '</div>';
+      }).join('') || '<div class="muted-cell">未開賽</div>';
+      var t1 = race.top1Hit ? '<span class="pill success">命中</span>' : '<span class="pill failure">未中</span>';
+      var t3i = race.top3IntersectCount;
+      var t3rcls = t3i >= 2 ? 'ok' : t3i === 0 ? 'bad' : '';
+      return '<tr>'
+        + '<td><strong>' + race.raceNumber + '</strong></td>'
+        + '<td class="muted-cell" style="font-size:11px">' + (race.distance ? race.distance + 'm' : '') + (race.going ? ' / ' + race.going : '') + '</td>'
+        + '<td>' + predHtml + '</td>'
+        + '<td>' + actHtml + '</td>'
+        + '<td>' + t1 + '</td>'
+        + '<td class="' + t3rcls + '" style="text-align:center;font-weight:600">' + t3i + '/3</td>'
+        + '</tr>';
+    }).join('');
+    el.innerHTML = '<div style="padding:10px 12px;background:#fff;border:1px solid var(--rule);border-radius:4px;margin-bottom:8px;font-size:12px">'
+      + '<strong>' + data.date + ' 比對報告</strong> · ' + venueLabel + ' · ' + s.racesEvaluated + ' 場已評 · '
+      + 'Top1 命中率 <span class="' + t1cls + '" style="font-weight:600">' + (s.top1HitRate != null ? s.top1HitRate.toFixed(1) + '%' : '—') + '</span> (' + s.top1Hits + '/' + s.racesEvaluated + ') · '
+      + 'Top3 任一命中率 <span class="' + t3cls + '" style="font-weight:600">' + (s.top3AnyHitRate != null ? s.top3AnyHitRate.toFixed(1) + '%' : '—') + '</span> (' + s.top3AnyHits + '/' + s.racesEvaluated + ') · '
+      + 'Top3 平均交集 <strong>' + (s.top3AvgIntersect != null ? s.top3AvgIntersect.toFixed(2) : '—') + '/3</strong>'
+      + ' <button class="ghost" style="float:right;font-size:11px;padding:2px 8px" onclick="document.getElementById(&quot;meetingPanel&quot;).innerHTML=&quot;&quot;">關閉</button>'
+      + '</div>'
+      + '<table style="margin-top:6px"><thead><tr>'
+      + '<th>場</th><th>賽事</th><th>預測前三 (含三軸 ELO)</th><th>實際前三</th><th>Top1</th><th>Top3 交集</th>'
+      + '</tr></thead><tbody>' + rows + '</tbody></table>';
   }
 
     function renderNextRaceDay() {
@@ -1239,10 +1295,6 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
   safeRender('renderRuns', renderRuns);
   safeRender('renderMeetings', renderMeetings);
     safeRender('renderNextRaceDay', renderNextRaceDay);
-    // Auto-populate prediction tool with next upcoming meeting's races
-    if (D.nextRaceDay && D.nextRaceDay.isUpcoming && D.nextRaceDay.races && D.nextRaceDay.races.length) {
-      loadRacesForPredict('', D.nextRaceDay.date, D.nextRaceDay.races.length);
-    }
   document.getElementById('refreshClock').textContent = '載入時間：' + new Date().toLocaleTimeString('zh-HK') + ' · 每 60 秒自動刷新';
   // Auto-reload page every 60s for fresh data
   setTimeout(() => window.location.reload(), 60000);
