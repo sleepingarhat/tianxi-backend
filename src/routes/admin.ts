@@ -422,7 +422,12 @@ adminRoutes.get('/api/runs', async (c) => {
       out.jockeys_sample = jSample.results;
       const tSample = await db.prepare(`SELECT id, name_ch FROM trainers LIMIT 3`).all<any>();
       out.trainers_sample = tSample.results;
-      const euSample = await db.prepare(`SELECT race_date, race_number, horse_id, jockey_id, jockey_name, trainer_id, trainer_name FROM entries_upcoming WHERE race_date >= date('now') ORDER BY race_date LIMIT 5`).all<any>();
+      const euSample = await db.prepare(`SELECT race_date, race_number, horse_id, jockey_id, jockey_name, trainer_id, trainer_name FROM entries_upcoming WHERE race_date >= date('now') AND race_number > 0 ORDER BY race_date, race_number LIMIT 5`).all<any>();
+    const euZeroCount = await db.prepare(`SELECT COUNT(*) AS n FROM entries_upcoming WHERE race_date >= date('now') AND race_number = 0`).first<any>();
+    out.entries_upcoming_predraw_count = euZeroCount?.n;
+    const mtgFmt = await db.prepare(`SELECT COUNT(*) AS n_new FROM race_meetings WHERE id NOT LIKE 'mtg_%'`).first<any>();
+    const mtgFmtOld = await db.prepare(`SELECT COUNT(*) AS n_old FROM race_meetings WHERE id LIKE 'mtg_%'`).first<any>();
+    out.meeting_id_format = { new_format: mtgFmt?.n_new, old_format: mtgFmtOld?.n_old };
       out.entries_upcoming_sample = euSample.results;
       const jeSample = await db.prepare(`SELECT jockey_id, rating FROM jockey_elo_snapshots LIMIT 3`).all<any>();
       out.jockey_elo_sample = jeSample.results;
