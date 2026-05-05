@@ -403,7 +403,54 @@ adminRoutes.get('/api/runs', async (c) => {
 });
 
 
-// ── /api/meetings — recent meetings for admin panel ──────────────────────
+// ── /api/diag-ids — DIAGNOSTIC: probe ID formats in D1 (TEMP) ────────────
+  adminRoutes.get('/api/diag-ids', async (c) => {
+    const db = c.env.DB;
+    const out: any = {};
+    try {
+      const rrSample = await db.prepare(`SELECT horse_id, jockey_id, trainer_id FROM race_results LIMIT 3`).all<any>();
+      out.race_results_sample = rrSample.results;
+      const rrCountBare = await db.prepare(`SELECT COUNT(*) AS n FROM race_results WHERE horse_id NOT LIKE 'horse_%'`).first<any>();
+      const rrCountPref = await db.prepare(`SELECT COUNT(*) AS n FROM race_results WHERE horse_id LIKE 'horse_%'`).first<any>();
+      out.race_results_horseId = { bare: rrCountBare?.n, prefixed: rrCountPref?.n };
+      const horsesSample = await db.prepare(`SELECT id, name_ch FROM horses LIMIT 3`).all<any>();
+      out.horses_sample = horsesSample.results;
+      const horsesPref = await db.prepare(`SELECT COUNT(*) AS n FROM horses WHERE id LIKE 'horse_%'`).first<any>();
+      const horsesBare = await db.prepare(`SELECT COUNT(*) AS n FROM horses WHERE id NOT LIKE 'horse_%'`).first<any>();
+      out.horses_id = { bare: horsesBare?.n, prefixed: horsesPref?.n };
+      const jSample = await db.prepare(`SELECT id, name_ch FROM jockeys LIMIT 3`).all<any>();
+      out.jockeys_sample = jSample.results;
+      const tSample = await db.prepare(`SELECT id, name_ch FROM trainers LIMIT 3`).all<any>();
+      out.trainers_sample = tSample.results;
+      const euSample = await db.prepare(`SELECT race_date, race_number, horse_id, jockey_id, jockey_name, trainer_id, trainer_name FROM entries_upcoming WHERE race_date >= date('now') ORDER BY race_date LIMIT 5`).all<any>();
+      out.entries_upcoming_sample = euSample.results;
+      const jeSample = await db.prepare(`SELECT jockey_id, rating FROM jockey_elo_snapshots LIMIT 3`).all<any>();
+      out.jockey_elo_sample = jeSample.results;
+      const teSample = await db.prepare(`SELECT trainer_id, rating FROM trainer_elo_snapshots LIMIT 3`).all<any>();
+      out.trainer_elo_sample = teSample.results;
+      const heSample = await db.prepare(`SELECT horse_id, rating, as_of_date FROM horse_elo_snapshots ORDER BY as_of_date DESC LIMIT 3`).all<any>();
+      out.horse_elo_sample = heSample.results;
+      // Check race_results join compatibility
+      const joinTest = await db.prepare(`SELECT COUNT(*) AS n FROM race_results rr JOIN horses h ON h.id = rr.horse_id`).first<any>();
+      out.rr_horses_join_count = joinTest?.n;
+      // Trackwork date span
+      const twSpan = await db.prepare(`SELECT MIN(trackwork_date) AS mn, MAX(trackwork_date) AS mx, COUNT(*) AS n FROM horse_trackwork`).first<any>();
+      out.trackwork_span = twSpan;
+      // Check races for 2026-05-03/06
+      const r0503 = await db.prepare(`SELECT id, race_number, distance FROM races WHERE meeting_id = '2026-05-03_ST'`).all<any>();
+      const r0506 = await db.prepare(`SELECT id, race_number, distance FROM races WHERE meeting_id = '2026-05-06_ST'`).all<any>();
+      out.races_0503 = r0503.results;
+      out.races_0506 = r0506.results;
+      // Check race_meetings IDs format
+      const mtgSample = await db.prepare(`SELECT id, date, venue FROM race_meetings ORDER BY date DESC LIMIT 5`).all<any>();
+      out.meetings_sample = mtgSample.results;
+    } catch (e: any) {
+      out.error = e.message;
+    }
+    return c.json(out);
+  });
+
+  // ── /api/meetings — recent meetings for admin panel ──────────────────────
 adminRoutes.get('/api/meetings', async (c) => {
   const limit = Math.min(Number(c.req.query('limit') || '10'), 30);
   const { results } = await c.env.DB.prepare(`
