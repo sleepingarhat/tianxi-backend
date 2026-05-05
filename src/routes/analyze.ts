@@ -880,7 +880,7 @@ analyzeRoutes.get('/factors', (c) => {
           const { results } = await db.prepare(
             `SELECT ${col}, rating, confidence, is_frozen, is_retired, is_provisional
              FROM ${table}
-             WHERE ${col} IN (${ph}) AND axis_key = 'overall' AND as_of_date <= ? AND id LIKE 'v12:%'
+             WHERE ${col} IN (${ph})${entityTable === 'horse' ? " AND axis_key = 'overall'" : ''} AND as_of_date <= ? AND id LIKE 'v12:%'
              ORDER BY ${col}, as_of_date DESC`
           ).bind(...chunk, asOf).all<any>();
           for (const row of (results ?? [])) {
@@ -899,7 +899,7 @@ analyzeRoutes.get('/factors', (c) => {
           const { results } = await db.prepare(
             `SELECT ${col}, rating
              FROM ${table}
-             WHERE ${col} IN (${ph2}) AND axis_key = 'overall' AND as_of_date <= ? AND id NOT LIKE 'v12:%'
+             WHERE ${col} IN (${ph2})${entityTable === 'horse' ? " AND axis_key = 'overall'" : ''} AND as_of_date <= ? AND id NOT LIKE 'v12:%'
              ORDER BY ${col}, as_of_date DESC`
           ).bind(...chunk, asOf).all<any>();
           for (const row of (results ?? [])) {
