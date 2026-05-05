@@ -914,24 +914,31 @@ analyzeRoutes.get('/factors', (c) => {
   async function batchLastRaceDate(db: D1Database, horseIds: string[], asOf: string): Promise<Map<string, string>> {
     const map = new Map<string, string>();
     if (!horseIds.length) return map;
-    const ph = horseIds.map(() => '?').join(', ');
-    try {
+    const CHUNK = 80;
+    for (let i = 0; i < horseIds.length; i += CHUNK) {
+      const chunk = horseIds.slice(i, i + CHUNK);
+      const ph = chunk.map(() => '?').join(', ');
+      try {
       const { results } = await db.prepare(
         `SELECT rr.horse_id, MAX(rm.date) AS last_date
          FROM race_results rr JOIN races r ON r.id = rr.race_id JOIN race_meetings rm ON rm.id = r.meeting_id
          WHERE rr.horse_id IN (${ph}) AND rm.date < ?
          GROUP BY rr.horse_id`
-      ).bind(...horseIds, asOf).all<any>();
+      ).bind(...chunk, asOf).all<any>();
       for (const row of (results ?? [])) map.set(row.horse_id, row.last_date);
-    } catch { /* skip */ }
+      } catch { /* skip */ }
+    }
     return map;
   }
 
   async function batchDistanceFit(db: D1Database, horseIds: string[], asOf: string): Promise<Map<string, FactorResult>> {
     const map = new Map<string, FactorResult>();
     if (!horseIds.length) return map;
-    const ph = horseIds.map(() => '?').join(', ');
-    try {
+    const CHUNK = 80;
+    for (let i = 0; i < horseIds.length; i += CHUNK) {
+      const chunk = horseIds.slice(i, i + CHUNK);
+      const ph = chunk.map(() => '?').join(', ');
+      try {
       const { results } = await db.prepare(
         `SELECT rr.horse_id, (ROUND(r.distance / 200.0) * 200) AS bucket,
                 SUM(CASE WHEN rr.finishing_position BETWEEN 1 AND 3 THEN 1 ELSE 0 END) AS top3, COUNT(*) AS starts
@@ -939,21 +946,25 @@ analyzeRoutes.get('/factors', (c) => {
          WHERE rr.horse_id IN (${ph}) AND rm.date < ?
            AND rr.finishing_position > 0 AND rr.finishing_position < 99 AND r.distance > 0
          GROUP BY rr.horse_id, bucket`
-      ).bind(...horseIds, asOf).all<any>();
+      ).bind(...chunk, asOf).all<any>();
       for (const row of (results ?? [])) {
         const starts = row.starts ?? 0; if (starts < 2) continue;
         const top3Rate = (row.top3 ?? 0) / starts;
         map.set(`${row.horse_id}:${row.bucket}`, { bonus: Math.max(-20, Math.min(20, (top3Rate - 0.3) * 50)), conf: Math.min(1, starts / 5), note: `${row.bucket}m 歷往 ${starts} 戰 ${row.top3 ?? 0}上 (${Math.round(top3Rate * 100)}%)` });
       }
-    } catch { /* skip */ }
+      } catch { /* skip */ }
+    }
     return map;
   }
 
   async function batchGoingFit(db: D1Database, horseIds: string[], asOf: string): Promise<Map<string, FactorResult>> {
     const map = new Map<string, FactorResult>();
     if (!horseIds.length) return map;
-    const ph = horseIds.map(() => '?').join(', ');
-    try {
+    const CHUNK = 80;
+    for (let i = 0; i < horseIds.length; i += CHUNK) {
+      const chunk = horseIds.slice(i, i + CHUNK);
+      const ph = chunk.map(() => '?').join(', ');
+      try {
       const { results } = await db.prepare(
         `SELECT rr.horse_id, r.going,
                 SUM(CASE WHEN rr.finishing_position BETWEEN 1 AND 3 THEN 1 ELSE 0 END) AS top3, COUNT(*) AS starts
@@ -961,13 +972,14 @@ analyzeRoutes.get('/factors', (c) => {
          WHERE rr.horse_id IN (${ph}) AND rm.date < ?
            AND rr.finishing_position > 0 AND rr.finishing_position < 99
          GROUP BY rr.horse_id, r.going`
-      ).bind(...horseIds, asOf).all<any>();
+      ).bind(...chunk, asOf).all<any>();
       for (const row of (results ?? [])) {
         if (!row.going) continue; const starts = row.starts ?? 0; if (starts < 2) continue;
         const top3Rate = (row.top3 ?? 0) / starts;
         map.set(`${row.horse_id}:${row.going}`, { bonus: Math.max(-15, Math.min(15, (top3Rate - 0.3) * 40)), conf: Math.min(1, starts / 4), note: `${row.going} ${starts} 戰 ${row.top3 ?? 0}上 (${Math.round(top3Rate * 100)}%)` });
       }
-    } catch { /* skip */ }
+      } catch { /* skip */ }
+    }
     return map;
   }
 
@@ -998,34 +1010,41 @@ analyzeRoutes.get('/factors', (c) => {
   async function batchConditionFit(db: D1Database, horseIds: string[], asOf: string): Promise<Map<string, FactorResult>> {
     const map = new Map<string, FactorResult>();
     if (!horseIds.length) return map;
-    const ph = horseIds.map(() => '?').join(', ');
-    try {
+    const CHUNK = 80;
+    for (let i = 0; i < horseIds.length; i += CHUNK) {
+      const chunk = horseIds.slice(i, i + CHUNK);
+      const ph = chunk.map(() => '?').join(', ');
+      try {
       const { results } = await db.prepare(
         `SELECT horse_id, COUNT(*) AS sessions
          FROM horse_trackwork
          WHERE horse_id IN (${ph}) AND trackwork_date >= date(?, '-14 days') AND trackwork_date < ?
          GROUP BY horse_id`
-      ).bind(...horseIds, asOf, asOf).all<any>();
+      ).bind(...chunk, asOf, asOf).all<any>();
       for (const row of (results ?? [])) {
         const n = row.sessions ?? 0; let bonus = 0;
         if (n >= 4 && n <= 6) bonus = 8; else if (n >= 2 && n <= 8) bonus = 3; else if (n === 1) bonus = -3; else if (n > 8) bonus = -5;
         map.set(row.horse_id, { bonus, conf: Math.min(1, n / 4), note: `14 天 ${n} 課晨操` });
       }
-    } catch { /* skip */ }
+      } catch { /* skip */ }
+    }
     return map;
   }
 
   async function batchInjuryFlag(db: D1Database, horseIds: string[], asOf: string): Promise<Map<string, FactorResult>> {
     const map = new Map<string, FactorResult>();
     if (!horseIds.length) return map;
-    const ph = horseIds.map(() => '?').join(', ');
-    try {
+    const CHUNK = 80;
+    for (let i = 0; i < horseIds.length; i += CHUNK) {
+      const chunk = horseIds.slice(i, i + CHUNK);
+      const ph = chunk.map(() => '?').join(', ');
+      try {
       const { results } = await db.prepare(
         `SELECT horse_id, injury_date, resolution_date, injury_type
          FROM horse_injury
          WHERE horse_id IN (${ph}) AND injury_date < ? AND injury_date >= date(?, '-180 days')
          ORDER BY horse_id, injury_date DESC`
-      ).bind(...horseIds, asOf, asOf).all<any>();
+      ).bind(...chunk, asOf, asOf).all<any>();
       const seen = new Set<string>();
       for (const row of (results ?? [])) {
         if (seen.has(row.horse_id)) continue; seen.add(row.horse_id);
@@ -1034,7 +1053,8 @@ analyzeRoutes.get('/factors', (c) => {
         const decayed = (unresolved ? -15 : -10) * Math.exp(-daysAgo / 45);
         map.set(row.horse_id, { bonus: Math.max(-15, Math.min(0, decayed)), conf: Math.min(1, 1 - daysAgo / 180), note: `${daysAgo} 天前${row.injury_type ?? '傷病'}${unresolved ? ' (未復原)' : ''}` });
       }
-    } catch { /* skip */ }
+      } catch { /* skip */ }
+    }
     return map;
   }
 
@@ -1061,8 +1081,11 @@ analyzeRoutes.get('/factors', (c) => {
   async function batchWeightDelta(db: D1Database, horseIds: string[], entries: any[], asOf: string): Promise<Map<string, FactorResult>> {
     const map = new Map<string, FactorResult>();
     if (!horseIds.length) return map;
-    const ph = horseIds.map(() => '?').join(', ');
-    try {
+    const CHUNK = 80;
+    for (let i = 0; i < horseIds.length; i += CHUNK) {
+      const chunk = horseIds.slice(i, i + CHUNK);
+      const ph = chunk.map(() => '?').join(', ');
+      try {
       const { results } = await db.prepare(
         `SELECT rr.horse_id, rr.actual_weight
          FROM race_results rr JOIN races r ON r.id = rr.race_id JOIN race_meetings rm ON rm.id = r.meeting_id
@@ -1072,7 +1095,7 @@ analyzeRoutes.get('/factors', (c) => {
            WHERE rr2.horse_id IN (${ph}) AND rm2.date < ? GROUP BY rr2.horse_id
          ) latest ON rr.horse_id = latest.horse_id AND rm.date = latest.max_date
          WHERE rr.actual_weight IS NOT NULL`
-      ).bind(...horseIds, asOf).all<any>();
+      ).bind(...chunk, asOf).all<any>();
       const lastWtMap = new Map<string, number>();
       for (const row of (results ?? [])) lastWtMap.set(row.horse_id, row.actual_weight);
       const nowWtMap = new Map(entries.map(e => [e.horse_id ?? e.horse_code, e.declared_weight ?? e.actual_weight]));
@@ -1082,7 +1105,8 @@ analyzeRoutes.get('/factors', (c) => {
         const delta = now - last;
         map.set(horseId, { bonus: Math.max(-10, Math.min(5, delta > 0 ? -delta * 2 : -delta * 1.5)), conf: 0.7, note: `體重 ${delta > 0 ? '+' : ''}${delta}磅 (${last}→${now})` });
       }
-    } catch { /* skip */ }
+      } catch { /* skip */ }
+    }
     return map;
   }
 
