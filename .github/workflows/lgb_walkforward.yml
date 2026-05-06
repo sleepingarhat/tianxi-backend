@@ -147,42 +147,50 @@ jobs:
 
 
       - name: ELO diagnostic (cached DB inspection)
-        run: |
-          echo "=== row counts ==="
-          sqlite3 bulk-local.db "SELECT 'horse_elo_snapshots', COUNT(*) FROM horse_elo_snapshots UNION ALL SELECT 'jockey_elo_snapshots', COUNT(*) FROM jockey_elo_snapshots UNION ALL SELECT 'trainer_elo_snapshots', COUNT(*) FROM trainer_elo_snapshots UNION ALL SELECT 'elo_runs', COUNT(*) FROM elo_runs;"
-          echo ""
-          echo "=== horse_elo_snapshots schema (cached DB) ==="
-          sqlite3 bulk-local.db ".schema horse_elo_snapshots"
-          echo ""
-          echo "=== jockey_elo_snapshots schema (cached DB) ==="
-          sqlite3 bulk-local.db ".schema jockey_elo_snapshots"
-          echo ""
-          echo "=== trainer_elo_snapshots schema (cached DB) ==="
-          sqlite3 bulk-local.db ".schema trainer_elo_snapshots"
-          echo ""
-          echo "=== sample horse_elo (3 rows) ==="
-          sqlite3 -header bulk-local.db "SELECT * FROM horse_elo_snapshots LIMIT 3;"
-          echo ""
-          echo "=== sample jockey_elo (3 rows) ==="
-          sqlite3 -header bulk-local.db "SELECT * FROM jockey_elo_snapshots LIMIT 3;"
-          echo ""
-          echo "=== as_of_date range ==="
-          sqlite3 bulk-local.db "SELECT 'horse', MIN(as_of_date), MAX(as_of_date) FROM horse_elo_snapshots UNION ALL SELECT 'jockey', MIN(as_of_date), MAX(as_of_date) FROM jockey_elo_snapshots;"
-          echo ""
-          echo "=== axis_key distribution in horse_elo ==="
-          sqlite3 bulk-local.db "SELECT axis_key, COUNT(*) FROM horse_elo_snapshots GROUP BY axis_key ORDER BY COUNT(*) DESC LIMIT 10;"
-          echo ""
-          echo "=== sanity: try the actual query for one race+horse ==="
-          # take first race in eval window
-          RACE_DATE=$(sqlite3 bulk-local.db "SELECT MIN(rm.date) FROM race_meetings rm WHERE rm.date >= '2024-11-20'")
-          echo "test race date: $RACE_DATE"
-          HORSE_ID=$(sqlite3 bulk-local.db "SELECT rr.horse_id FROM race_results rr JOIN races r ON r.id=rr.race_id JOIN race_meetings rm ON rm.id=r.meeting_id WHERE rm.date='$RACE_DATE' LIMIT 1;")
-          echo "test horse_id: $HORSE_ID"
-          sqlite3 -header bulk-local.db "SELECT rating, as_of_date FROM horse_elo_snapshots WHERE horse_id='$HORSE_ID' AND axis_key='overall' AND as_of_date<'$RACE_DATE' ORDER BY as_of_date DESC LIMIT 3;"
-          echo "(no axis filter):"
-          sqlite3 -header bulk-local.db "SELECT rating, as_of_date, axis_key FROM horse_elo_snapshots WHERE horse_id='$HORSE_ID' AND as_of_date<'$RACE_DATE' ORDER BY as_of_date DESC LIMIT 3;"
-          echo "(no date filter):"
-          sqlite3 -header bulk-local.db "SELECT rating, as_of_date, axis_key FROM horse_elo_snapshots WHERE horse_id='$HORSE_ID' ORDER BY as_of_date DESC LIMIT 3;"
+          shell: bash {0}
+          run: |
+            set +e
+            echo "=== sqlite_master tables ==="
+            sqlite3 bulk-local.db "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;"
+            echo ""
+            echo "=== row counts (per table individually so failures are isolated) ==="
+            for T in horse_elo_snapshots jockey_elo_snapshots trainer_elo_snapshots elo_runs elo_snapshots horse_elo jockey_elo trainer_elo; do
+              N=$(sqlite3 bulk-local.db "SELECT COUNT(*) FROM \`$T\`" 2>&1)
+              echo "  $T: $N"
+            done
+            echo ""
+            for T in horse_elo_snapshots jockey_elo_snapshots trainer_elo_snapshots; do
+              echo "=== $T schema ==="
+              sqlite3 bulk-local.db ".schema $T"
+              echo "--- sample 2 rows ---"
+              sqlite3 -header bulk-local.db "SELECT * FROM $T LIMIT 2;"
+              echo "--- as_of_date range ---"
+              sqlite3 bulk-local.db "SELECT MIN(as_of_date), MAX(as_of_date), COUNT(DISTINCT as_of_date) FROM $T;"
+              echo ""
+            done
+            echo "=== axis_key distribution in horse_elo_snapshots ==="
+            sqlite3 bulk-local.db "SELECT axis_key, COUNT(*) FROM horse_elo_snapshots GROUP BY axis_key;"
+            echo ""
+            echo "=== sanity: lookup for one (horse, race_date) pair ==="
+            RACE_DATE=$(sqlite3 bulk-local.db "SELECT MIN(rm.date) FROM race_meetings rm WHERE rm.date >= '2024-11-20'")
+            echo "test race date: $RACE_DATE"
+            HORSE_ID=$(sqlite3 bulk-local.db "SELECT rr.horse_id FROM race_results rr JOIN races r ON r.id=rr.race_id JOIN race_meetings rm ON rm.id=r.meeting_id WHERE rm.date='$RACE_DATE' LIMIT 1;")
+            echo "test horse_id: '$HORSE_ID'"
+            echo "(with axis filter):"
+            sqlite3 -header bulk-local.db "SELECT rating, as_of_date FROM horse_elo_snapshots WHERE horse_id='$HORSE_ID' AND axis_key='overall' AND as_of_date<'$RACE_DATE' ORDER BY as_of_date DESC LIMIT 3;"
+            echo "(no axis filter):"
+            sqlite3 -header bulk-local.db "SELECT rating, as_of_date, axis_key FROM horse_elo_snapshots WHERE horse_id='$HORSE_ID' AND as_of_date<'$RACE_DATE' ORDER BY as_of_date DESC LIMIT 3;"
+            echo "(no date filter):"
+            sqlite3 -header bulk-local.db "SELECT rating, as_of_date, axis_key FROM horse_elo_snapshots WHERE horse_id='$HORSE_ID' ORDER BY as_of_date DESC LIMIT 3;"
+            echo "(any rows for this horse?):"
+            sqlite3 bulk-local.db "SELECT COUNT(*) FROM horse_elo_snapshots WHERE horse_id='$HORSE_ID';"
+            echo ""
+            echo "=== distinct horse_id sample from snapshots vs from race_results ==="
+            echo "snapshots horse_id (first 3):"
+            sqlite3 bulk-local.db "SELECT DISTINCT horse_id FROM horse_elo_snapshots LIMIT 3;"
+            echo "race_results horse_id (first 3):"
+            sqlite3 bulk-local.db "SELECT DISTINCT horse_id FROM race_results LIMIT 3;"
+            exit 0
       - name: Dump features
         working-directory: tianxi-backend
         run: |
