@@ -150,47 +150,36 @@ jobs:
         working-directory: tianxi-backend
         run: |
           set +e
-          echo "=== pwd / ls / md5 ==="
-          pwd
-          ls -la bulk-local.db 2>&1 || true
-          ls -la ../bulk-local.db 2>&1 || true
-          find /home/runner/work -maxdepth 5 -name "bulk-local.db" -type f 2>/dev/null | head -5
-          md5sum bulk-local.db 2>&1 || true
+          echo "=== horses table ==="
+          sqlite3 bulk-local.db ".schema horses"
+          sqlite3 -header bulk-local.db "SELECT * FROM horses LIMIT 3;"
           echo ""
-          echo "=== tables in bulk-local.db (cwd) ==="
-          sqlite3 bulk-local.db "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;" 2>&1
+          echo "=== jockeys table ==="
+          sqlite3 bulk-local.db ".schema jockeys"
+          sqlite3 -header bulk-local.db "SELECT * FROM jockeys LIMIT 3;"
           echo ""
-          echo "=== row counts ==="
-          for T in horse_elo_snapshots jockey_elo_snapshots trainer_elo_snapshots; do
-            N=$(sqlite3 bulk-local.db "SELECT COUNT(*) FROM $T" 2>&1)
-            echo "  $T: $N"
-          done
+          echo "=== trainers table ==="
+          sqlite3 bulk-local.db ".schema trainers"
+          sqlite3 -header bulk-local.db "SELECT * FROM trainers LIMIT 3;"
           echo ""
-          echo "=== schemas ==="
-          for T in horse_elo_snapshots jockey_elo_snapshots trainer_elo_snapshots; do
-            echo "--- $T ---"
-            sqlite3 bulk-local.db ".schema $T" 2>&1
-            sqlite3 -header bulk-local.db "SELECT * FROM $T LIMIT 2;" 2>&1
-            sqlite3 bulk-local.db "SELECT MIN(as_of_date), MAX(as_of_date), COUNT(DISTINCT as_of_date) FROM $T;" 2>&1
-          done
+          echo "=== race_results horse_id/jockey_id/trainer_id sample ==="
+          sqlite3 -header bulk-local.db "SELECT horse_id, jockey_id, trainer_id FROM race_results LIMIT 5;"
           echo ""
-          echo "=== axis_key dist in horse_elo_snapshots ==="
-          sqlite3 bulk-local.db "SELECT axis_key, COUNT(*) FROM horse_elo_snapshots GROUP BY axis_key;" 2>&1
+          echo "=== horse_form_records sample (compute.ts source) ==="
+          sqlite3 -header bulk-local.db "SELECT horse_id, jockey_name, trainer_name FROM horse_form_records LIMIT 5;"
           echo ""
-          echo "=== sanity lookup for one (horse, race_date) pair ==="
-          RACE_DATE=$(sqlite3 bulk-local.db "SELECT MIN(rm.date) FROM race_meetings rm WHERE rm.date >= '2024-11-20'" 2>&1)
-          HORSE_ID=$(sqlite3 bulk-local.db "SELECT rr.horse_id FROM race_results rr JOIN races r ON r.id=rr.race_id JOIN race_meetings rm ON rm.id=r.meeting_id WHERE rm.date='$RACE_DATE' LIMIT 1;" 2>&1)
-          echo "test race_date=$RACE_DATE horse_id=$HORSE_ID"
-          echo "(with axis filter):"
-          sqlite3 -header bulk-local.db "SELECT rating, as_of_date FROM horse_elo_snapshots WHERE horse_id='$HORSE_ID' AND axis_key='overall' AND as_of_date<'$RACE_DATE' ORDER BY as_of_date DESC LIMIT 3;" 2>&1
-          echo "(no axis filter):"
-          sqlite3 -header bulk-local.db "SELECT rating, as_of_date, axis_key FROM horse_elo_snapshots WHERE horse_id='$HORSE_ID' AND as_of_date<'$RACE_DATE' ORDER BY as_of_date DESC LIMIT 3;" 2>&1
-          echo "(any rows for this horse?):"
-          sqlite3 bulk-local.db "SELECT COUNT(*) FROM horse_elo_snapshots WHERE horse_id='$HORSE_ID';" 2>&1
+          echo "=== TEST: strip horse_ prefix from race_results.horse_id and match snapshots ==="
+          sqlite3 bulk-local.db "SELECT COUNT(*) AS matches FROM race_results rr WHERE EXISTS (SELECT 1 FROM horse_elo_snapshots s WHERE s.horse_id = REPLACE(rr.horse_id, 'horse_', ''));"
+          sqlite3 bulk-local.db "SELECT COUNT(*) AS total_results FROM race_results;"
           echo ""
-          echo "=== distinct horse_id sample from each ==="
-          echo "snapshots:"; sqlite3 bulk-local.db "SELECT DISTINCT horse_id FROM horse_elo_snapshots LIMIT 5;" 2>&1
-          echo "race_results:"; sqlite3 bulk-local.db "SELECT DISTINCT horse_id FROM race_results LIMIT 5;" 2>&1
+          echo "=== TEST: JOIN race_results -> horses to get name, then match jockey snapshots by jockey name ==="
+          sqlite3 -header bulk-local.db "SELECT rr.jockey_id, j.name AS jockey_name, (SELECT COUNT(*) FROM jockey_elo_snapshots s WHERE s.jockey_id = j.name) AS snap_rows FROM race_results rr JOIN jockeys j ON j.id = rr.jockey_id LIMIT 5;"
+          echo ""
+          echo "=== TEST: same for trainer ==="
+          sqlite3 -header bulk-local.db "SELECT rr.trainer_id, t.name AS trainer_name, (SELECT COUNT(*) FROM trainer_elo_snapshots s WHERE s.trainer_id = t.name) AS snap_rows FROM race_results rr JOIN trainers t ON t.id = rr.trainer_id LIMIT 5;"
+          echo ""
+          echo "=== TEST: same for horse via horses table ==="
+          sqlite3 -header bulk-local.db "SELECT rr.horse_id, h.id AS horses_id, h.name AS horse_name, (SELECT COUNT(*) FROM horse_elo_snapshots s WHERE s.horse_id = h.id) AS snap_by_id, (SELECT COUNT(*) FROM horse_elo_snapshots s WHERE s.horse_id = h.name) AS snap_by_name FROM race_results rr JOIN horses h ON h.id = rr.horse_id LIMIT 5;"
           exit 0
       - name: Dump features
         working-directory: tianxi-backend
