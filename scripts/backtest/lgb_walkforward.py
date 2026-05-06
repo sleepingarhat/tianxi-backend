@@ -32,16 +32,22 @@ import lightgbm as lgb
 
 
 FEATURE_COLS = [
-    "h_elo", "j_elo", "t_elo", "days_since_last",
-    "distance", "draw", "actual_weight", "field_size",
-    "dist_starts", "dist_top3", "going_starts", "going_top3",
-    "draw_starts", "draw_top3", "combo_starts", "combo_top3",
-    "weight_avg5",
-    # raw factor parts that the baseline already encodes — keeping them
-    # lets the GBM learn non-linear interactions the additive baseline misses.
-    "factor_bonus",
-    # going_code is appended below as a categorical feature.
-]
+      "h_elo", "j_elo", "t_elo", "days_since_last",
+      "distance", "draw", "actual_weight", "field_size",
+      "dist_starts", "dist_top3", "going_starts", "going_top3",
+      "draw_starts", "draw_top3", "combo_starts", "combo_top3",
+      "weight_avg5",
+      # raw factor parts that the baseline already encodes — keeping them
+      # lets the GBM learn non-linear interactions the additive baseline misses.
+      "factor_bonus",
+      # Stage 4c: recency-weighted form (per horse, last 5 starts)
+      "form_n", "form_avgpos_w", "form_top3rate_w", "form_pos_slope",
+      # Stage 4c: cross-features (interaction history, no odds)
+      "tv_starts", "tv_top3",     # trainer × venue
+      "jv_starts", "jv_top3",     # jockey × venue
+      "jdb_starts", "jdb_top3",   # jockey × distance band
+      # going_code is appended below as a categorical feature.
+  ]
 
 
 def parse_args() -> argparse.Namespace:
