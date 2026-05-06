@@ -46,6 +46,9 @@ FEATURE_COLS = [
       "tv_starts", "tv_top3",     # trainer × venue
       "jv_starts", "jv_top3",     # jockey × venue
       "jdb_starts", "jdb_top3",   # jockey × distance band
+        # Stage 5: track-condition specialization
+        "jg_starts", "jg_top3",     # jockey × going
+        "tg_starts", "tg_top3",     # trainer × going
       # going_code is appended below as a categorical feature.
   ]
 
