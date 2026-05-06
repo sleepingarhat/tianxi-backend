@@ -4,26 +4,139 @@
  *     歷史齊全 / 自動更新  → ✓ 綠 · ▲ 黃 · ✗ 紅
  */
 import { Hono } from 'hono';
+import {
+  SESSION_COOKIE,
+  buildAuthorizeUrl,
+  buildSessionCookie,
+  clearSessionCookie,
+  exchangeCodeForToken,
+  fetchGithubLogin,
+  newSessionPayload,
+  readCookie,
+  signSession,
+  verifySession,
+} from '../lib/admin-auth';
 
 interface AdminEnv {
   DB: D1Database;
   ADMIN_TOKEN?: string;
   GITHUB_TOKEN?: string;
   GITHUB_REPO?: string;
+  // OAuth + session
+  SESSION_HMAC_SECRET?: string;
+  GITHUB_OAUTH_CLIENT_ID?: string;
+  GITHUB_OAUTH_CLIENT_SECRET?: string;
+  ADMIN_GITHUB_USER?: string; // comma-separated allowlist of GitHub logins
 }
 
 export const adminRoutes = new Hono<{ Bindings: AdminEnv }>();
 
-adminRoutes.use('*', async (c, next) => {
-  const expected = c.env.ADMIN_TOKEN;
-  if (!expected) return c.json({ error: 'admin disabled: ADMIN_TOKEN not set' }, 503);
-  const header = c.req.header('authorization') || '';
-  const bearer = header.startsWith('Bearer ') ? header.slice(7) : '';
-  const queryTok = c.req.query('token') || '';
-  if (bearer !== expected && queryTok !== expected) {
-    return c.json({ error: 'unauthorized' }, 401);
+function isAdminAllowlisted(env: AdminEnv, login: string): boolean {
+  const list = (env.ADMIN_GITHUB_USER || '').split(',').map((s) => s.trim()).filter(Boolean);
+  return list.includes(login);
+}
+
+function loginRedirectHtml(loginPath: string, reason: string): string {
+  return `<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><title>天喜 · 需要登入</title>
+<style>body{font-family:-apple-system,BlinkMacSystemFont,"PingFang TC",sans-serif;background:#0a0a0a;color:#eee;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
+.box{background:#181818;border:1px solid #333;border-radius:12px;padding:36px 44px;max-width:420px;text-align:center}
+h1{margin:0 0 14px;font-size:22px}p{color:#aaa;font-size:14px;margin:0 0 22px}
+a.btn{display:inline-block;background:#fff;color:#000;padding:10px 20px;border-radius:8px;text-decoration:none;font-weight:600}</style>
+</head><body><div class="box"><h1>天喜 · 內部控制台</h1><p>${reason}</p>
+<a class="btn" href="${loginPath}">用 GitHub 登入</a></div></body></html>`;
+}
+
+// === Public OAuth routes (no auth required) ===
+// /login → redirect to GitHub
+adminRoutes.get('/login', (c) => {
+  const env = c.env;
+  if (!env.GITHUB_OAUTH_CLIENT_ID || !env.SESSION_HMAC_SECRET) {
+    return c.json({ error: 'oauth disabled: missing GITHUB_OAUTH_CLIENT_ID or SESSION_HMAC_SECRET' }, 503);
   }
-  await next();
+  const url = new URL(c.req.url);
+  const redirectUri = `${url.origin}/admin/callback`;
+  const state = crypto.randomUUID();
+  const authorize = buildAuthorizeUrl({ clientId: env.GITHUB_OAUTH_CLIENT_ID, redirectUri, state });
+  // Store state in a short-lived cookie so /callback can verify it.
+  const stateCookie = `admin_oauth_state=${state}; Path=/admin; HttpOnly; Secure; SameSite=Lax; Max-Age=600`;
+  return new Response(null, { status: 302, headers: { Location: authorize, 'Set-Cookie': stateCookie } });
+});
+
+// /callback → exchange code, verify allowlist, set session cookie
+adminRoutes.get('/callback', async (c) => {
+  const env = c.env;
+  if (!env.GITHUB_OAUTH_CLIENT_ID || !env.GITHUB_OAUTH_CLIENT_SECRET || !env.SESSION_HMAC_SECRET) {
+    return c.json({ error: 'oauth disabled' }, 503);
+  }
+  const code = c.req.query('code');
+  const state = c.req.query('state');
+  const stateCookie = readCookie(c.req.header('cookie'), 'admin_oauth_state');
+  if (!code || !state || state !== stateCookie) {
+    return c.json({ error: 'oauth state mismatch' }, 400);
+  }
+  const url = new URL(c.req.url);
+  const redirectUri = `${url.origin}/admin/callback`;
+  try {
+    const accessToken = await exchangeCodeForToken({
+      clientId: env.GITHUB_OAUTH_CLIENT_ID,
+      clientSecret: env.GITHUB_OAUTH_CLIENT_SECRET,
+      code,
+      redirectUri,
+    });
+    const login = await fetchGithubLogin(accessToken);
+    if (!isAdminAllowlisted(env, login)) {
+      return c.json({ error: `user ${login} not in admin allowlist` }, 403);
+    }
+    const session = await signSession(newSessionPayload(login), env.SESSION_HMAC_SECRET);
+    return new Response(null, {
+      status: 302,
+      headers: {
+        Location: '/admin/',
+        'Set-Cookie': [buildSessionCookie(session), 'admin_oauth_state=; Path=/admin; Max-Age=0'].join(', '),
+      },
+    });
+  } catch (err: any) {
+    return c.json({ error: 'oauth_failed', message: String(err?.message ?? err) }, 500);
+  }
+});
+
+// /logout
+adminRoutes.get('/logout', (c) => {
+  return new Response(null, {
+    status: 302,
+    headers: { Location: '/admin/login', 'Set-Cookie': clearSessionCookie() },
+  });
+});
+
+// === Auth middleware for everything else ===
+adminRoutes.use('*', async (c, next) => {
+  // 1. Session cookie (preferred for browser users)
+  const cookie = readCookie(c.req.header('cookie'), SESSION_COOKIE);
+  if (cookie && c.env.SESSION_HMAC_SECRET) {
+    const payload = await verifySession(cookie, c.env.SESSION_HMAC_SECRET);
+    if (payload && isAdminAllowlisted(c.env, payload.user)) {
+      c.set('adminUser' as any, payload.user);
+      await next();
+      return;
+    }
+  }
+  // 2. Legacy bearer/query token (scripts, emergency access)
+  const expected = c.env.ADMIN_TOKEN;
+  if (expected) {
+    const header = c.req.header('authorization') || '';
+    const bearer = header.startsWith('Bearer ') ? header.slice(7) : '';
+    const queryTok = c.req.query('token') || '';
+    if (bearer === expected || queryTok === expected) {
+      await next();
+      return;
+    }
+  }
+  // 3. Not authenticated — render login page for browser, JSON for API
+  const accept = c.req.header('accept') || '';
+  if (accept.includes('text/html')) {
+    return c.html(loginRedirectHtml('/admin/login', '請用 GitHub 登入後再使用內部控制台。'), 401);
+  }
+  return c.json({ error: 'unauthorized' }, 401);
 });
 
 async function scalar<T = any>(db: D1Database, sql: string): Promise<T | null> {
