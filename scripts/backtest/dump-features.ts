@@ -52,35 +52,47 @@
   const db = new Database(DB_PATH, { readonly: true });
   db.pragma('cache_size = -200000'); // 200MB cache
 
-  // ── ELO readers (verbatim mirror of composite-backtest.ts L121-L147) ────
-  const eloStmtCache = new Map<string, Database.Statement>();
-  function eloStmt(entity: 'horse' | 'jockey' | 'trainer', engine: 'v11' | 'v12'): Database.Statement {
-    const k = `${entity}|${engine}`;
-    let s = eloStmtCache.get(k);
-    if (s) return s;
-    const table = `${entity}_elo_snapshots`;
-    const col = `${entity}_id`;
-    const sql = engine === 'v12'
-      ? `SELECT rating FROM ${table} WHERE ${col}=? AND axis_key='overall' AND as_of_date<? AND id LIKE 'v12:%' ORDER BY as_of_date DESC LIMIT 1`
-      : `SELECT rating FROM ${table} WHERE ${col}=? AND axis_key='overall' AND as_of_date<? AND id NOT LIKE 'v12:%' ORDER BY as_of_date DESC LIMIT 1`;
-    s = db.prepare(sql);
-    eloStmtCache.set(k, s);
-    return s;
-  }
-  function readElo(entity: 'horse' | 'jockey' | 'trainer', id: string | null, asOf: string): number | null {
-    if (!id) return null;
-    try {
-      const row = eloStmt(entity, ENGINE).get(id, asOf) as { rating: number } | undefined;
-      if (row?.rating != null) return row.rating;
-      if (ENGINE === 'v12') {
-        const fb = eloStmt(entity, 'v11').get(id, asOf) as { rating: number } | undefined;
-        return fb?.rating ?? null;
-      }
-      return null;
-    } catch {
-      return null;
+  // ── ELO readers ────────────────────────────────────────────────────────
+    // FIX 2026-05-06: previous query had two bugs that returned null for ALL ELOs:
+    //   1) jockey_elo_snapshots & trainer_elo_snapshots have NO axis_key column
+    //      (only horse_elo_snapshots does — see src/db/schema_v2.sql L255 vs L273/L288).
+    //      The old WHERE axis_key='overall' threw a SQL error → caught → null.
+    //   2) Old WHERE id LIKE 'v12:%' never matched: compute.ts builds horse snap
+    //      ids as `${id}|overall|${date}|...` and compute_v11.ts uses
+    //      `${entityId}|${axisKey}|...` — neither uses any v12: / v11: prefix.
+    // Result: feature_importance for h_elo / j_elo / t_elo was 0.0 in Stage 3
+    // because every value in the column was null.
+    //
+    // Fix: per-entity query that matches actual schema. Since neither engine
+    // tags rows with a prefix and the workflow only ever runs one engine into
+    // the cached DB, the ENGINE arg is now informational only — the same row
+    // set is read regardless.
+    const eloStmtCache = new Map<string, Database.Statement>();
+    function eloStmt(entity: 'horse' | 'jockey' | 'trainer'): Database.Statement {
+      let s = eloStmtCache.get(entity);
+      if (s) return s;
+      const table = `${entity}_elo_snapshots`;
+      const col = `${entity}_id`;
+      // horse table has axis_key NOT NULL ('overall' / surface_bucket) — filter to overall.
+      // jockey/trainer tables have no axis_key column — must NOT filter on it.
+      const sql = entity === 'horse'
+        ? `SELECT rating FROM ${table} WHERE ${col}=? AND axis_key='overall' AND as_of_date<? ORDER BY as_of_date DESC LIMIT 1`
+        : `SELECT rating FROM ${table} WHERE ${col}=? AND as_of_date<? ORDER BY as_of_date DESC LIMIT 1`;
+      s = db.prepare(sql);
+      eloStmtCache.set(entity, s);
+      return s;
     }
-  }
+    function readElo(entity: 'horse' | 'jockey' | 'trainer', id: string | null, asOf: string): number | null {
+      if (!id) return null;
+      try {
+        const row = eloStmt(entity).get(id, asOf) as { rating: number } | undefined;
+        return row?.rating ?? null;
+      } catch (e) {
+        // surface unexpected errors so we don't silently lose ELO again
+        if (process.env.DEBUG_ELO) console.error(`[readElo] ${entity} ${id} ${asOf}:`, (e as Error).message);
+        return null;
+      }
+    }
 
   // ── Factor queries (verbatim from composite-backtest.ts) ────────────────
   const qDistFit = db.prepare(`
