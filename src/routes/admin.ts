@@ -932,7 +932,6 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
       tb.innerHTML = '<tr><td colspan="5" class="warn">無賽事資料</td></tr>'; return;
     }
     window._meetingList = data.meetings;
-    window._meetingHits = window._meetingHits || {};
     const today = (D.status && D.status.serverTime ? D.status.serverTime : new Date().toISOString()).substring(0, 10);
     tb.innerHTML = data.meetings.map((m, i) => {
       const venue = m.venue === 'ST' ? '沙田' : m.venue === 'HV' ? '跑馬地' : (m.venue || '—');
