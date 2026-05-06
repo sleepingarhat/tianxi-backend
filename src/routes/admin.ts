@@ -947,7 +947,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
       const evaluated = m.cached_races_evaluated;
       let actionCell;
         if (isPast && !hasResults) {
-          actionCell = '<span class="warn" style="font-size:11px">⚠ 賽果未同步 · <a href="javascript:void(0)" onclick="runPicksForDate(' + i + ')" style="color:var(--blue)">查看當日預測</a></span>';
+          actionCell = '<span class="muted-cell" style="font-size:11px">⚠ 賽果未同步</span>';
         } else if (isPast && hasResults) {
           if (t1 != null && t3 != null) {
             const t1cls = t1 >= 30 ? 'ok' : t1 < 15 ? 'bad' : '';
@@ -959,7 +959,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
                       + ' <span style="font-size:10px;color:var(--mut)">(' + evaluated + ' 場 · 點看詳情)</span>'
                       + '</a>';
           } else {
-            actionCell = '<span class="muted-cell" style="font-size:11px">排隊中（每日 03:00 自動運算） · <a href="javascript:void(0)" onclick="runHitReport(' + i + ')" style="color:var(--blue)">立即運算</a></span>';
+            actionCell = '<span class="muted-cell" style="font-size:11px">命中率待算（每日凌晨自動）</span>';
           }
         } else if (isUpcoming) {
           // 即日 / 將來賽事日：唔再喺呢度俾按鈕，因為下面已經有「即日賽事全因子預測」掣
