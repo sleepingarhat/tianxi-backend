@@ -419,6 +419,30 @@ adminRoutes.get('/api/meetings', async (c) => {
   return c.json({ meetings: results ?? [] });
 });
 
+// ── /api/jockey-elo-debug?name=布浩榮 — diagnose jockey ELO snapshot lookup ──
+// Auth handled by mount-layer middleware (Bearer header or ?token=).
+adminRoutes.get('/api/jockey-elo-debug', async (c) => {
+  const name = c.req.query('name');
+  if (!name) return c.json({ error: 'name query param required' }, 400);
+  const db = c.env.DB;
+  const [jockeyRows, snapshotByName, snapshotByPrefix, snapshotByLike, recentRR] = await Promise.all([
+    db.prepare("SELECT id, name_ch, name_en FROM jockeys WHERE name_ch = ? OR name_en = ? OR id LIKE ? LIMIT 20").bind(name, name, '%' + name + '%').all().catch((e: any) => ({ results: [], error: e?.message })),
+    db.prepare("SELECT id, jockey_id, axis_key, rating, as_of_date FROM jockey_elo_snapshots WHERE jockey_id = ? ORDER BY as_of_date DESC LIMIT 10").bind(name).all().catch((e: any) => ({ results: [], error: e?.message })),
+    db.prepare("SELECT id, jockey_id, axis_key, rating, as_of_date FROM jockey_elo_snapshots WHERE jockey_id = ? ORDER BY as_of_date DESC LIMIT 10").bind('jockey_' + name).all().catch((e: any) => ({ results: [], error: e?.message })),
+    db.prepare("SELECT DISTINCT jockey_id FROM jockey_elo_snapshots WHERE jockey_id LIKE ? LIMIT 20").bind('%' + name + '%').all().catch((e: any) => ({ results: [], error: e?.message })),
+    db.prepare("SELECT rr.jockey_id, rr.jockey_name, COUNT(*) AS n, MAX(rm.date) AS last_date FROM race_results rr JOIN races r ON r.id = rr.race_id JOIN race_meetings rm ON rm.id = r.meeting_id WHERE rr.jockey_name = ? GROUP BY rr.jockey_id, rr.jockey_name ORDER BY last_date DESC LIMIT 20").bind(name).all().catch((e: any) => ({ results: [], error: e?.message })),
+  ]);
+  return c.json({
+    name,
+    jockeysTable: jockeyRows.results,
+    snapshotsByExactName: snapshotByName.results,
+    snapshotsByJockeyPrefix: snapshotByPrefix.results,
+    snapshotsLikeName: snapshotByLike.results,
+    recentRaceResults: recentRR.results,
+    note: 'Compare jockey_id values across the 4 snapshot lookups to find the keying mismatch.',
+  });
+});
+
 // ── GET / — HTML dashboard (SSR: all data fetched server-side) ──
 adminRoutes.get('/', async (c) => {
   c.header('Cache-Control', 'no-store, no-cache, must-revalidate');
