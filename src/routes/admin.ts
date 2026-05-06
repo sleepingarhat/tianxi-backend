@@ -769,6 +769,10 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
   <h2>最近工作流運行</h2>
   <table id="runs"><thead><tr><th>ID</th><th>名稱</th><th>狀態</th><th>結果</th><th>更新時間</th></tr></thead><tbody></tbody></table>
 
+  <div id="hitRateRollup" style="margin:14px 0;padding:12px 14px;background:linear-gradient(135deg,#f0f7ff,#fafcff);border:1px solid var(--rule);border-radius:6px;font-size:12px">
+    <div style="color:var(--mut)">最近 <select id="rollupDays" style="font-size:11px;padding:1px 4px" onchange="loadHitRateRollup()"><option value="7">7</option><option value="14">14</option><option value="30" selected>30</option><option value="60">60</option><option value="90">90</option></select> 日整體命中率 <span id="rollupStatus" style="color:var(--mut);margin-left:8px">載入中…</span></div>
+    <div id="rollupContent" style="margin-top:8px"></div>
+  </div>
   <h2>最近賽事</h2>
   <table id="recentMeetings"><thead><tr>
     <th>日期</th><th>場地</th><th>場地狀況</th><th>場數</th><th>命中率 (Top1 / Top3)</th><th>操作</th>
@@ -947,6 +951,45 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
         '</tr>';
     }).join('');
   }
+
+  async function loadHitRateRollup() {
+    const days = (document.getElementById('rollupDays') || {}).value || '30';
+    const stat = document.getElementById('rollupStatus');
+    const body = document.getElementById('rollupContent');
+    if (!stat || !body) return;
+    stat.textContent = '運算中…（首次需評估每場）';
+    body.innerHTML = '';
+    try {
+      const r = await fetch('/api/analyze/hit-rate-rollup?days=' + days);
+      const d = await r.json();
+      if (d.error) { stat.innerHTML = '<span class="bad">錯誤：' + d.error + '</span>'; return; }
+      stat.innerHTML = '<span class="muted-cell">' + d.from + ' → ' + d.to + ' · ' + d.meetingsEvaluated + ' 場日 · ' + d.racesEvaluated + ' 場已評</span>';
+      const t1cls = d.top1HitRate != null && d.top1HitRate >= 25 ? 'ok' : d.top1HitRate != null && d.top1HitRate < 12 ? 'bad' : '';
+      const t3cls = d.top3AnyHitRate != null && d.top3AnyHitRate >= 70 ? 'ok' : d.top3AnyHitRate != null && d.top3AnyHitRate < 50 ? 'bad' : '';
+      const fmtPct = (v) => v != null ? v.toFixed(1) + '%' : '—';
+      body.innerHTML =
+        '<div style="display:flex;gap:18px;flex-wrap:wrap;align-items:flex-end">'
+        + '<div><div style="font-size:10px;color:var(--mut);text-transform:uppercase;letter-spacing:.5px">Top 1 命中率</div>'
+          + '<div class="' + t1cls + '" style="font-size:24px;font-weight:700;font-variant-numeric:tabular-nums">' + fmtPct(d.top1HitRate) + '</div>'
+          + '<div style="font-size:10px;color:var(--mut)">' + d.top1Hits + ' / ' + d.racesEvaluated + '</div></div>'
+        + '<div><div style="font-size:10px;color:var(--mut);text-transform:uppercase;letter-spacing:.5px">Top 3 任一命中率</div>'
+          + '<div class="' + t3cls + '" style="font-size:24px;font-weight:700;font-variant-numeric:tabular-nums">' + fmtPct(d.top3AnyHitRate) + '</div>'
+          + '<div style="font-size:10px;color:var(--mut)">' + d.top3AnyHits + ' / ' + d.racesEvaluated + '</div></div>'
+        + '<div><div style="font-size:10px;color:var(--mut);text-transform:uppercase;letter-spacing:.5px">Top 3 平均交集</div>'
+          + '<div style="font-size:24px;font-weight:700;font-variant-numeric:tabular-nums">' + (d.top3AvgIntersect != null ? d.top3AvgIntersect.toFixed(2) : '—') + '<span style="font-size:13px;color:var(--mut)"> / 3</span></div></div>'
+        + (d.perMeeting && d.perMeeting.length ? '<div style="margin-left:auto;flex:1;min-width:280px"><div style="font-size:10px;color:var(--mut);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">逐場日 (Top1% / Top3任一%)</div>'
+          + '<div style="display:flex;gap:3px;flex-wrap:wrap;font-variant-numeric:tabular-nums">'
+          + d.perMeeting.slice().reverse().map(m => {
+              const cls = m.top1HitRate >= 25 ? 'ok' : m.top1HitRate < 12 ? 'bad' : '';
+              return '<span title="' + m.date + ' ' + m.venue + ' · Top1 ' + (m.top1HitRate != null ? m.top1HitRate.toFixed(1) : '—') + '% · Top3 ' + (m.top3AnyHitRate != null ? m.top3AnyHitRate.toFixed(1) : '—') + '%" style="font-size:10px;padding:1px 5px;border:1px solid var(--rule);border-radius:3px" class="' + cls + '">' + m.date.substring(5) + ' ' + (m.top1HitRate != null ? m.top1HitRate.toFixed(0) : '—') + '/' + (m.top3AnyHitRate != null ? m.top3AnyHitRate.toFixed(0) : '—') + '</span>';
+            }).join('')
+          + '</div></div>' : '')
+        + '</div>';
+    } catch (e) {
+      stat.innerHTML = '<span class="bad">錯誤：' + e.message + '</span>';
+    }
+  }
+
 
   // ── 賽事日預測 / 比對報告 ──────────────────────────────────────────
   async function runPicksForDate(i) {
@@ -1294,6 +1337,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
   safeRender('renderStatus', renderStatus);
   safeRender('renderRuns', renderRuns);
   safeRender('renderMeetings', renderMeetings);
+  safeRender('loadHitRateRollup', loadHitRateRollup);
     safeRender('renderNextRaceDay', renderNextRaceDay);
   document.getElementById('refreshClock').textContent = '載入時間：' + new Date().toLocaleTimeString('zh-HK') + ' · 每 60 秒自動刷新';
   // Auto-reload page every 60s for fresh data
