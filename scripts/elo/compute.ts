@@ -88,6 +88,42 @@ async function main(): Promise<void> {
     resolve(process.cwd(), 'src', 'db', 'schema_v2.sql'),
   ]);
 
+  // === Backfill horse_form_records.jockey_name / trainer_name from race_results ===
+  // The HKJC source CSV occasionally leaves the jockey/trainer column blank, which
+  // dropped affected runners (e.g. 布浩榮) from the ELO compute. race_results has
+  // the authoritative jockey_name / trainer_name keyed on (horse_id, race_date) so
+  // use that as the recovery source before we read horse_form_records.
+  const beforeJ = (db.prepare('SELECT COUNT(*) AS n FROM horse_form_records WHERE jockey_name IS NULL').get() as { n: number }).n;
+  const beforeT = (db.prepare('SELECT COUNT(*) AS n FROM horse_form_records WHERE trainer_name IS NULL').get() as { n: number }).n;
+  db.exec(`
+    UPDATE horse_form_records
+       SET jockey_name = (
+         SELECT rr.jockey_name FROM race_results rr
+         JOIN races r ON r.id = rr.race_id
+         JOIN race_meetings rm ON rm.id = r.meeting_id
+         WHERE rr.horse_id = horse_form_records.horse_id
+           AND rm.date = horse_form_records.race_date
+           AND rr.jockey_name IS NOT NULL
+         LIMIT 1
+       )
+     WHERE jockey_name IS NULL;
+    UPDATE horse_form_records
+       SET trainer_name = (
+         SELECT rr.trainer_name FROM race_results rr
+         JOIN races r ON r.id = rr.race_id
+         JOIN race_meetings rm ON rm.id = r.meeting_id
+         WHERE rr.horse_id = horse_form_records.horse_id
+           AND rm.date = horse_form_records.race_date
+           AND rr.trainer_name IS NOT NULL
+         LIMIT 1
+       )
+     WHERE trainer_name IS NULL;
+  `);
+  const afterJ = (db.prepare('SELECT COUNT(*) AS n FROM horse_form_records WHERE jockey_name IS NULL').get() as { n: number }).n;
+  const afterT = (db.prepare('SELECT COUNT(*) AS n FROM horse_form_records WHERE trainer_name IS NULL').get() as { n: number }).n;
+  log('elo', `backfill jockey_name: ${beforeJ} -> ${afterJ} NULL  (recovered ${beforeJ - afterJ})`);
+  log('elo', `backfill trainer_name: ${beforeT} -> ${afterT} NULL  (recovered ${beforeT - afterT})`);
+
   if (args.reset) {
     db.prepare('DELETE FROM horse_elo_snapshots').run();
     db.prepare('DELETE FROM jockey_elo_snapshots').run();
@@ -238,6 +274,25 @@ async function main(): Promise<void> {
   const ms = Date.now() - t0;
   log('elo', `done: ${processedRaces} races · ${processedResults} results · ${ms}ms`);
   log('elo', `unique horses=${horseR.size} jockeys=${jockeyR.size} trainers=${trainerR.size}`);
+
+  // === Cold-start seed: 1500 for every jockey/trainer in master tables that never
+  // appeared in horse_form_records (e.g. brand-new licensees, or rare names whose
+  // form rows were all dropped). Without this, downstream lookups return NULL and
+  // axis features become missing.
+  const seedDate = args.toDate === '9999-12-31' ? new Date().toISOString().slice(0, 10) : args.toDate;
+  const seedJ = db.prepare(`
+    INSERT OR IGNORE INTO jockey_elo_snapshots (id, jockey_id, as_of_race_id, as_of_date, rating, games_played, computed_at)
+    SELECT 'seed|' || id, id, NULL, ?, 1500, 0, datetime('now')
+      FROM jockeys
+     WHERE id NOT IN (SELECT DISTINCT jockey_id FROM jockey_elo_snapshots)
+  `).run(seedDate);
+  const seedT = db.prepare(`
+    INSERT OR IGNORE INTO trainer_elo_snapshots (id, trainer_id, as_of_race_id, as_of_date, rating, games_played, computed_at)
+    SELECT 'seed|' || id, id, NULL, ?, 1500, 0, datetime('now')
+      FROM trainers
+     WHERE id NOT IN (SELECT DISTINCT trainer_id FROM trainer_elo_snapshots)
+  `).run(seedDate);
+  log('elo', `cold-start seed jockeys=${seedJ.changes} trainers=${seedT.changes}`);
 
   runFinish.run(processedRaces, processedResults, 1, null, args.runLabel);
 
