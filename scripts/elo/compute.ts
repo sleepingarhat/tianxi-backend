@@ -95,26 +95,30 @@ async function main(): Promise<void> {
   // use that as the recovery source before we read horse_form_records.
   const beforeJ = (db.prepare('SELECT COUNT(*) AS n FROM horse_form_records WHERE jockey_name IS NULL').get() as { n: number }).n;
   const beforeT = (db.prepare('SELECT COUNT(*) AS n FROM horse_form_records WHERE trainer_name IS NULL').get() as { n: number }).n;
+  // race_results stores only jockey_id / trainer_id, so JOIN through the
+  // jockeys / trainers master tables to recover the name column.
   db.exec(`
     UPDATE horse_form_records
        SET jockey_name = (
-         SELECT rr.jockey_name FROM race_results rr
+         SELECT j.name_ch FROM race_results rr
+         JOIN jockeys j ON j.id = rr.jockey_id
          JOIN races r ON r.id = rr.race_id
          JOIN race_meetings rm ON rm.id = r.meeting_id
          WHERE rr.horse_id = horse_form_records.horse_id
            AND rm.date = horse_form_records.race_date
-           AND rr.jockey_name IS NOT NULL
+           AND rr.jockey_id IS NOT NULL
          LIMIT 1
        )
      WHERE jockey_name IS NULL;
     UPDATE horse_form_records
        SET trainer_name = (
-         SELECT rr.trainer_name FROM race_results rr
+         SELECT t.name_ch FROM race_results rr
+         JOIN trainers t ON t.id = rr.trainer_id
          JOIN races r ON r.id = rr.race_id
          JOIN race_meetings rm ON rm.id = r.meeting_id
          WHERE rr.horse_id = horse_form_records.horse_id
            AND rm.date = horse_form_records.race_date
-           AND rr.trainer_name IS NOT NULL
+           AND rr.trainer_id IS NOT NULL
          LIMIT 1
        )
      WHERE trainer_name IS NULL;
