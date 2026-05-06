@@ -1633,8 +1633,16 @@ analyzeRoutes.get('/factors', (c) => {
             const errors: any[] = [];
             for (const m of meetingDates) {
               try {
-                const r = await computeHitRateStats(db, m.date, engine);
-                if ('error' in r) { errors.push({date: m.date, error: r.error}); continue; }
+                // Cache-first: avoid Worker timeout when iterating many meetings.
+                // Falls back to live compute (and back-fills cache) when row missing
+                // or has stale Stage-4a shape (no quinellaHits field).
+                let r: any = await readHitRateCache(db, m.date, engine);
+                if (!r?.summary || r.summary.quinellaHits === undefined) {
+                  const computed = await computeHitRateStats(db, m.date, engine);
+                  if ('error' in computed) { errors.push({date: m.date, error: computed.error}); continue; }
+                  await writeHitRateCache(db, m.date, engine, computed).catch(() => {});
+                  r = computed;
+                }
                 const s = r.summary;
                 if (!s.racesEvaluated) continue;
                 perMeeting.push({ date: m.date, venue: m.venue, ...s });
