@@ -421,6 +421,50 @@ adminRoutes.get('/api/meetings', async (c) => {
 
 // ── /api/jockey-elo-debug?name=布浩榮 — diagnose jockey ELO snapshot lookup ──
 // Auth handled by mount-layer middleware (Bearer header or ?token=).
+
+// Seed missing jockey/trainer ELO snapshots in production D1.
+// Inserts a 1500-rating snapshot for every (jockey|trainer) without any snapshot,
+// using the prefixed master-table id (jockeys.id / trainers.id) so the analyze
+// reader's WHERE jockey_id = ? lookup matches. Idempotent (INSERT OR IGNORE).
+adminRoutes.post('/api/seed-missing-jockey-elo', async (c) => {
+  const seedDate = c.req.query('date') || new Date().toISOString().slice(0, 10);
+  try {
+    const jBefore = await scalar<number>(c.env.DB, `SELECT COUNT(*) AS n FROM jockeys WHERE id NOT IN (SELECT DISTINCT jockey_id FROM jockey_elo_snapshots)`);
+    const tBefore = await scalar<number>(c.env.DB, `SELECT COUNT(*) AS n FROM trainers WHERE id NOT IN (SELECT DISTINCT trainer_id FROM trainer_elo_snapshots)`);
+    const jRes = await c.env.DB.prepare(`
+      INSERT OR IGNORE INTO jockey_elo_snapshots (id, jockey_id, as_of_race_id, as_of_date, rating, games_played, computed_at)
+      SELECT 'seed|' || id, id, NULL, ?, 1500, 0, datetime('now')
+        FROM jockeys
+       WHERE id NOT IN (SELECT DISTINCT jockey_id FROM jockey_elo_snapshots)
+    `).bind(seedDate).run();
+    const tRes = await c.env.DB.prepare(`
+      INSERT OR IGNORE INTO trainer_elo_snapshots (id, trainer_id, as_of_race_id, as_of_date, rating, games_played, computed_at)
+      SELECT 'seed|' || id, id, NULL, ?, 1500, 0, datetime('now')
+        FROM trainers
+       WHERE id NOT IN (SELECT DISTINCT trainer_id FROM trainer_elo_snapshots)
+    `).bind(seedDate).run();
+    return c.json({
+      ok: true,
+      seedDate,
+      jockeys: { missingBefore: jBefore, seeded: jRes.meta.changes ?? 0 },
+      trainers: { missingBefore: tBefore, seeded: tRes.meta.changes ?? 0 },
+    });
+  } catch (err: any) {
+    return c.json({ error: 'seed_failed', message: String(err?.message ?? err) }, 500);
+  }
+});
+
+// Counterpart probe to verify coverage post-seed.
+adminRoutes.get('/api/seed-missing-jockey-elo', async (c) => {
+  const jMissing = await scalar<number>(c.env.DB, `SELECT COUNT(*) AS n FROM jockeys WHERE id NOT IN (SELECT DISTINCT jockey_id FROM jockey_elo_snapshots)`);
+  const tMissing = await scalar<number>(c.env.DB, `SELECT COUNT(*) AS n FROM trainers WHERE id NOT IN (SELECT DISTINCT trainer_id FROM trainer_elo_snapshots)`);
+  const jTotal = await scalar<number>(c.env.DB, `SELECT COUNT(*) AS n FROM jockeys`);
+  const tTotal = await scalar<number>(c.env.DB, `SELECT COUNT(*) AS n FROM trainers`);
+  return c.json({
+    jockeys: { total: jTotal, withoutSnapshot: jMissing },
+    trainers: { total: tTotal, withoutSnapshot: tMissing },
+  });
+});
 adminRoutes.get('/api/jockey-elo-debug', async (c) => {
   const name = c.req.query('name');
   if (!name) return c.json({ error: 'name query param required' }, 400);
