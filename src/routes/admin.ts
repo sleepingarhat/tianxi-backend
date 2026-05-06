@@ -110,6 +110,12 @@ adminRoutes.get('/logout', (c) => {
 
 // === Auth middleware for everything else ===
 adminRoutes.use('*', async (c, next) => {
+  // Skip OAuth public endpoints (login flow + logout).
+  const path = new URL(c.req.url).pathname;
+  if (path === '/admin/login' || path === '/admin/callback' || path === '/admin/logout') {
+    await next();
+    return;
+  }
   // 1. Session cookie (preferred for browser users)
   const cookie = readCookie(c.req.header('cookie'), SESSION_COOKIE);
   if (cookie && c.env.SESSION_HMAC_SECRET) {
