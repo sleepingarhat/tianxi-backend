@@ -52,26 +52,34 @@
   const db = new Database(DB_PATH, { readonly: true });
   db.pragma('cache_size = -200000'); // 200MB cache
 
-  // ── ELO readers (mirrors composite-backtest readElo) ────────────────────
+  // ── ELO readers (verbatim mirror of composite-backtest.ts L121-L147) ────
   const eloStmtCache = new Map<string, Database.Statement>();
   function eloStmt(entity: 'horse' | 'jockey' | 'trainer', engine: 'v11' | 'v12'): Database.Statement {
-    const key = `${entity}.${engine}`;
-    let st = eloStmtCache.get(key);
-    if (st) return st;
-    const tbl = engine === 'v11'
-      ? `elo_${entity}_ratings_v11`
-      : `elo_${entity}_ratings`;
-    st = db.prepare(`
-      SELECT rating FROM ${tbl}
-       WHERE ${entity}_id = ? AND as_of_date <= ?
-       ORDER BY as_of_date DESC LIMIT 1`);
-    eloStmtCache.set(key, st);
-    return st;
+    const k = `${entity}|${engine}`;
+    let s = eloStmtCache.get(k);
+    if (s) return s;
+    const table = `${entity}_elo_snapshots`;
+    const col = `${entity}_id`;
+    const sql = engine === 'v12'
+      ? `SELECT rating FROM ${table} WHERE ${col}=? AND axis_key='overall' AND as_of_date<? AND id LIKE 'v12:%' ORDER BY as_of_date DESC LIMIT 1`
+      : `SELECT rating FROM ${table} WHERE ${col}=? AND axis_key='overall' AND as_of_date<? AND id NOT LIKE 'v12:%' ORDER BY as_of_date DESC LIMIT 1`;
+    s = db.prepare(sql);
+    eloStmtCache.set(k, s);
+    return s;
   }
   function readElo(entity: 'horse' | 'jockey' | 'trainer', id: string | null, asOf: string): number | null {
     if (!id) return null;
-    const row = eloStmt(entity, ENGINE).get(id, asOf) as { rating: number } | undefined;
-    return row?.rating ?? null;
+    try {
+      const row = eloStmt(entity, ENGINE).get(id, asOf) as { rating: number } | undefined;
+      if (row?.rating != null) return row.rating;
+      if (ENGINE === 'v12') {
+        const fb = eloStmt(entity, 'v11').get(id, asOf) as { rating: number } | undefined;
+        return fb?.rating ?? null;
+      }
+      return null;
+    } catch {
+      return null;
+    }
   }
 
   // ── Factor queries (verbatim from composite-backtest.ts) ────────────────
