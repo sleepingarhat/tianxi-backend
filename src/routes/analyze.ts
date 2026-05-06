@@ -96,49 +96,98 @@ export async function computeHitRateStats(db: any, date: string, engine: EloEngi
     actualByRace.get(r.race_number)!.push(r);
   }
   const picksData = await computePicksFromEntries(db, date, meeting, entries, engine);
-  let top1Hits = 0, top3AnyHits = 0, top3SumIntersect = 0, racesEvaluated = 0;
-  const races = picksData.races.map((race: any) => {
-    const actualSorted = (actualByRace.get(race.raceNumber) ?? []).sort((a: any, b: any) => a.finishing_position - b.finishing_position);
-    const predictedTop3 = (race.picks ?? []).slice(0, 3);
-    const actualTop3 = actualSorted.slice(0, 3);
-    const actualTop1Id = actualTop3[0]?.horse_id ?? null;
-    const actualTop3Ids = new Set(actualTop3.map((a: any) => a.horse_id));
-    const top1Hit = actualTop1Id != null && predictedTop3[0]?.horseId === actualTop1Id;
-    const intersect = predictedTop3.filter((p: any) => actualTop3Ids.has(p.horseId)).length;
-    const top3AnyHit = intersect > 0;
-    if (actualTop3.length >= 3) {
-      racesEvaluated++;
-      if (top1Hit) top1Hits++;
-      if (top3AnyHit) top3AnyHits++;
-      top3SumIntersect += intersect;
-    }
+  // HK pool hit metrics — computed per race, aggregated into summary.
+    // racesEvaluated = denom for top1/top3-any/Q/QP/Trio/Tierce (need actual top-3).
+    // first4Eligible = denom for First 4 (need actual top-4).
+    let top1Hits = 0, top3AnyHits = 0, top3SumIntersect = 0, racesEvaluated = 0;
+    let quinellaHits = 0, qpHits = 0, trioHits = 0, tierceHits = 0;
+    let first4Hits = 0, first4Eligible = 0;
+    const races = picksData.races.map((race: any) => {
+      const actualSorted = (actualByRace.get(race.raceNumber) ?? []).sort((a: any, b: any) => a.finishing_position - b.finishing_position);
+      const predictedTop3 = (race.picks ?? []).slice(0, 3);
+      const predictedTop2 = predictedTop3.slice(0, 2);
+      const predictedTop4 = (race.picks ?? []).slice(0, 4);
+      const actualTop3 = actualSorted.slice(0, 3);
+      const actualTop2 = actualSorted.slice(0, 2);
+      const actualTop4 = actualSorted.slice(0, 4);
+      const actualTop1Id = actualTop3[0]?.horse_id ?? null;
+      const actualTop3Ids = new Set(actualTop3.map((a: any) => a.horse_id));
+      const actualTop2Ids = new Set(actualTop2.map((a: any) => a.horse_id));
+      const actualTop4Ids = new Set(actualTop4.map((a: any) => a.horse_id));
+
+      const top1Hit = actualTop1Id != null && predictedTop3[0]?.horseId === actualTop1Id;
+      const intersect = predictedTop3.filter((p: any) => actualTop3Ids.has(p.horseId)).length;
+      const top3AnyHit = intersect > 0;
+
+      // Quinella (Q): our top 2 == actual top 2 (any order)
+      const quinellaHit = predictedTop2.length === 2 && actualTop2.length === 2
+        && predictedTop2.every((p: any) => actualTop2Ids.has(p.horseId));
+      // Quinella Place (QP): both our top 2 finish in actual top 3 (any order)
+      const qpHit = predictedTop2.length === 2 && actualTop3.length >= 3
+        && predictedTop2.every((p: any) => actualTop3Ids.has(p.horseId));
+      // Trio: our top 3 == actual top 3 (any order, exact set)
+      const trioHit = predictedTop3.length === 3 && actualTop3.length === 3
+        && predictedTop3.every((p: any) => actualTop3Ids.has(p.horseId));
+      // Tierce (3T): our top 3 == actual top 3 in EXACT order
+      const tierceHit = predictedTop3.length === 3 && actualTop3.length === 3
+        && predictedTop3[0]?.horseId === actualTop3[0]?.horse_id
+        && predictedTop3[1]?.horseId === actualTop3[1]?.horse_id
+        && predictedTop3[2]?.horseId === actualTop3[2]?.horse_id;
+      // First 4 (F4): our top 4 == actual top 4 (any order)
+      const first4Hit = predictedTop4.length === 4 && actualTop4.length === 4
+        && predictedTop4.every((p: any) => actualTop4Ids.has(p.horseId));
+
+      if (actualTop3.length >= 3) {
+        racesEvaluated++;
+        if (top1Hit) top1Hits++;
+        if (top3AnyHit) top3AnyHits++;
+        top3SumIntersect += intersect;
+        if (quinellaHit) quinellaHits++;
+        if (qpHit) qpHits++;
+        if (trioHit) trioHits++;
+        if (tierceHit) tierceHits++;
+      }
+      if (actualTop4.length >= 4) {
+        first4Eligible++;
+        if (first4Hit) first4Hits++;
+      }
+
+      return {
+        raceNumber: race.raceNumber, title: race.title, distance: race.distance, going: race.going,
+        predictedTop3: predictedTop3.map((p: any) => ({
+          rank: p.rank, horseNumber: p.horseNumber, horseId: p.horseId,
+          nameCh: p.nameCh, jockeyCh: p.jockeyCh, trainerCh: p.trainerCh,
+          horseElo: p.horseElo, jockeyElo: p.jockeyElo, trainerElo: p.trainerElo,
+          eloComposite: p.eloComposite, finalScore: p.finalScore, pWin: p.pWin,
+        })),
+        actualTop3: actualTop3.map((a: any) => ({
+          position: a.finishing_position, horseNumber: a.horse_number, horseId: a.horse_id,
+          nameCh: a.name_ch, winOdds: a.win_odds,
+        })),
+        top1Hit, top3IntersectCount: intersect, top3AnyHit,
+        quinellaHit, qpHit, trioHit, tierceHit, first4Hit,
+      };
+    });
+    const rate = (n: number, d: number) => d ? Math.round(n / d * 1000) / 10 : null;
     return {
-      raceNumber: race.raceNumber, title: race.title, distance: race.distance, going: race.going,
-      predictedTop3: predictedTop3.map((p: any) => ({
-        rank: p.rank, horseNumber: p.horseNumber, horseId: p.horseId,
-        nameCh: p.nameCh, jockeyCh: p.jockeyCh, trainerCh: p.trainerCh,
-        horseElo: p.horseElo, jockeyElo: p.jockeyElo, trainerElo: p.trainerElo,
-        eloComposite: p.eloComposite, finalScore: p.finalScore, pWin: p.pWin,
-      })),
-      actualTop3: actualTop3.map((a: any) => ({
-        position: a.finishing_position, horseNumber: a.horse_number, horseId: a.horse_id,
-        nameCh: a.name_ch, winOdds: a.win_odds,
-      })),
-      top1Hit, top3IntersectCount: intersect, top3AnyHit,
+      meeting,
+      races,
+      summary: {
+        racesEvaluated,
+        top1HitRate: rate(top1Hits, racesEvaluated),
+        top3AnyHitRate: rate(top3AnyHits, racesEvaluated),
+        top3AvgIntersect: racesEvaluated ? Math.round(top3SumIntersect/racesEvaluated*100)/100 : null,
+        quinellaHitRate: rate(quinellaHits, racesEvaluated),
+        qpHitRate: rate(qpHits, racesEvaluated),
+        trioHitRate: rate(trioHits, racesEvaluated),
+        tierceHitRate: rate(tierceHits, racesEvaluated),
+        first4HitRate: rate(first4Hits, first4Eligible),
+        top1Hits, top3AnyHits, top3SumIntersect,
+        quinellaHits, qpHits, trioHits, tierceHits,
+        first4Hits, first4Eligible,
+      },
     };
-  });
-  return {
-    meeting,
-    races,
-    summary: {
-      racesEvaluated,
-      top1HitRate: racesEvaluated ? Math.round(top1Hits/racesEvaluated*1000)/10 : null,
-      top3AnyHitRate: racesEvaluated ? Math.round(top3AnyHits/racesEvaluated*1000)/10 : null,
-      top3AvgIntersect: racesEvaluated ? Math.round(top3SumIntersect/racesEvaluated*100)/100 : null,
-      top1Hits, top3AnyHits, top3SumIntersect,
-    },
-  };
-}
+  }
 
 // POST /api/analyze — 因子分析（TimesFM + AI 綜合建議）
 analyzeRoutes.post('/', async (c) => {
@@ -1577,34 +1626,51 @@ analyzeRoutes.get('/factors', (c) => {
             "ORDER BY rm.date DESC"
           ).bind(cutoff, today).all<any>().catch(() => ({ results: [] as any[] }));
           const meetingDates: any[] = (datesQ.results as any[]) || [];
-          let totalRaces = 0, totalTop1Hits = 0, totalTop3AnyHits = 0, totalTop3Intersect = 0;
-          const perMeeting: any[] = [];
-          const errors: any[] = [];
-          for (const m of meetingDates) {
-            try {
-              const r = await computeHitRateStats(db, m.date, engine);
-              if ('error' in r) { errors.push({date: m.date, error: r.error}); continue; }
-              const s = r.summary;
-              if (!s.racesEvaluated) continue;
-              perMeeting.push({ date: m.date, venue: m.venue, ...s });
-              totalRaces += s.racesEvaluated;
-              totalTop1Hits += s.top1Hits;
-              totalTop3AnyHits += s.top3AnyHits;
-              totalTop3Intersect += s.top3SumIntersect;
-            } catch (e: any) { errors.push({date: m.date, error: e?.message || String(e)}); }
-          }
-          return c.json({
-            windowDays: days, from: cutoff, to: today,
-            meetingsFound: meetingDates.length,
-            meetingsEvaluated: perMeeting.length,
-            racesEvaluated: totalRaces,
-            top1HitRate: totalRaces ? Math.round(totalTop1Hits/totalRaces*1000)/10 : null,
-            top3AnyHitRate: totalRaces ? Math.round(totalTop3AnyHits/totalRaces*1000)/10 : null,
-            top3AvgIntersect: totalRaces ? Math.round(totalTop3Intersect/totalRaces*100)/100 : null,
-            top1Hits: totalTop1Hits, top3AnyHits: totalTop3AnyHits,
-            perMeeting, errors,
-            generatedAt: new Date().toISOString(),
-          });
+                  let totalRaces = 0, totalTop1Hits = 0, totalTop3AnyHits = 0, totalTop3Intersect = 0;
+            let totalQuinella = 0, totalQp = 0, totalTrio = 0, totalTierce = 0;
+            let totalFirst4 = 0, totalFirst4Eligible = 0;
+            const perMeeting: any[] = [];
+            const errors: any[] = [];
+            for (const m of meetingDates) {
+              try {
+                const r = await computeHitRateStats(db, m.date, engine);
+                if ('error' in r) { errors.push({date: m.date, error: r.error}); continue; }
+                const s = r.summary;
+                if (!s.racesEvaluated) continue;
+                perMeeting.push({ date: m.date, venue: m.venue, ...s });
+                totalRaces += s.racesEvaluated;
+                totalTop1Hits += s.top1Hits;
+                totalTop3AnyHits += s.top3AnyHits;
+                totalTop3Intersect += s.top3SumIntersect;
+                totalQuinella += s.quinellaHits ?? 0;
+                totalQp += s.qpHits ?? 0;
+                totalTrio += s.trioHits ?? 0;
+                totalTierce += s.tierceHits ?? 0;
+                totalFirst4 += s.first4Hits ?? 0;
+                totalFirst4Eligible += s.first4Eligible ?? 0;
+              } catch (e: any) { errors.push({date: m.date, error: e?.message || String(e)}); }
+            }
+            const rRate = (n: number, d: number) => d ? Math.round(n / d * 1000) / 10 : null;
+            return c.json({
+              windowDays: days, from: cutoff, to: today,
+              meetingsFound: meetingDates.length,
+              meetingsEvaluated: perMeeting.length,
+              racesEvaluated: totalRaces,
+              top1HitRate: rRate(totalTop1Hits, totalRaces),
+              top3AnyHitRate: rRate(totalTop3AnyHits, totalRaces),
+              top3AvgIntersect: totalRaces ? Math.round(totalTop3Intersect/totalRaces*100)/100 : null,
+              quinellaHitRate: rRate(totalQuinella, totalRaces),
+              qpHitRate: rRate(totalQp, totalRaces),
+              trioHitRate: rRate(totalTrio, totalRaces),
+              tierceHitRate: rRate(totalTierce, totalRaces),
+              first4HitRate: rRate(totalFirst4, totalFirst4Eligible),
+              top1Hits: totalTop1Hits, top3AnyHits: totalTop3AnyHits,
+              quinellaHits: totalQuinella, qpHits: totalQp,
+              trioHits: totalTrio, tierceHits: totalTierce,
+              first4Hits: totalFirst4, first4Eligible: totalFirst4Eligible,
+              perMeeting, errors,
+              generatedAt: new Date().toISOString(),
+            });
         } catch (err: any) {
           return c.json({ error: 'hit-rate-rollup failed', detail: err?.message ?? String(err) }, 500);
         }
