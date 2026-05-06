@@ -194,6 +194,52 @@
        AND rm.date < ?
        AND rr.finishing_position > 0 AND rr.finishing_position < 99`);
 
+    // ── Stage 4c: recency-weighted form + cross-features (no odds) ─────────
+    // form_last5: last 5 starts of horse with field size for normalization.
+    const qFormLast5 = db.prepare(`
+      SELECT rr.finishing_position AS pos,
+             (SELECT COUNT(*) FROM race_results rr2
+                WHERE rr2.race_id = rr.race_id
+                  AND rr2.finishing_position BETWEEN 1 AND 98) AS field
+        FROM race_results rr
+        JOIN races r ON r.id = rr.race_id
+        JOIN race_meetings rm ON rm.id = r.meeting_id
+       WHERE rr.horse_id = ? AND rm.date < ?
+         AND rr.finishing_position BETWEEN 1 AND 98
+       ORDER BY rm.date DESC LIMIT 5`);
+
+    // trainer × venue: how often trainer's runners hit top-3 at this venue
+    const qTrainerVenue = db.prepare(`
+      SELECT COUNT(*) AS starts,
+             SUM(CASE WHEN rr.finishing_position BETWEEN 1 AND 3 THEN 1 ELSE 0 END) AS top3
+        FROM race_results rr
+        JOIN races r ON r.id = rr.race_id
+        JOIN race_meetings rm ON rm.id = r.meeting_id
+       WHERE rr.trainer_id = ? AND rm.venue = ? AND rm.date < ?
+         AND rr.finishing_position > 0 AND rr.finishing_position < 99`);
+
+    // jockey × venue: jockey-venue specialization
+    const qJockeyVenue = db.prepare(`
+      SELECT COUNT(*) AS starts,
+             SUM(CASE WHEN rr.finishing_position BETWEEN 1 AND 3 THEN 1 ELSE 0 END) AS top3
+        FROM race_results rr
+        JOIN races r ON r.id = rr.race_id
+        JOIN race_meetings rm ON rm.id = r.meeting_id
+       WHERE rr.jockey_id = ? AND rm.venue = ? AND rm.date < ?
+         AND rr.finishing_position > 0 AND rr.finishing_position < 99`);
+
+    // jockey × distance band: sprinter vs stayer specialization
+    const qJockeyDistBand = db.prepare(`
+      SELECT COUNT(*) AS starts,
+             SUM(CASE WHEN rr.finishing_position BETWEEN 1 AND 3 THEN 1 ELSE 0 END) AS top3
+        FROM race_results rr
+        JOIN races r ON r.id = rr.race_id
+        JOIN race_meetings rm ON rm.id = r.meeting_id
+       WHERE rr.jockey_id = ? AND r.distance BETWEEN ? AND ?
+         AND rm.date < ?
+         AND rr.finishing_position > 0 AND rr.finishing_position < 99`);
+
+  
   // ── Bonus helpers (verbatim) ────────────────────────────────────────────
   function daysBetween(a: string, b: string): number {
     return Math.round((Date.parse(b + 'T00:00:00Z') - Date.parse(a + 'T00:00:00Z')) / 86_400_000);
@@ -242,14 +288,18 @@
   console.error(`[dump-features] writing → ${OUT}`);
 
   const HEADER = [
-    'race_id','race_date','venue','race_no','distance','going','field_size',
-    'horse_id','jockey_id','trainer_id','draw','actual_weight','win_odds',
-    'h_elo','j_elo','t_elo','days_since_last',
-    'dist_starts','dist_top3','going_starts','going_top3',
-    'draw_starts','draw_top3','combo_starts','combo_top3','weight_avg5',
-    'elo_composite','factor_bonus','baseline_score',
-    'finishing_position','is_top1','is_top3',
-  ];
+      'race_id','race_date','venue','race_no','distance','going','field_size',
+      'horse_id','jockey_id','trainer_id','draw','actual_weight','win_odds',
+      'h_elo','j_elo','t_elo','days_since_last',
+      'dist_starts','dist_top3','going_starts','going_top3',
+      'draw_starts','draw_top3','combo_starts','combo_top3','weight_avg5',
+      'elo_composite','factor_bonus','baseline_score',
+      // Stage 4c: recency-weighted form (per horse, last 5 starts)
+      'form_n','form_avgpos_w','form_top3rate_w','form_pos_slope',
+      // Stage 4c: cross-features (interaction history)
+      'tv_starts','tv_top3','jv_starts','jv_top3','jdb_starts','jdb_top3',
+      'finishing_position','is_top1','is_top3',
+    ];
   writeFileSync(OUT, HEADER.join(',') + '\n');
 
   function csv(v: unknown): string {
@@ -290,6 +340,38 @@
       const wF = qWeightDelta.get(r.horse_id, meta.date) as { avg_w: number | null } | undefined;
       const cF = (r.jockey_id && r.trainer_id) ? qCombo.get(r.jockey_id, r.trainer_id, meta.date) as { starts: number; top3: number } | undefined : undefined;
 
+        // ── Stage 4c features ──
+        // Recency-weighted form from last 5 starts
+        const formRows = qFormLast5.all(r.horse_id, meta.date) as { pos: number; field: number }[];
+        const formN = formRows.length;
+        let formAvgPosW: number | null = null, formTop3RateW: number | null = null, formPosSlope: number | null = null;
+        if (formN > 0) {
+          const wAll = [0.40, 0.25, 0.15, 0.10, 0.10];
+          const w = wAll.slice(0, formN);
+          const wSum = w.reduce((a, b) => a + b, 0);
+          const normPos = formRows.map(f => f.field > 0 ? f.pos / f.field : 0.5);
+          formAvgPosW = normPos.reduce((s, p, ix) => s + p * w[ix], 0) / wSum;
+          const top3 = formRows.map(f => f.pos >= 1 && f.pos <= 3 ? 1 : 0);
+          formTop3RateW = top3.reduce((s, t, ix) => s + t * w[ix], 0) / wSum;
+          if (formN >= 2) {
+            // Linear slope of -pos over time index (most recent = highest x).
+            // Positive slope = improving (positions getting better over time).
+            const xs = formRows.map((_, ix) => formN - 1 - ix);
+            const ys = formRows.map(f => -f.pos);
+            const xMean = xs.reduce((a, b) => a + b, 0) / formN;
+            const yMean = ys.reduce((a, b) => a + b, 0) / formN;
+            let num = 0, den = 0;
+            for (let k = 0; k < formN; k++) { num += (xs[k] - xMean) * (ys[k] - yMean); den += (xs[k] - xMean) ** 2; }
+            formPosSlope = den > 0 ? num / den : 0;
+          } else {
+            formPosSlope = 0;
+          }
+        }
+        // Cross-features
+        const tvF = r.trainer_id ? qTrainerVenue.get(r.trainer_id, meta.venue, meta.date) as { starts: number; top3: number } | undefined : undefined;
+        const jvF = r.jockey_id ? qJockeyVenue.get(r.jockey_id, meta.venue, meta.date) as { starts: number; top3: number } | undefined : undefined;
+        const jdbF = r.jockey_id ? qJockeyDistBand.get(r.jockey_id, meta.distance - 200, meta.distance + 200, meta.date) as { starts: number; top3: number } | undefined : undefined;
+  
       const fRecency = recencyBonus(daysSince);
       const fDist = rateBonus(dF?.starts ?? 0, dF?.top3 ?? 0, 15);
       const fGoing = rateBonus(gF?.starts ?? 0, gF?.top3 ?? 0, 12);
@@ -300,16 +382,18 @@
       const baselineScore = eloComposite != null ? eloComposite + factorBonus : null;
 
       const row = [
-        meta.id, meta.date, meta.venue, meta.race_number, meta.distance, meta.going, fieldSize,
-        r.horse_id, r.jockey_id, r.trainer_id, r.draw, r.actual_weight, r.win_odds,
-        hElo, jElo, tElo, daysSince,
-        dF?.starts ?? 0, dF?.top3 ?? 0, gF?.starts ?? 0, gF?.top3 ?? 0,
-        drawF?.starts ?? 0, drawF?.top3 ?? 0, cF?.starts ?? 0, cF?.top3 ?? 0, wF?.avg_w ?? null,
-        eloComposite, factorBonus, baselineScore,
-        r.finishing_position,
-        r.horse_id === top1Id ? 1 : 0,
-        top3Set.has(r.horse_id) ? 1 : 0,
-      ].map(csv).join(',');
+          meta.id, meta.date, meta.venue, meta.race_number, meta.distance, meta.going, fieldSize,
+          r.horse_id, r.jockey_id, r.trainer_id, r.draw, r.actual_weight, r.win_odds,
+          hElo, jElo, tElo, daysSince,
+          dF?.starts ?? 0, dF?.top3 ?? 0, gF?.starts ?? 0, gF?.top3 ?? 0,
+          drawF?.starts ?? 0, drawF?.top3 ?? 0, cF?.starts ?? 0, cF?.top3 ?? 0, wF?.avg_w ?? null,
+          eloComposite, factorBonus, baselineScore,
+          formN, formAvgPosW, formTop3RateW, formPosSlope,
+          tvF?.starts ?? 0, tvF?.top3 ?? 0, jvF?.starts ?? 0, jvF?.top3 ?? 0, jdbF?.starts ?? 0, jdbF?.top3 ?? 0,
+          r.finishing_position,
+          r.horse_id === top1Id ? 1 : 0,
+          top3Set.has(r.horse_id) ? 1 : 0,
+        ].map(csv).join(',');
       buf.push(row + '\n');
       written++;
       if (buf.length >= 5000) flush();
