@@ -147,6 +147,7 @@ jobs:
 
 
       - name: ELO diagnostic (cached DB inspection)
+        working-directory: tianxi-backend
         shell: "bash {0}"
         run: |
           set +e
