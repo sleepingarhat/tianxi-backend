@@ -560,12 +560,26 @@ async function fetchAdminPageData(env: AdminEnv): Promise<Record<string, any>> {
   }
 
   // Meetings
-  const { results: meetRows } = await db.prepare(`
-    SELECT m.id, m.date, m.venue, m.track_condition, m.total_races, COUNT(r.id) AS race_count,
-           (SELECT COUNT(*) FROM entries_upcoming e WHERE e.race_date = m.date) AS entry_count
-    FROM race_meetings m LEFT JOIN races r ON r.meeting_id = m.id
-    GROUP BY m.id ORDER BY m.date DESC LIMIT 10
-  `).all().catch(() => ({ results: [] as any[] }));
+  // Ensure cache table exists so the LEFT JOIN below never throws on a fresh deploy
+    await db.prepare(`CREATE TABLE IF NOT EXISTS meeting_hit_rate_cache (
+      date TEXT NOT NULL, engine TEXT NOT NULL DEFAULT 'v12', venue TEXT,
+      races_evaluated INTEGER, top1_hits INTEGER, top3_any_hits INTEGER, top3_sum_intersect INTEGER,
+      top1_hit_rate REAL, top3_any_hit_rate REAL, top3_avg_intersect REAL,
+      payload_json TEXT NOT NULL, computed_at TEXT NOT NULL,
+      PRIMARY KEY (date, engine)
+    )`).run().catch(() => {});
+    const { results: meetRows } = await db.prepare(`
+      SELECT m.id, m.date, m.venue, m.track_condition, m.total_races, COUNT(r.id) AS race_count,
+             (SELECT COUNT(*) FROM entries_upcoming e WHERE e.race_date = m.date) AS entry_count,
+             c.top1_hit_rate AS cached_top1_hit_rate,
+             c.top3_any_hit_rate AS cached_top3_any_hit_rate,
+             c.races_evaluated AS cached_races_evaluated,
+             c.computed_at AS cached_at
+      FROM race_meetings m
+      LEFT JOIN races r ON r.meeting_id = m.id
+      LEFT JOIN meeting_hit_rate_cache c ON c.date = m.date AND c.engine = 'v12'
+      GROUP BY m.id ORDER BY m.date DESC LIMIT 10
+    `).all().catch(() => ({ results: [] as any[] }));
 
 
     // Next/current race day: races + live WIN odds
@@ -926,84 +940,56 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
       const isPast = m.date < today;
       const hasResults = m.race_count > 0;
       const raceCountTxt = m.race_count > 0 ? m.race_count + ' 場' : m.total_races ? m.total_races + ' 場' : m.entry_count > 0 ? '<span class="muted-cell">排位 ' + m.entry_count + ' 匹</span>' : '<span class="muted-cell">—</span>';
-      const hit = window._meetingHits[m.date];
+      // Hit-rate is cached server-side by the daily cron (src/index.ts). The SSR
+      // `meetRows` query embeds cache columns directly so this row renders instantly
+      // — no client-side fetch chain on every page view.
+      const t1 = m.cached_top1_hit_rate;
+      const t3 = m.cached_top3_any_hit_rate;
+      const evaluated = m.cached_races_evaluated;
       let actionCell;
-      if (isPast && !hasResults) {
-        actionCell = '<span class="warn" style="font-size:11px">⚠ 賽果未同步 · <a href="javascript:void(0)" onclick="runPicksForDate(' + i + ')" style="color:var(--blue)">查看當日預測</a></span>';
-      } else if (isPast && hasResults) {
-        if (hit === 'loading') actionCell = '<span style="color:var(--mut);font-size:11px">運算中…</span>';
-        else if (hit && hit.summary) {
-          const t1 = hit.summary.top1HitRate; const t3 = hit.summary.top3AnyHitRate;
-          const t1cls = t1 != null && t1 >= 30 ? 'ok' : t1 != null && t1 < 15 ? 'bad' : '';
-          const t3cls = t3 != null && t3 >= 60 ? 'ok' : t3 != null && t3 < 40 ? 'bad' : '';
-          actionCell = '<a href="javascript:void(0)" onclick="runHitReport(' + i + ')" style="text-decoration:none;color:inherit;display:inline-block;padding:2px 6px;border-radius:3px;cursor:pointer" onmouseover="this.style.background=&#39;#f0f7ff&#39;" onmouseout="this.style.background=&#39;&#39;">'
-                    + '<span class="' + t1cls + '" style="font-variant-numeric:tabular-nums;font-weight:600">' + (t1 != null ? t1.toFixed(1) + '%' : '—') + '</span>'
-                    + ' <span class="muted-cell">/</span> '
-                    + '<span class="' + t3cls + '" style="font-variant-numeric:tabular-nums;font-weight:600">' + (t3 != null ? t3.toFixed(1) + '%' : '—') + '</span>'
-                    + ' <span style="font-size:10px;color:var(--mut)">(' + hit.summary.racesEvaluated + ' 場 · 點看詳情)</span>'
-                    + '</a>';
+        if (isPast && !hasResults) {
+          actionCell = '<span class="warn" style="font-size:11px">⚠ 賽果未同步 · <a href="javascript:void(0)" onclick="runPicksForDate(' + i + ')" style="color:var(--blue)">查看當日預測</a></span>';
+        } else if (isPast && hasResults) {
+          if (t1 != null && t3 != null) {
+            const t1cls = t1 >= 30 ? 'ok' : t1 < 15 ? 'bad' : '';
+            const t3cls = t3 >= 60 ? 'ok' : t3 < 40 ? 'bad' : '';
+            actionCell = '<a href="javascript:void(0)" onclick="runHitReport(' + i + ')" style="text-decoration:none;color:inherit;display:inline-block;padding:2px 6px;border-radius:3px;cursor:pointer" onmouseover="this.style.background=&#39;#f0f7ff&#39;" onmouseout="this.style.background=&#39;&#39;">'
+                      + '<span class="' + t1cls + '" style="font-variant-numeric:tabular-nums;font-weight:600">' + t1.toFixed(1) + '%</span>'
+                      + ' <span class="muted-cell">/</span> '
+                      + '<span class="' + t3cls + '" style="font-variant-numeric:tabular-nums;font-weight:600">' + t3.toFixed(1) + '%</span>'
+                      + ' <span style="font-size:10px;color:var(--mut)">(' + evaluated + ' 場 · 點看詳情)</span>'
+                      + '</a>';
+          } else {
+            actionCell = '<span class="muted-cell" style="font-size:11px">排隊中（每日 03:00 自動運算） · <a href="javascript:void(0)" onclick="runHitReport(' + i + ')" style="color:var(--blue)">立即運算</a></span>';
+          }
+        } else if (isUpcoming) {
+          // 即日 / 將來賽事日：唔再喺呢度俾按鈕，因為下面已經有「即日賽事全因子預測」掣
+          actionCell = '<span class="muted-cell" style="font-size:11px">' + m.entry_count + ' 匹排位 · 用下方「即日賽事全因子預測」</span>';
+        } else {
+          actionCell = '<span class="muted-cell">—</span>';
         }
-        else if (hit === 'error') actionCell = '<a href="javascript:void(0)" onclick="autoLoadHitForMeeting(' + i + ')" style="color:var(--red);font-size:11px">運算失敗 · 重試</a>';
-        else actionCell = '<span class="muted-cell" style="font-size:11px">排隊中…</span>';
-      } else if (isUpcoming) {
-        actionCell = '<a href="javascript:void(0)" onclick="runPicksForDate(' + i + ')" style="color:var(--blue);font-weight:600">▶ 預測此日</a> <span class="muted-cell" style="font-size:11px">(' + m.entry_count + ' 匹排位)</span>';
-      } else {
-        actionCell = '<span class="muted-cell">—</span>';
-      }
-      return '<tr>' +
-        '<td><strong>' + (m.date || '—') + '</strong></td>' +
-        '<td>' + venue + '</td>' +
-        '<td class="muted-cell">' + (m.track_condition || '—') + '</td>' +
-        '<td>' + raceCountTxt + '</td>' +
-        '<td>' + actionCell + '</td>' +
-        '</tr>';
-    }).join('');
-    // Auto-trigger hit-rate computation for past meetings without cached results
-    if (!window._autoHitTriggered) {
-      window._autoHitTriggered = true;
-      const pastWithResults = data.meetings.map((m, i) => ({m, i})).filter(({m}) => m.date < today && m.race_count > 0 && !window._meetingHits[m.date]);
-      autoLoadHitChain(pastWithResults);
+        return '<tr>' +
+          '<td><strong>' + (m.date || '—') + '</strong></td>' +
+          '<td>' + venue + '</td>' +
+          '<td class="muted-cell">' + (m.track_condition || '—') + '</td>' +
+          '<td>' + raceCountTxt + '</td>' +
+          '<td>' + actionCell + '</td>' +
+          '</tr>';
+      }).join('');
+      // No client-side auto-load chain; SSR already has the numbers.
     }
-  }
 
-  async function autoLoadHitChain(queue) {
-    if (!queue.length) return;
-    window._hitChainActive = true;
-    try {
-    for (const {m, i} of queue) {
-      if (window._meetingHits[m.date] && window._meetingHits[m.date].summary) continue;
-      window._meetingHits[m.date] = 'loading';
-      renderMeetings.__rerender = true;
-      renderMeetingRow(i);
-      try {
-        const r = await fetch('/api/analyze/hit-rate?date=' + encodeURIComponent(m.date));
-        const d = await r.json();
-        if (d.error) { window._meetingHits[m.date] = 'error'; }
-        else { window._meetingHits[m.date] = d; }
-      } catch (e) { window._meetingHits[m.date] = 'error'; }
-      renderMeetingRow(i);
+    function renderMeetingRow(i) {
+      if (!window._meetingList) return;
+      renderMeetings();
     }
-    } finally { window._hitChainActive = false; }
-  }
 
-  function autoLoadHitForMeeting(i) {
-    const m = window._meetingList && window._meetingList[i]; if (!m) return;
-    delete window._meetingHits[m.date];
-    autoLoadHitChain([{m, i}]);
-  }
+    // Legacy shim: older inline onclick may still call this — route through runHitReport
+    function autoLoadHitForMeeting(i) {
+      runHitReport(i);
+    }
 
-  function renderMeetingRow(i) {
-    // simplest: re-render the entire table; the data is in memory
-    const tb = document.querySelector('#recentMeetings tbody');
-    if (!tb || !window._meetingList) return;
-    // call renderMeetings minus the auto-trigger guard
-    const wasTriggered = window._autoHitTriggered;
-    window._autoHitTriggered = true;  // block re-trigger
-    renderMeetings();
-    window._autoHitTriggered = wasTriggered;
-  }
-
-  async function loadHitRateRollup() {
+      async function loadHitRateRollup() {
     const days = (document.getElementById('rollupDays') || {}).value || '30';
     const stat = document.getElementById('rollupStatus');
     const body = document.getElementById('rollupContent');
@@ -1070,14 +1056,14 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
       const data = await res.json();
       if (data.error) {
         panel.innerHTML = '<div style="padding:10px;color:var(--red)">錯誤：' + data.error + '</div>';
-        delete window._meetingHits[m.date]; renderMeetings(); return;
+        return;
       }
       window._meetingHits[m.date] = data;
       renderMeetings();
       renderHitReportPanel(panel, data, m);
     } catch (e) {
       panel.innerHTML = '<div style="padding:10px;color:var(--red)">錯誤：' + e.message + '</div>';
-      delete window._meetingHits[m.date]; renderMeetings();
+
     }
   }
 
