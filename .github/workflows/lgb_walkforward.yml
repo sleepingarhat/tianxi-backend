@@ -111,7 +111,7 @@ jobs:
         working-directory: tianxi-backend
         run: |
           echo '=== STEP 1/3: import-csv.ts (results, dividends, sectionals, commentary, videos) ==='
-          npx tsx scripts/import-csv.ts --data-dir=../hkjc-data/data --db=./bulk-local.db
+          npx tsx scripts/import-csv.ts --data-dir ../hkjc-data/data --db ./bulk-local.db
           ls -lh bulk-local.db
 
       - name: Ingest horse form records
