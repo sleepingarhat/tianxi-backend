@@ -67,34 +67,68 @@
     // tags rows with a prefix and the workflow only ever runs one engine into
     // the cached DB, the ENGINE arg is now informational only — the same row
     // set is read regardless.
-    const eloStmtCache = new Map<string, Database.Statement>();
-    function eloStmt(entity: 'horse' | 'jockey' | 'trainer'): Database.Statement {
-      let s = eloStmtCache.get(entity);
-      if (s) return s;
-      const table = `${entity}_elo_snapshots`;
-      const col = `${entity}_id`;
-      // horse table has axis_key NOT NULL ('overall' / surface_bucket) — filter to overall.
-      // jockey/trainer tables have no axis_key column — must NOT filter on it.
-      const sql = entity === 'horse'
-        ? `SELECT rating FROM ${table} WHERE ${col}=? AND axis_key='overall' AND as_of_date<? ORDER BY as_of_date DESC LIMIT 1`
-        : `SELECT rating FROM ${table} WHERE ${col}=? AND as_of_date<? ORDER BY as_of_date DESC LIMIT 1`;
-      s = db.prepare(sql);
-      eloStmtCache.set(entity, s);
-      return s;
-    }
-    function readElo(entity: 'horse' | 'jockey' | 'trainer', id: string | null, asOf: string): number | null {
-      if (!id) return null;
-      try {
-        const row = eloStmt(entity).get(id, asOf) as { rating: number } | undefined;
-        return row?.rating ?? null;
-      } catch (e) {
-        // surface unexpected errors so we don't silently lose ELO again
-        if (process.env.DEBUG_ELO) console.error(`[readElo] ${entity} ${id} ${asOf}:`, (e as Error).message);
-        return null;
+    // ── ELO ID-bridge ──────────────────────────────────────────────────
+      // compute.ts writes ELO snapshots keyed by:
+      //   horse_elo_snapshots.horse_id     = horse_form_records.horse_id  ≡ horses.code      (e.g. 'A001')
+      //   jockey_elo_snapshots.jockey_id   = horse_form_records.jockey_name ≡ jockeys.name_ch  (中文名)
+      //   trainer_elo_snapshots.trainer_id = horse_form_records.trainer_name ≡ trainers.name_ch
+      //
+      // race_results uses prefixed surrogate IDs (horse_A001 / jockey_郭能 / trainer_方嘉柏)
+      // which never match snapshot keys directly. Without this translation step every
+      // readElo returned null — h_elo/j_elo/t_elo were 100% null and LGB importance was 0.
+      const horseCodeStmt = db.prepare('SELECT code FROM horses WHERE id=?');
+      const jockeyNameStmt = db.prepare('SELECT name_ch FROM jockeys WHERE id=?');
+      const trainerNameStmt = db.prepare('SELECT name_ch FROM trainers WHERE id=?');
+      const bridgeCache: Record<'horse' | 'jockey' | 'trainer', Map<string, string | null>> = {
+        horse: new Map(), jockey: new Map(), trainer: new Map(),
+      };
+      function bridgeId(entity: 'horse' | 'jockey' | 'trainer', rawId: string): string | null {
+        const cache = bridgeCache[entity];
+        if (cache.has(rawId)) return cache.get(rawId)!;
+        let bridged: string | null = null;
+        if (entity === 'horse') {
+          const row = horseCodeStmt.get(rawId) as { code: string | null } | undefined;
+          bridged = row?.code ?? null;
+        } else if (entity === 'jockey') {
+          const row = jockeyNameStmt.get(rawId) as { name_ch: string | null } | undefined;
+          bridged = row?.name_ch ?? null;
+        } else {
+          const row = trainerNameStmt.get(rawId) as { name_ch: string | null } | undefined;
+          bridged = row?.name_ch ?? null;
+        }
+        cache.set(rawId, bridged);
+        return bridged;
       }
-    }
 
-  // ── Factor queries (verbatim from composite-backtest.ts) ────────────────
+      const eloStmtCache = new Map<string, Database.Statement>();
+      function eloStmt(entity: 'horse' | 'jockey' | 'trainer'): Database.Statement {
+        let s = eloStmtCache.get(entity);
+        if (s) return s;
+        const table = `${entity}_elo_snapshots`;
+        const col = `${entity}_id`;
+        // horse_elo_snapshots has axis_key NOT NULL — filter to 'overall'.
+        // jockey/trainer snapshot tables have no axis_key column.
+        const sql = entity === 'horse'
+          ? `SELECT rating FROM ${table} WHERE ${col}=? AND axis_key='overall' AND as_of_date<? ORDER BY as_of_date DESC LIMIT 1`
+          : `SELECT rating FROM ${table} WHERE ${col}=? AND as_of_date<? ORDER BY as_of_date DESC LIMIT 1`;
+        s = db.prepare(sql);
+        eloStmtCache.set(entity, s);
+        return s;
+      }
+      function readElo(entity: 'horse' | 'jockey' | 'trainer', id: string | null, asOf: string): number | null {
+        if (!id) return null;
+        const key = bridgeId(entity, id);
+        if (!key) return null;
+        try {
+          const row = eloStmt(entity).get(key, asOf) as { rating: number } | undefined;
+          return row?.rating ?? null;
+        } catch (e) {
+          if (process.env.DEBUG_ELO) console.error(`[readElo] ${entity} ${id}->${key} ${asOf}:`, (e as Error).message);
+          return null;
+        }
+      }
+
+    // ── Factor queries (verbatim from composite-backtest.ts) ────────────────
   const qDistFit = db.prepare(`
     SELECT COUNT(*) AS starts,
            SUM(CASE WHEN rr.finishing_position BETWEEN 1 AND 3 THEN 1 ELSE 0 END) AS top3
