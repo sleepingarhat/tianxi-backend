@@ -1488,9 +1488,10 @@ analyzeRoutes.get('/factors', (c) => {
 
           // 取窗口內所有過去賽事日（有實際結果）
           const datesQ = await db.prepare(
-            "SELECT DISTINCT race_date AS date, venue, COUNT(DISTINCT race_id) AS race_count " +
-            "FROM race_results WHERE race_date >= ? AND race_date < ? AND finishing_position IS NOT NULL " +
-            "GROUP BY race_date, venue ORDER BY race_date DESC"
+            "SELECT rm.date AS date, rm.venue AS venue, COUNT(DISTINCT r.id) AS race_count " +
+            "FROM race_meetings rm JOIN races r ON r.meeting_id = rm.id JOIN race_results rr ON rr.race_id = r.id " +
+            "WHERE rm.date >= ? AND rm.date < ? AND rr.finishing_position IS NOT NULL " +
+            "GROUP BY rm.date, rm.venue ORDER BY rm.date DESC"
           ).bind(cutoff, today).all();
           const meetingDates: Array<{date: string; venue: string; race_count: number}> = (datesQ.results as any[]) || [];
 
