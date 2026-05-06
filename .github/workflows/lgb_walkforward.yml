@@ -1,0 +1,122 @@
+name: LGB Walkforward Backtest (Stage 3)
+
+# Trains LightGBM-LambdaRank chronologically over the existing race history,
+# reports Top1/Top3 hit-rate vs ELO+factor baseline + market favourite.
+#
+# Reuses the bulk-local.db cached by capy_racecard.yml (runs every race day),
+# so this workflow stays fast (~3-5 min) and does not need to rebuild the DB.
+
+on:
+  workflow_dispatch:
+    inputs:
+      from:
+        description: 'Eval window start (YYYY-MM-DD)'
+        required: false
+        default: '2024-09-01'
+      to:
+        description: 'Eval window end (YYYY-MM-DD)'
+        required: false
+        default: '2026-04-30'
+      min_train_races:
+        description: 'Warmup: skip eval until N races have happened'
+        required: false
+        default: '200'
+      retrain_every:
+        description: 'Retrain LGB every N races'
+        required: false
+        default: '50'
+      n_estimators:
+        description: 'LGB num_boost_round'
+        required: false
+        default: '200'
+      num_leaves:
+        description: 'LGB num_leaves'
+        required: false
+        default: '15'
+      objective:
+        description: 'LGB objective (lambdarank or binary)'
+        required: false
+        default: 'lambdarank'
+
+jobs:
+  walkforward:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Restore latest bulk-local.db from capy_racecard cache
+        uses: actions/cache/restore@v4
+        with:
+          path: bulk-local.db
+          key: lgb-walkforward-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            bulk-local-db-${{ runner.os }}-
+
+      - name: Verify DB present + show summary
+        run: |
+          if [ ! -f bulk-local.db ]; then
+            echo "::error::No cached bulk-local.db found. Run capy_racecard workflow once first to populate the cache, or rebuild manually with 'pnpm db:seed'."
+            exit 1
+          fi
+          ls -lh bulk-local.db
+          sudo apt-get -qq install -y sqlite3 >/dev/null 2>&1 || true
+          if command -v sqlite3 >/dev/null; then
+            echo '--- DB sanity ---'
+            sqlite3 bulk-local.db "SELECT 'meetings', COUNT(*) FROM race_meetings; SELECT 'races', COUNT(*) FROM races; SELECT 'results', COUNT(*) FROM race_results;" 2>/dev/null || sqlite3 bulk-local.db ".tables"
+          fi
+
+      - run: npm ci
+
+      - name: Install Python deps
+        run: pip install --quiet lightgbm pandas numpy
+
+      - name: Dump features
+        run: |
+          npx tsx scripts/backtest/dump-features.ts \
+            --db=bulk-local.db \
+            --from='${{ inputs.from }}' \
+            --to='${{ inputs.to }}' \
+            --out=features.csv
+          wc -l features.csv
+
+      - name: Walk-forward LGB
+        run: |
+          python scripts/backtest/lgb_walkforward.py \
+            --features features.csv \
+            --out results.json \
+            --min-train-races ${{ inputs.min_train_races }} \
+            --retrain-every-races ${{ inputs.retrain_every }} \
+            --n-estimators ${{ inputs.n_estimators }} \
+            --num-leaves ${{ inputs.num_leaves }} \
+            --objective ${{ inputs.objective }} \
+            --verbose 2>&1 | tee lgb_stdout.txt
+
+      - name: Print summary block
+        if: always()
+        run: |
+          if [ -f results.json ]; then
+            echo '======== SUMMARY ========'
+            python -c "import json; r=json.load(open('results.json')); print(json.dumps(r['summary'], indent=2, ensure_ascii=False))"
+          fi
+
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lgb-walkforward-results
+          path: |
+            results.json
+            features.csv
+            lgb_stdout.txt
+          retention-days: 14
