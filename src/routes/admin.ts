@@ -966,6 +966,9 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
   }
 
   async function autoLoadHitChain(queue) {
+    if (!queue.length) return;
+    window._hitChainActive = true;
+    try {
     for (const {m, i} of queue) {
       if (window._meetingHits[m.date] && window._meetingHits[m.date].summary) continue;
       window._meetingHits[m.date] = 'loading';
@@ -979,6 +982,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
       } catch (e) { window._meetingHits[m.date] = 'error'; }
       renderMeetingRow(i);
     }
+    } finally { window._hitChainActive = false; }
   }
 
   function autoLoadHitForMeeting(i) {
@@ -1386,8 +1390,19 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
   safeRender('loadHitRateRollup', loadHitRateRollup);
     safeRender('renderNextRaceDay', renderNextRaceDay);
   document.getElementById('refreshClock').textContent = '載入時間：' + new Date().toLocaleTimeString('zh-HK') + ' · 每 60 秒自動刷新';
-  // Auto-reload page every 60s for fresh data
-  setTimeout(() => window.location.reload(), 60000);
+  // Auto-reload page every 60s for fresh data — but skip while autoLoadHitChain is running
+  // (chain takes ~4min serial for ~10 past meetings @ ~25s each; reload would interrupt it)
+  function scheduleReload() {
+    setTimeout(() => {
+      if (window._hitChainActive) {
+        // chain still running — defer reload by 30s, check again
+        scheduleReload();
+      } else {
+        window.location.reload();
+      }
+    }, 60000);
+  }
+  scheduleReload();
 </script>
 </body></html>`;
 }
