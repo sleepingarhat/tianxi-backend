@@ -239,6 +239,27 @@
          AND rm.date < ?
          AND rr.finishing_position > 0 AND rr.finishing_position < 99`);
 
+    // ── Stage 5: track-condition specialization ────────────────────────────
+    // jockey × going: how does this jockey perform on this surface (Good / Yielding / Soft / etc)
+    const qJockeyGoing = db.prepare(`
+      SELECT COUNT(*) AS starts,
+             SUM(CASE WHEN rr.finishing_position BETWEEN 1 AND 3 THEN 1 ELSE 0 END) AS top3
+        FROM race_results rr
+        JOIN races r ON r.id = rr.race_id
+        JOIN race_meetings rm ON rm.id = r.meeting_id
+       WHERE rr.jockey_id = ? AND r.going = ? AND rm.date < ?
+         AND rr.finishing_position > 0 AND rr.finishing_position < 99`);
+
+    // trainer × going: trainer's preparation suited to today's surface
+    const qTrainerGoing = db.prepare(`
+      SELECT COUNT(*) AS starts,
+             SUM(CASE WHEN rr.finishing_position BETWEEN 1 AND 3 THEN 1 ELSE 0 END) AS top3
+        FROM race_results rr
+        JOIN races r ON r.id = rr.race_id
+        JOIN race_meetings rm ON rm.id = r.meeting_id
+       WHERE rr.trainer_id = ? AND r.going = ? AND rm.date < ?
+         AND rr.finishing_position > 0 AND rr.finishing_position < 99`);
+
   
   // ── Bonus helpers (verbatim) ────────────────────────────────────────────
   function daysBetween(a: string, b: string): number {
@@ -298,6 +319,8 @@
       'form_n','form_avgpos_w','form_top3rate_w','form_pos_slope',
       // Stage 4c: cross-features (interaction history)
       'tv_starts','tv_top3','jv_starts','jv_top3','jdb_starts','jdb_top3',
+      // Stage 5: track-condition specialization (jockey/trainer × going)
+      'jg_starts','jg_top3','tg_starts','tg_top3',
       'finishing_position','is_top1','is_top3',
     ];
   writeFileSync(OUT, HEADER.join(',') + '\n');
@@ -370,7 +393,10 @@
         // Cross-features
         const tvF = r.trainer_id ? qTrainerVenue.get(r.trainer_id, meta.venue, meta.date) as { starts: number; top3: number } | undefined : undefined;
         const jvF = r.jockey_id ? qJockeyVenue.get(r.jockey_id, meta.venue, meta.date) as { starts: number; top3: number } | undefined : undefined;
-        const jdbF = r.jockey_id ? qJockeyDistBand.get(r.jockey_id, meta.distance - 200, meta.distance + 200, meta.date) as { starts: number; top3: number } | undefined : undefined;
+        const jdbF = r.jockey_id ? qJockeyDistBand.get(r.jockey_id, meta.distance - 200, meta.distance + 200, meta.date) as { starts: number; top3: number } | undefined : undefined
+        // Stage 5
+        const jgF = (r.jockey_id && meta.going) ? qJockeyGoing.get(r.jockey_id, meta.going, meta.date) as { starts: number; top3: number } | undefined : undefined;
+        const tgF = (r.trainer_id && meta.going) ? qTrainerGoing.get(r.trainer_id, meta.going, meta.date) as { starts: number; top3: number } | undefined : undefined;;
   
       const fRecency = recencyBonus(daysSince);
       const fDist = rateBonus(dF?.starts ?? 0, dF?.top3 ?? 0, 15);
@@ -390,6 +416,7 @@
           eloComposite, factorBonus, baselineScore,
           formN, formAvgPosW, formTop3RateW, formPosSlope,
           tvF?.starts ?? 0, tvF?.top3 ?? 0, jvF?.starts ?? 0, jvF?.top3 ?? 0, jdbF?.starts ?? 0, jdbF?.top3 ?? 0,
+          jgF?.starts ?? 0, jgF?.top3 ?? 0, tgF?.starts ?? 0, tgF?.top3 ?? 0,
           r.finishing_position,
           r.horse_id === top1Id ? 1 : 0,
           top3Set.has(r.horse_id) ? 1 : 0,
