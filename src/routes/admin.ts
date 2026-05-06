@@ -940,7 +940,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
       const hasResults = m.race_count > 0;
       const raceCountTxt = m.race_count > 0 ? m.race_count + ' 場' : m.total_races ? m.total_races + ' 場' : m.entry_count > 0 ? '<span class="muted-cell">排位 ' + m.entry_count + ' 匹</span>' : '<span class="muted-cell">—</span>';
       // Hit-rate is cached server-side by the daily cron (src/index.ts). The SSR
-      // `meetRows` query embeds cache columns directly so this row renders instantly
+      // 'meetRows' query embeds cache columns directly so this row renders instantly
       // — no client-side fetch chain on every page view.
       const t1 = m.cached_top1_hit_rate;
       const t3 = m.cached_top3_any_hit_rate;
