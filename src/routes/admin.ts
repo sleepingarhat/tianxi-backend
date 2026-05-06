@@ -792,8 +792,9 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
 
   <script>
   // ── 伺服器端預載資料 (SSR) — 無需任何 fetch 呼叫 ──
-  const D = ${JSON.stringify(preloaded)};
-  const TOKEN = ${JSON.stringify(token)};
+  const D = ${JSON.stringify(preloaded).replace(/</g, "\\u003c")};
+  const TOKEN = ${JSON.stringify(token).replace(/</g, "\\u003c")};
+  console.log('[admin] SSR D loaded:', { has_coverage: !!(D && D.coverage), has_meetings: !!(D && D.meetings), has_status: !!(D && D.status), keys: D ? Object.keys(D) : null });
   function fmtNum(n) { return n == null ? '—' : Number(n).toLocaleString() }
   function fmtDate(s) { return s || '—' }
 
