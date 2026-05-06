@@ -68,7 +68,7 @@ app.onError((err, c) => {
         WHERE m.date < ?
           AND EXISTS (SELECT 1 FROM races r JOIN race_results rr ON rr.race_id = r.id
                        WHERE r.meeting_id = m.id AND rr.finishing_position > 0)
-          AND c.date IS NULL
+          AND (c.date IS NULL OR c.payload_json NOT LIKE '%quinellaHits%')
         ORDER BY m.date DESC LIMIT 12`
     ).bind(today).all<{ date: string }>();
     let refreshed = 0, errors = 0;
