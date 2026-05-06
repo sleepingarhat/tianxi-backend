@@ -936,7 +936,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
           const t1 = hit.summary.top1HitRate; const t3 = hit.summary.top3AnyHitRate;
           const t1cls = t1 != null && t1 >= 30 ? 'ok' : t1 != null && t1 < 15 ? 'bad' : '';
           const t3cls = t3 != null && t3 >= 60 ? 'ok' : t3 != null && t3 < 40 ? 'bad' : '';
-          actionCell = '<a href="javascript:void(0)" onclick="runHitReport(' + i + ')" style="text-decoration:none;color:inherit;display:inline-block;padding:2px 6px;border-radius:3px;cursor:pointer" onmouseover="this.style.background=\'#f0f7ff\'" onmouseout="this.style.background=\'\'">'
+          actionCell = '<a href="javascript:void(0)" onclick="runHitReport(' + i + ')" style="text-decoration:none;color:inherit;display:inline-block;padding:2px 6px;border-radius:3px;cursor:pointer" onmouseover="this.style.background=&#39;#f0f7ff&#39;" onmouseout="this.style.background=&#39;&#39;">'
                     + '<span class="' + t1cls + '" style="font-variant-numeric:tabular-nums;font-weight:600">' + (t1 != null ? t1.toFixed(1) + '%' : '—') + '</span>'
                     + ' <span class="muted-cell">/</span> '
                     + '<span class="' + t3cls + '" style="font-variant-numeric:tabular-nums;font-weight:600">' + (t3 != null ? t3.toFixed(1) + '%' : '—') + '</span>'
