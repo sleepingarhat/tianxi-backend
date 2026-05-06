@@ -14,6 +14,7 @@ import { loungeRoutes } from './routes/lounge';
 import { silksRoutes } from './routes/silks';
 import { silksSvgRoutes } from './routes/silks_svg';
 import { adminRoutes } from './routes/admin';
+  import { computeHitRateStats, ensureHitRateCacheTable, writeHitRateCache, readHitRateCache } from './routes/analyze';
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -55,4 +56,46 @@ app.onError((err, c) => {
   return c.json({ error: 'Internal Server Error' }, 500);
 });
 
-export default app;
+// ── Scheduled cron: refresh past-meeting hit-rate cache ─────────────
+  // Runs daily 03:00 HKT. Backfills up to 12 oldest past meetings per tick;
+  // once caught up, only newly-finalised meetings need (re)computing.
+  async function refreshHitRateCache(env: Env): Promise<{ refreshed: number; errors: number }> {
+    await ensureHitRateCacheTable(env.DB);
+    const today = new Date().toISOString().substring(0, 10);
+    const { results } = await env.DB.prepare(
+      `SELECT m.date FROM race_meetings m
+         LEFT JOIN meeting_hit_rate_cache c ON c.date = m.date AND c.engine = 'v12'
+        WHERE m.date < ?
+          AND EXISTS (SELECT 1 FROM races r JOIN race_results rr ON rr.race_id = r.id
+                       WHERE r.meeting_id = m.id AND rr.finishing_position > 0)
+          AND c.date IS NULL
+        ORDER BY m.date DESC LIMIT 12`
+    ).bind(today).all<{ date: string }>();
+    let refreshed = 0, errors = 0;
+    for (const row of (results ?? [])) {
+      try {
+        const r = await computeHitRateStats(env.DB, row.date, 'v12');
+        if ('error' in r) { errors++; continue; }
+        await writeHitRateCache(env.DB, row.date, 'v12', r);
+        refreshed++;
+      } catch { errors++; }
+    }
+    return { refreshed, errors };
+  }
+
+  // Manual trigger endpoint for admin: POST /admin/api/refresh-hit-cache
+  app.post('/admin/api/refresh-hit-cache', async (c) => {
+    const out = await refreshHitRateCache(c.env);
+    return c.json({ ok: true, ...out, ranAt: new Date().toISOString() });
+  });
+  // Surface cached lookup so admin can display "cache populated" without a DB hit elsewhere
+  void readHitRateCache;
+
+  export default {
+    fetch: app.fetch,
+    async scheduled(_event: any, env: Env, ctx: any): Promise<void> {
+      ctx.waitUntil(
+        refreshHitRateCache(env).then((r) => console.log('[cron] hit-rate refresh', r)),
+      );
+    },
+  };
