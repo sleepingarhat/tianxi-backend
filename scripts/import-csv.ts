@@ -190,7 +190,7 @@ function generateId(prefix: string, ...parts: string[]): string {
 }
 
 function meetingId(date: string, venue: string): string {
-  return `mtg_${date}_${venue}`;
+  return `${date}_${venue}`;
 }
 
 function raceId(date: string, venue: string, raceNo: string | number): string {
