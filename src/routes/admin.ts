@@ -775,7 +775,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
   </div>
   <h2>最近賽事</h2>
   <table id="recentMeetings"><thead><tr>
-    <th>日期</th><th>場地</th><th>場地狀況</th><th>場數</th><th>命中率 (Top1 / Top3)</th><th>操作</th>
+    <th>日期</th><th>場地</th><th>場地狀況</th><th>場數</th><th>預測 / 命中率 (Top1 / Top3)</th>
   </tr></thead><tbody></tbody></table>
   <div id="meetingPanel" style="margin-top:14px"></div>
 
@@ -914,7 +914,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
     const tb = document.querySelector('#recentMeetings tbody');
     if (!tb) { console.error('[admin] #recentMeetings tbody not found'); return; }
     if (!data.meetings || !data.meetings.length) {
-      tb.innerHTML = '<tr><td colspan="6" class="warn">無賽事資料</td></tr>'; return;
+      tb.innerHTML = '<tr><td colspan="5" class="warn">無賽事資料</td></tr>'; return;
     }
     window._meetingList = data.meetings;
     window._meetingHits = window._meetingHits || {};
@@ -922,34 +922,80 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
     tb.innerHTML = data.meetings.map((m, i) => {
       const venue = m.venue === 'ST' ? '沙田' : m.venue === 'HV' ? '跑馬地' : (m.venue || '—');
       const isUpcoming = m.date >= today && m.entry_count > 0;
-      const isPast = m.date < today && m.race_count > 0;
-      const raceCountTxt = m.race_count > 0 ? m.race_count + ' 場' : m.total_races ? m.total_races + ' 場' : m.entry_count > 0 ? '待賽' : '0 場';
+      const isPast = m.date < today;
+      const hasResults = m.race_count > 0;
+      const raceCountTxt = m.race_count > 0 ? m.race_count + ' 場' : m.total_races ? m.total_races + ' 場' : m.entry_count > 0 ? '<span class="muted-cell">排位 ' + m.entry_count + ' 匹</span>' : '<span class="muted-cell">—</span>';
       const hit = window._meetingHits[m.date];
-      let hitCell;
-      if (hit === 'loading') hitCell = '<span style="color:var(--mut);font-size:11px">運算中…</span>';
-      else if (hit && hit.summary) {
-        const t1 = hit.summary.top1HitRate; const t3 = hit.summary.top3AnyHitRate;
-        const t1cls = t1 != null && t1 >= 30 ? 'ok' : t1 != null && t1 < 15 ? 'bad' : '';
-        const t3cls = t3 != null && t3 >= 60 ? 'ok' : t3 != null && t3 < 40 ? 'bad' : '';
-        hitCell = '<span class="' + t1cls + '" style="font-variant-numeric:tabular-nums">' + (t1 != null ? t1.toFixed(1) + '%' : '—') + '</span>'
-                + ' <span class="muted-cell">/</span> '
-                + '<span class="' + t3cls + '" style="font-variant-numeric:tabular-nums">' + (t3 != null ? t3.toFixed(1) + '%' : '—') + '</span>'
-                + '<div style="font-size:10px;color:var(--mut)">' + hit.summary.racesEvaluated + ' 場已評</div>';
+      let actionCell;
+      if (isPast && !hasResults) {
+        actionCell = '<span class="warn" style="font-size:11px">⚠ 賽果未同步 · <a href="javascript:void(0)" onclick="runPicksForDate(' + i + ')" style="color:var(--blue)">查看當日預測</a></span>';
+      } else if (isPast && hasResults) {
+        if (hit === 'loading') actionCell = '<span style="color:var(--mut);font-size:11px">運算中…</span>';
+        else if (hit && hit.summary) {
+          const t1 = hit.summary.top1HitRate; const t3 = hit.summary.top3AnyHitRate;
+          const t1cls = t1 != null && t1 >= 30 ? 'ok' : t1 != null && t1 < 15 ? 'bad' : '';
+          const t3cls = t3 != null && t3 >= 60 ? 'ok' : t3 != null && t3 < 40 ? 'bad' : '';
+          actionCell = '<a href="javascript:void(0)" onclick="runHitReport(' + i + ')" style="text-decoration:none;color:inherit;display:inline-block;padding:2px 6px;border-radius:3px;cursor:pointer" onmouseover="this.style.background=\'#f0f7ff\'" onmouseout="this.style.background=\'\'">'
+                    + '<span class="' + t1cls + '" style="font-variant-numeric:tabular-nums;font-weight:600">' + (t1 != null ? t1.toFixed(1) + '%' : '—') + '</span>'
+                    + ' <span class="muted-cell">/</span> '
+                    + '<span class="' + t3cls + '" style="font-variant-numeric:tabular-nums;font-weight:600">' + (t3 != null ? t3.toFixed(1) + '%' : '—') + '</span>'
+                    + ' <span style="font-size:10px;color:var(--mut)">(' + hit.summary.racesEvaluated + ' 場 · 點看詳情)</span>'
+                    + '</a>';
+        }
+        else if (hit === 'error') actionCell = '<a href="javascript:void(0)" onclick="autoLoadHitForMeeting(' + i + ')" style="color:var(--red);font-size:11px">運算失敗 · 重試</a>';
+        else actionCell = '<span class="muted-cell" style="font-size:11px">排隊中…</span>';
+      } else if (isUpcoming) {
+        actionCell = '<a href="javascript:void(0)" onclick="runPicksForDate(' + i + ')" style="color:var(--blue);font-weight:600">▶ 預測此日</a> <span class="muted-cell" style="font-size:11px">(' + m.entry_count + ' 匹排位)</span>';
+      } else {
+        actionCell = '<span class="muted-cell">—</span>';
       }
-      else if (isPast) hitCell = '<span class="muted-cell" style="font-size:11px">點「比對報告」</span>';
-      else hitCell = '<span class="muted-cell">—</span>';
-      const buttons = [];
-      if (isUpcoming || isPast) buttons.push('<button class="ghost" style="font-size:11px;padding:3px 8px;margin-right:4px" onclick="runPicksForDate(' + i + ')">預測此日</button>');
-      if (isPast) buttons.push('<button class="ghost" style="font-size:11px;padding:3px 8px" onclick="runHitReport(' + i + ')">比對報告</button>');
       return '<tr>' +
         '<td><strong>' + (m.date || '—') + '</strong></td>' +
         '<td>' + venue + '</td>' +
         '<td class="muted-cell">' + (m.track_condition || '—') + '</td>' +
         '<td>' + raceCountTxt + '</td>' +
-        '<td>' + hitCell + '</td>' +
-        '<td>' + buttons.join('') + '</td>' +
+        '<td>' + actionCell + '</td>' +
         '</tr>';
     }).join('');
+    // Auto-trigger hit-rate computation for past meetings without cached results
+    if (!window._autoHitTriggered) {
+      window._autoHitTriggered = true;
+      const pastWithResults = data.meetings.map((m, i) => ({m, i})).filter(({m}) => m.date < today && m.race_count > 0 && !window._meetingHits[m.date]);
+      autoLoadHitChain(pastWithResults);
+    }
+  }
+
+  async function autoLoadHitChain(queue) {
+    for (const {m, i} of queue) {
+      if (window._meetingHits[m.date] && window._meetingHits[m.date].summary) continue;
+      window._meetingHits[m.date] = 'loading';
+      renderMeetings.__rerender = true;
+      renderMeetingRow(i);
+      try {
+        const r = await fetch('/api/analyze/hit-rate?date=' + encodeURIComponent(m.date));
+        const d = await r.json();
+        if (d.error) { window._meetingHits[m.date] = 'error'; }
+        else { window._meetingHits[m.date] = d; }
+      } catch (e) { window._meetingHits[m.date] = 'error'; }
+      renderMeetingRow(i);
+    }
+  }
+
+  function autoLoadHitForMeeting(i) {
+    const m = window._meetingList && window._meetingList[i]; if (!m) return;
+    delete window._meetingHits[m.date];
+    autoLoadHitChain([{m, i}]);
+  }
+
+  function renderMeetingRow(i) {
+    // simplest: re-render the entire table; the data is in memory
+    const tb = document.querySelector('#recentMeetings tbody');
+    if (!tb || !window._meetingList) return;
+    // call renderMeetings minus the auto-trigger guard
+    const wasTriggered = window._autoHitTriggered;
+    window._autoHitTriggered = true;  // block re-trigger
+    renderMeetings();
+    window._autoHitTriggered = wasTriggered;
   }
 
   async function loadHitRateRollup() {
