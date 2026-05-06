@@ -21,3 +21,7 @@ database_id = "aad1636e-869a-43f5-aa95-4a19e3aa5517"
 # [[kv_namespaces]]
 # binding = "CACHE"
 # id = "placeholder"
+
+  [triggers]
+  crons = ["0 19 * * *"]  # daily 03:00 HKT — refresh past-meeting hit-rate cache
+  
