@@ -1476,3 +1476,62 @@ analyzeRoutes.get('/factors', (c) => {
         }
       });
   
+
+      // GET /api/analyze/hit-rate-rollup?days=30 — 滾動窗口整體命中率彙總（無逐場 detail，速度快）
+      analyzeRoutes.get('/hit-rate-rollup', async (c) => {
+        try {
+          const db = c.env.DB;
+          const daysParam = c.req.query('days');
+          const days = Math.max(1, Math.min(180, parseInt(daysParam || '30', 10) || 30));
+          const today = new Date().toISOString().substring(0, 10);
+          const cutoff = new Date(Date.now() - days * 86400000).toISOString().substring(0, 10);
+
+          // 取窗口內所有過去賽事日（有實際結果）
+          const datesQ = await db.prepare(
+            "SELECT DISTINCT race_date AS date, venue, COUNT(DISTINCT race_id) AS race_count " +
+            "FROM race_results WHERE race_date >= ? AND race_date < ? AND finishing_position IS NOT NULL " +
+            "GROUP BY race_date, venue ORDER BY race_date DESC"
+          ).bind(cutoff, today).all();
+          const meetingDates: Array<{date: string; venue: string; race_count: number}> = (datesQ.results as any[]) || [];
+
+          let totalRaces = 0, totalTop1Hits = 0, totalTop3AnyHits = 0, totalTop3Intersect = 0;
+          const perMeeting: any[] = [];
+          const fetchOne = async (mtg: {date: string; venue: string; race_count: number}) => {
+            try {
+              const url = new URL(c.req.url);
+              const r = await fetch(`${url.origin}/api/analyze/hit-rate?date=${mtg.date}`);
+              if (!r.ok) return null;
+              const j: any = await r.json();
+              if (!j || !j.summary) return null;
+              return { date: mtg.date, venue: mtg.venue, ...j.summary };
+            } catch { return null; }
+          };
+          // 串行（避免 D1 over-subscribed），最多 30 個迭代，每場 ~1-2s 快取後 < 200ms
+          for (const m of meetingDates) {
+            const s = await fetchOne(m);
+            if (!s) continue;
+            perMeeting.push(s);
+            totalRaces += s.racesEvaluated || 0;
+            totalTop1Hits += s.top1Hits || 0;
+            totalTop3AnyHits += s.top3AnyHits || 0;
+            totalTop3Intersect += s.top3SumIntersect || 0;
+          }
+
+          return c.json({
+            windowDays: days,
+            from: cutoff,
+            to: today,
+            meetingsEvaluated: perMeeting.length,
+            racesEvaluated: totalRaces,
+            top1HitRate: totalRaces ? Math.round(totalTop1Hits/totalRaces*1000)/10 : null,
+            top3AnyHitRate: totalRaces ? Math.round(totalTop3AnyHits/totalRaces*1000)/10 : null,
+            top3AvgIntersect: totalRaces ? Math.round(totalTop3Intersect/totalRaces*100)/100 : null,
+            top1Hits: totalTop1Hits,
+            top3AnyHits: totalTop3AnyHits,
+            perMeeting,
+            generatedAt: new Date().toISOString(),
+          });
+        } catch (err: any) {
+          return c.json({ error: 'hit-rate-rollup failed', detail: err?.message ?? String(err) }, 500);
+        }
+      });
