@@ -37,13 +37,18 @@ FEATURE_COLS = [
       "dist_starts", "dist_top3", "going_starts", "going_top3",
       "draw_starts", "draw_top3", "combo_starts", "combo_top3",
       "weight_avg5",
+      # raw factor parts that the baseline already encodes — keeping them
+      # lets the GBM learn non-linear interactions the additive baseline misses.
       "factor_bonus",
+      # Stage 4c: recency-weighted form (per horse, last 5 starts)
       "form_n", "form_avgpos_w", "form_top3rate_w", "form_pos_slope",
-      "tv_starts", "tv_top3",
-      "jv_starts", "jv_top3",
-      "jdb_starts", "jdb_top3",
-      # Stage 6: field-relative ELO + weight (per-runner minus today's field mean)
-      "h_elo_rel", "j_elo_rel", "t_elo_rel", "weight_rel",
+      # Stage 4c: cross-features (interaction history, no odds)
+      "tv_starts", "tv_top3",     # trainer × venue
+      "jv_starts", "jv_top3",     # jockey × venue
+      "jdb_starts", "jdb_top3",   # jockey × distance band
+        # Stage 5: track-condition specialization
+        "jg_starts", "jg_top3",     # jockey × going
+        "tg_starts", "tg_top3",     # trainer × going
       # going_code is appended below as a categorical feature.
   ]
 
@@ -63,12 +68,6 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--objective", choices=["lambdarank", "binary"], default="lambdarank",
                     help="lambdarank uses position as ranking label; "
                          "binary uses is_top1 with race-grouping ignored")
-    ap.add_argument("--decay-halflife-days", type=float, default=180.0,
-                    help="Stage 6: exponential decay half-life for sample weights "
-                         "(0 disables decay). Older training rows get downweighted.")
-    ap.add_argument("--ensemble-lgb-weight", type=float, default=0.7,
-                    help="Stage 6: ensemble weight for LGB softmax probability vs "
-                         "ELO+factor baseline softmax probability. 1.0 = pure LGB.")
     ap.add_argument("--verbose", action="store_true")
     return ap.parse_args()
 
@@ -90,27 +89,14 @@ def load(path: str) -> pd.DataFrame:
     return df
 
 
-def _sample_weights(train_df: pd.DataFrame, current_date: str, halflife_days: float) -> np.ndarray | None:
-    """Stage 6: exponential time-decay weights so the booster gives more
-    importance to recent races. Returns None when decay is disabled."""
-    if halflife_days <= 0:
-        return None
-    today = pd.to_datetime(current_date)
-    dates = pd.to_datetime(train_df["race_date"])
-    age_days = (today - dates).dt.days.clip(lower=0).astype(float).to_numpy()
-    # exp(-age * ln(2) / halflife)
-    return np.exp(-age_days * np.log(2.0) / halflife_days)
-
-
-def train_booster(train_df: pd.DataFrame, args: argparse.Namespace, feat_cols: list[str],
-                  current_date: str) -> lgb.Booster:
+def train_booster(train_df: pd.DataFrame, args: argparse.Namespace, feat_cols: list[str]) -> lgb.Booster:
     X = train_df[feat_cols].astype(float).fillna(-1.0).to_numpy()
-    weight = _sample_weights(train_df, current_date, args.decay_halflife_days)
     if args.objective == "lambdarank":
+        # higher label = better. Flip finishing_position so winner has highest.
         max_pos = int(train_df["finishing_position"].max())
         label = (max_pos - train_df["finishing_position"]).clip(lower=0).astype(int).to_numpy()
         groups = train_df.groupby("race_id", sort=False).size().to_numpy()
-        ds = lgb.Dataset(X, label=label, group=groups, weight=weight,
+        ds = lgb.Dataset(X, label=label, group=groups,
                          categorical_feature=[feat_cols.index("going_code")])
         params = {
             "objective": "lambdarank",
@@ -123,7 +109,7 @@ def train_booster(train_df: pd.DataFrame, args: argparse.Namespace, feat_cols: l
         }
     else:
         label = train_df["is_top1"].astype(int).to_numpy()
-        ds = lgb.Dataset(X, label=label, weight=weight,
+        ds = lgb.Dataset(X, label=label,
                          categorical_feature=[feat_cols.index("going_code")])
         params = {
             "objective": "binary",
@@ -135,15 +121,6 @@ def train_booster(train_df: pd.DataFrame, args: argparse.Namespace, feat_cols: l
             "verbose": -1,
         }
     return lgb.train(params, ds, num_boost_round=args.n_estimators)
-
-
-def _softmax(x: np.ndarray) -> np.ndarray:
-    """Numerically stable per-race softmax."""
-    x = np.asarray(x, dtype=float)
-    x = x - np.nanmax(x)
-    e = np.exp(x)
-    s = np.nansum(e)
-    return e / s if s > 0 else np.full_like(e, 1.0 / len(e))
 
 
 def main() -> int:
@@ -173,8 +150,7 @@ def main() -> int:
             train_df = df[train_mask]
             if len(train_df) < 200:
                 continue
-            current_date = str(test_df["race_date"].iloc[0])
-            booster = train_booster(train_df, args, feat_cols, current_date)
+            booster = train_booster(train_df, args, feat_cols)
             last_trained_at = i
             if args.verbose:
                 print(f"  [retrain @ race {i}] {len(train_df):,} rows", file=sys.stderr)
@@ -192,17 +168,6 @@ def main() -> int:
         bs = pd.to_numeric(ta["baseline_score"], errors="coerce")
         elo_top1 = ta.loc[bs.idxmax(), "horse_id"] if bs.notna().any() else None
 
-        # Stage 6: ensemble — within-race softmax for both scorers, blend, argmax.
-        ens_top1 = None
-        if bs.notna().all() and len(ta) >= 4:
-            lgb_p = _softmax(scores)
-            # Temperature-scale baseline: ELO+factor scores typically span 50–200.
-            bs_arr = bs.to_numpy(dtype=float)
-            elo_p = _softmax(bs_arr / 50.0)
-            w = float(args.ensemble_lgb_weight)
-            ens_p = w * lgb_p + (1.0 - w) * elo_p
-            ens_top1 = ta.iloc[int(np.argmax(ens_p))]["horse_id"]
-
         # Market favourite (lowest positive win_odds)
         odds = pd.to_numeric(ta["win_odds"], errors="coerce")
         odds_valid = ta[odds > 0]
@@ -219,8 +184,6 @@ def main() -> int:
             "lgb_top3_hit": bool(lgb_top1 in actual_top3),
             "elo_top1_hit": None if elo_top1 is None else bool(elo_top1 == actual_top1),
             "elo_top3_hit": None if elo_top1 is None else bool(elo_top1 in actual_top3),
-            "ens_top1_hit": None if ens_top1 is None else bool(ens_top1 == actual_top1),
-            "ens_top3_hit": None if ens_top1 is None else bool(ens_top1 in actual_top3),
             "market_top1_hit": None if market_top1 is None else bool(market_top1 == actual_top1),
         })
 
@@ -245,8 +208,6 @@ def main() -> int:
             "lgb_top3_hit_rate":    rate("lgb_top3_hit"),
             "elo_top1_hit_rate":    rate("elo_top1_hit"),
             "elo_top3_hit_rate":    rate("elo_top3_hit"),
-            "ens_top1_hit_rate":    rate("ens_top1_hit"),
-            "ens_top3_hit_rate":    rate("ens_top3_hit"),
             "market_top1_hit_rate": rate("market_top1_hit"),
         },
         "feature_importance_gain": (
@@ -262,8 +223,6 @@ def main() -> int:
             "n_estimators": args.n_estimators,
             "learning_rate": args.learning_rate,
             "min_data_in_leaf": args.min_data_in_leaf,
-            "decay_halflife_days": args.decay_halflife_days,
-            "ensemble_lgb_weight": args.ensemble_lgb_weight,
         },
     }
 
