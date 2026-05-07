@@ -208,22 +208,6 @@
          AND rr.finishing_position BETWEEN 1 AND 98
        ORDER BY rm.date DESC LIMIT 5`);
 
-    // Stage A: horse-specific recency — richer per-horse history (last 10 starts) with date, distance, class
-    // Used to compute last_pos / last_margin_norm / last_class_diff / last_dist_diff /
-    // days_since_best / recent_top3_streak / runs_30d / runs_90d / peak_pos_last5
-    const qHorseHistoryRich = db.prepare(`
-      SELECT rr.finishing_position AS pos,
-             (SELECT COUNT(*) FROM race_results rr2
-                WHERE rr2.race_id = rr.race_id
-                  AND rr2.finishing_position BETWEEN 1 AND 98) AS field,
-             rm.date AS rdate, r.distance AS rdist, r.class AS rclass
-        FROM race_results rr
-        JOIN races r ON r.id = rr.race_id
-        JOIN race_meetings rm ON rm.id = r.meeting_id
-       WHERE rr.horse_id = ? AND rm.date < ?
-         AND rr.finishing_position BETWEEN 1 AND 98
-       ORDER BY rm.date DESC LIMIT 10`);
-
     // trainer × venue: how often trainer's runners hit top-3 at this venue
     const qTrainerVenue = db.prepare(`
       SELECT COUNT(*) AS starts,
@@ -299,7 +283,7 @@
   }
 
   // ── Race iteration ──────────────────────────────────────────────────────
-  type RaceMeta = { id: string; date: string; venue: string; race_number: number; distance: number; going: string; race_class: string | null };
+  type RaceMeta = { id: string; date: string; venue: string; race_number: number; distance: number; going: string };
   type RunnerRow = {
     race_id: string; horse_id: string; jockey_id: string | null; trainer_id: string | null;
     finishing_position: number; draw: number | null; actual_weight: number | null; win_odds: number | null;
@@ -307,7 +291,7 @@
 
   const races = db.prepare(`
     SELECT r.id AS id, rm.date AS date, rm.venue AS venue, r.race_number AS race_number,
-           r.distance AS distance, r.going AS going, r.class AS race_class
+           r.distance AS distance, r.going AS going
       FROM races r
       JOIN race_meetings rm ON rm.id = r.meeting_id
      WHERE rm.date BETWEEN ? AND ?
@@ -337,9 +321,6 @@
       'tv_starts','tv_top3','jv_starts','jv_top3','jdb_starts','jdb_top3',
       // Stage 5: track-condition specialization (jockey/trainer × going)
       'jg_starts','jg_top3','tg_starts','tg_top3',
-      // Stage A: horse-specific recency (per-horse last-N richer signals)
-      'last_pos','last_margin_norm','last_class_diff','last_dist_diff',
-      'days_since_best','recent_top3_streak','runs_30d','runs_90d','peak_pos_last5',
       'finishing_position','is_top1','is_top3',
     ];
   writeFileSync(OUT, HEADER.join(',') + '\n');
@@ -417,39 +398,6 @@
         const jgF = (r.jockey_id && meta.going) ? qJockeyGoing.get(r.jockey_id, meta.going, meta.date) as { starts: number; top3: number } | undefined : undefined;
         const tgF = (r.trainer_id && meta.going) ? qTrainerGoing.get(r.trainer_id, meta.going, meta.date) as { starts: number; top3: number } | undefined : undefined;;
   
-        // ── Stage A: horse-specific recency features ──
-        // Parse numeric class from "C1"/"C2"/.../"GRIFFIN" etc. → first integer in string, else null.
-        const classNum = (c: string | null | undefined): number | null => {
-          if (c == null) return null;
-          const m = String(c).match(/(\d+)/);
-          return m ? parseInt(m[1], 10) : null;
-        };
-        const hist = qHorseHistoryRich.all(r.horse_id, meta.date) as { pos: number; field: number; rdate: string; rdist: number; rclass: string | null }[];
-        const last = hist[0] ?? null;
-        const lastPos: number | null = last ? last.pos : null;
-        const lastMarginNorm: number | null = (last && last.field > 0) ? last.pos / last.field : null;
-        const curClassN = classNum(meta.race_class);
-        const lastClassN = last ? classNum(last.rclass) : null;
-        // Convention: positive = up in class (lower number = higher class in HK), so prev_class_num - cur_class_num.
-        const lastClassDiff: number | null = (lastClassN != null && curClassN != null) ? (lastClassN - curClassN) : null;
-        const lastDistDiff: number | null = last ? (last.rdist - meta.distance) : null;
-        // Days since the most recent top-3 finish (before today). null if never (in last 10).
-        let daysSinceBest: number | null = null;
-        for (const h of hist) { if (h.pos >= 1 && h.pos <= 3) { daysSinceBest = daysBetween(h.rdate, meta.date); break; } }
-        // Consecutive top-3 streak counting back from most recent (stops at first miss).
-        let streak = 0;
-        for (const h of hist) { if (h.pos >= 1 && h.pos <= 3) streak++; else break; }
-        // Race counts within 30/90 days
-        let runs30 = 0, runs90 = 0;
-        for (const h of hist) {
-          const d = daysBetween(h.rdate, meta.date);
-          if (d <= 30) runs30++;
-          if (d <= 90) runs90++;
-        }
-        // Best (lowest) finishing position in last 5
-        const last5 = hist.slice(0, 5);
-        const peakPosLast5: number | null = last5.length ? Math.min(...last5.map(h => h.pos)) : null;
-
       const fRecency = recencyBonus(daysSince);
       const fDist = rateBonus(dF?.starts ?? 0, dF?.top3 ?? 0, 15);
       const fGoing = rateBonus(gF?.starts ?? 0, gF?.top3 ?? 0, 12);
@@ -469,9 +417,6 @@
           formN, formAvgPosW, formTop3RateW, formPosSlope,
           tvF?.starts ?? 0, tvF?.top3 ?? 0, jvF?.starts ?? 0, jvF?.top3 ?? 0, jdbF?.starts ?? 0, jdbF?.top3 ?? 0,
           jgF?.starts ?? 0, jgF?.top3 ?? 0, tgF?.starts ?? 0, tgF?.top3 ?? 0,
-          // Stage A
-          lastPos, lastMarginNorm, lastClassDiff, lastDistDiff,
-          daysSinceBest, streak, runs30, runs90, peakPosLast5,
           r.finishing_position,
           r.horse_id === top1Id ? 1 : 0,
           top3Set.has(r.horse_id) ? 1 : 0,
