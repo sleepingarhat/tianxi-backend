@@ -56,6 +56,8 @@ FEATURE_COLS = [
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--features", required=True, help="CSV from dump-features.ts")
+    ap.add_argument("--dividends", required=False, default=None,
+                    help="Dividends CSV (race_id,pool_type,combination,dividend) for ROI eval")
     ap.add_argument("--out", required=True, help="Output JSON path")
     ap.add_argument("--min-train-races", type=int, default=200,
                     help="Skip evaluation until this many races have happened")
@@ -198,6 +200,112 @@ def main() -> int:
         s = rdf[col].dropna()
         return float(s.mean()) if len(s) else None
 
+    # ── Stage C: profitability — simulate $10 bets, lookup actual dividends ──
+    profitability: dict = {}
+    if args.dividends:
+        from itertools import combinations
+        ddf = pd.read_csv(args.dividends, dtype={"race_id": str, "pool_type": str, "combination": str})
+        ddf["dividend"] = pd.to_numeric(ddf["dividend"], errors="coerce")
+        # Lookup: (race_id, pool_type) -> list of (frozenset of horse_numbers, dividend)
+        div_by_race_pool: dict[tuple[str, str], list[tuple[frozenset, float]]] = {}
+        for row in ddf.itertuples(index=False):
+            if not row.combination or pd.isna(row.dividend):
+                continue
+            try:
+                nums = frozenset(int(x.strip()) for x in str(row.combination).split(",") if x.strip())
+            except ValueError:
+                continue
+            if not nums:
+                continue
+            div_by_race_pool.setdefault((str(row.race_id), str(row.pool_type)), []).append((nums, float(row.dividend)))
+
+        # Build race -> ranked horse_number list from per-race scores we already have.
+        # We need to re-score; cheaper: re-run the eval passes but reuse the booster sequence.
+        # Simplest: do a second pass over race_ids, retraining identically and scoring.
+        # To avoid retraining cost, we cache (rid -> ranked horse_numbers) inline below.
+        # NOTE: ranked list was not stored in per_race; we recompute by re-running the loop.
+        # To keep this lightweight + deterministic, we use the SAME retrain schedule.
+
+        def settle(race_id: str, pool: str, picks: list[int], k: int) -> tuple[float, float]:
+            """Box-bet: every C(len(picks), k) combination of `picks`. Returns (stake, payout)."""
+            if len(picks) < k:
+                return (0.0, 0.0)
+            combos = list(combinations(picks, k))
+            stake = 10.0 * len(combos)
+            entries = div_by_race_pool.get((race_id, pool), [])
+            payout = 0.0
+            for combo in combos:
+                cset = frozenset(combo)
+                for win_set, div in entries:
+                    if win_set == cset:
+                        payout += div  # dividend is per $10 bet; we staked $10 per combo
+                        break
+            return (stake, payout)
+
+        bet_results: dict[str, dict[str, float]] = {}
+        def acc(name: str, stake: float, payout: float):
+            d = bet_results.setdefault(name, {"races": 0, "stake": 0.0, "payout": 0.0, "wins": 0})
+            if stake > 0:
+                d["races"] += 1
+                d["stake"] += stake
+                d["payout"] += payout
+                if payout > 0:
+                    d["wins"] += 1
+
+        # Re-score (replays the same retrain schedule deterministically).
+        booster2: lgb.Booster | None = None
+        last_trained_at2 = -10**9
+        for i, rid in enumerate(race_ids):
+            test_df = race_to_rows[rid]
+            if len(test_df) < 4:
+                continue
+            if i < args.min_train_races:
+                continue
+            if booster2 is None or (i - last_trained_at2) >= args.retrain_every_races:
+                train_mask = df["race_id"].isin(race_ids[:i])
+                train_df = df[train_mask]
+                if len(train_df) < 200:
+                    continue
+                booster2 = train_booster(train_df, args, feat_cols)
+                last_trained_at2 = i
+            Xt = test_df[feat_cols].astype(float).fillna(-1.0).to_numpy()
+            scores = booster2.predict(Xt)
+            ta = test_df.reset_index(drop=True)
+            order = np.argsort(-scores)
+            ranked_nums = pd.to_numeric(ta.iloc[order]["horse_number"], errors="coerce").dropna().astype(int).tolist()
+            if not ranked_nums:
+                continue
+            top1 = ranked_nums[:1]; top2 = ranked_nums[:2]; top3 = ranked_nums[:3]
+            top4 = ranked_nums[:4]; top5 = ranked_nums[:5]; top6 = ranked_nums[:6]
+            rid_s = str(rid)
+            # WIN model top 1
+            s, p = settle(rid_s, "WIN", top1, 1); acc("WIN_top1", s, p)
+            # PLA model top 1 (single-horse place bet)
+            s, p = settle(rid_s, "PLA", top1, 1); acc("PLA_top1", s, p)
+            # QIN model top 1+2
+            s, p = settle(rid_s, "QIN", top2, 2); acc("QIN_top2", s, p)
+            # QPL model top 1+2 (place quinella, lower threshold)
+            s, p = settle(rid_s, "QPL", top2, 2); acc("QPL_top2", s, p)
+            # TRI box on model top 3 (1 combo) and top 4 (4 combos)
+            s, p = settle(rid_s, "TRI", top3, 3); acc("TRI_box3", s, p)
+            s, p = settle(rid_s, "TRI", top4, 3); acc("TRI_box4", s, p)
+            # FF box on model top 4 (1 combo), top 5 (5 combos), top 6 (15 combos)
+            s, p = settle(rid_s, "FF", top4, 4); acc("FF_box4", s, p)
+            s, p = settle(rid_s, "FF", top5, 4); acc("FF_box5", s, p)
+            s, p = settle(rid_s, "FF", top6, 4); acc("FF_box6", s, p)
+
+        for name, d in bet_results.items():
+            stake = d["stake"]; payout = d["payout"]; n = d["races"]; w = d["wins"]
+            profitability[name] = {
+                "races_bet": int(n),
+                "total_stake": round(stake, 2),
+                "total_payout": round(payout, 2),
+                "net_pnl": round(payout - stake, 2),
+                "roi": round((payout - stake) / stake, 4) if stake > 0 else None,
+                "hit_rate": round(w / n, 4) if n > 0 else None,
+                "avg_payout_when_hit": round(payout / w, 2) if w > 0 else None,
+            }
+
     summary = {
         "n_races_evaluated": int(len(rdf)),
         "date_range": (
@@ -210,6 +318,7 @@ def main() -> int:
             "elo_top3_hit_rate":    rate("elo_top3_hit"),
             "market_top1_hit_rate": rate("market_top1_hit"),
         },
+        "profitability": profitability,
         "feature_importance_gain": (
             dict(zip(feat_cols,
                      booster.feature_importance(importance_type="gain").tolist()))
