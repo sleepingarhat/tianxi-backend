@@ -208,6 +208,24 @@
          AND rr.finishing_position BETWEEN 1 AND 98
        ORDER BY rm.date DESC LIMIT 5`);
 
+    // ── Stage B: race-pace from running_position history ──
+    // running_position is text like "2-2-1-1" → positions per 200m section.
+    // Last 10 starts only — newer style is what matters for current race.
+    const qHorseRunPos = db.prepare(`
+      SELECT rr.finishing_position AS pos,
+             rr.running_position AS rpos,
+             (SELECT COUNT(*) FROM race_results rr2
+                WHERE rr2.race_id = rr.race_id
+                  AND rr2.finishing_position BETWEEN 1 AND 98) AS field
+        FROM race_results rr
+        JOIN races r ON r.id = rr.race_id
+        JOIN race_meetings rm ON rm.id = r.meeting_id
+       WHERE rr.horse_id = ? AND rm.date < ?
+         AND rr.finishing_position BETWEEN 1 AND 98
+         AND rr.running_position IS NOT NULL
+         AND rr.running_position != ''
+       ORDER BY rm.date DESC LIMIT 10`);
+
     // trainer × venue: how often trainer's runners hit top-3 at this venue
     const qTrainerVenue = db.prepare(`
       SELECT COUNT(*) AS starts,
@@ -321,6 +339,9 @@
       'tv_starts','tv_top3','jv_starts','jv_top3','jdb_starts','jdb_top3',
       // Stage 5: track-condition specialization (jockey/trainer × going)
       'jg_starts','jg_top3','tg_starts','tg_top3',
+      // Stage B: race-pace features (running_position derived)
+      'style_score','closer_index','style_n',
+      'pace_fit','front_pressure','race_avg_style','style_dist_inter',
       'finishing_position','is_top1','is_top3',
     ];
   writeFileSync(OUT, HEADER.join(',') + '\n');
@@ -346,6 +367,40 @@
     const top1Id = sorted[0].horse_id;
     const top3Set = new Set(sorted.slice(0, 3).map(r => r.horse_id));
     const fieldSize = runners.length;
+
+    // ── Stage B: precompute per-horse running style from history ──
+    // running_position string e.g. "2-2-1-1" → array of section positions.
+    const parseRP = (s: string | null | undefined): number[] => {
+      if (!s) return [];
+      return String(s).split(/[-/,\s]+/)
+        .map(p => parseInt(p, 10))
+        .filter(n => Number.isFinite(n) && n > 0 && n <= 30);
+    };
+    type StyleRow = { styleScore: number | null; closerIdx: number | null; styleN: number };
+    const styleByHorse = new Map<string, StyleRow>();
+    for (const r of runners) {
+      const hist = qHorseRunPos.all(r.horse_id, meta.date) as { pos: number; rpos: string | null; field: number }[];
+      let earlySum = 0, finalSum = 0, earlyN = 0;
+      for (const h of hist) {
+        if (h.field <= 1) continue;
+        const rp = parseRP(h.rpos);
+        if (rp.length < 1) continue;
+        // Normalize a finishing position p in field f to [-1,+1]: +1 = on lead, -1 = at back.
+        const norm = (p: number, f: number) => (f + 1 - 2 * p) / f;
+        earlySum += norm(rp[0], h.field);
+        finalSum += norm(h.pos, h.field);
+        earlyN++;
+      }
+      const styleScore = earlyN > 0 ? earlySum / earlyN : null;
+      const closerIdx = earlyN > 0 ? (finalSum - earlySum) / earlyN : null;
+      styleByHorse.set(r.horse_id, { styleScore, closerIdx, styleN: earlyN });
+    }
+    // Race-level aggregates: avg style across runners with sample, and front-runner pressure.
+    const styleVals = [...styleByHorse.values()].map(v => v.styleScore).filter((v): v is number => v != null);
+    const raceAvgStyle = styleVals.length > 0 ? styleVals.reduce((a, b) => a + b, 0) / styleVals.length : 0;
+    const frontPressure = styleVals.filter(v => v > 0.3).length;
+    // Sprint vs route flag for distance × style interaction (sprinters typically <= 1400m).
+    const sprintFlag = meta.distance <= 1400 ? 1 : -1;
 
     for (const r of runners) {
       const hElo = readElo('horse', r.horse_id, meta.date);
@@ -417,6 +472,14 @@
           formN, formAvgPosW, formTop3RateW, formPosSlope,
           tvF?.starts ?? 0, tvF?.top3 ?? 0, jvF?.starts ?? 0, jvF?.top3 ?? 0, jdbF?.starts ?? 0, jdbF?.top3 ?? 0,
           jgF?.starts ?? 0, jgF?.top3 ?? 0, tgF?.starts ?? 0, tgF?.top3 ?? 0,
+          // Stage B
+          (() => { const s = styleByHorse.get(r.horse_id); return s?.styleScore ?? null; })(),
+          (() => { const s = styleByHorse.get(r.horse_id); return s?.closerIdx ?? null; })(),
+          (() => { const s = styleByHorse.get(r.horse_id); return s?.styleN ?? 0; })(),
+          (() => { const s = styleByHorse.get(r.horse_id); return s?.styleScore != null ? s.styleScore - raceAvgStyle : null; })(),
+          frontPressure,
+          raceAvgStyle,
+          (() => { const s = styleByHorse.get(r.horse_id); return s?.styleScore != null ? s.styleScore * sprintFlag : null; })(),
           r.finishing_position,
           r.horse_id === top1Id ? 1 : 0,
           top3Set.has(r.horse_id) ? 1 : 0,
