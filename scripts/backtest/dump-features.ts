@@ -239,27 +239,6 @@
          AND rm.date < ?
          AND rr.finishing_position > 0 AND rr.finishing_position < 99`);
 
-    // ── Stage 5: track-condition specialization ────────────────────────────
-    // jockey × going: how does this jockey perform on this surface (Good / Yielding / Soft / etc)
-    const qJockeyGoing = db.prepare(`
-      SELECT COUNT(*) AS starts,
-             SUM(CASE WHEN rr.finishing_position BETWEEN 1 AND 3 THEN 1 ELSE 0 END) AS top3
-        FROM race_results rr
-        JOIN races r ON r.id = rr.race_id
-        JOIN race_meetings rm ON rm.id = r.meeting_id
-       WHERE rr.jockey_id = ? AND r.going = ? AND rm.date < ?
-         AND rr.finishing_position > 0 AND rr.finishing_position < 99`);
-
-    // trainer × going: trainer's preparation suited to today's surface
-    const qTrainerGoing = db.prepare(`
-      SELECT COUNT(*) AS starts,
-             SUM(CASE WHEN rr.finishing_position BETWEEN 1 AND 3 THEN 1 ELSE 0 END) AS top3
-        FROM race_results rr
-        JOIN races r ON r.id = rr.race_id
-        JOIN race_meetings rm ON rm.id = r.meeting_id
-       WHERE rr.trainer_id = ? AND r.going = ? AND rm.date < ?
-         AND rr.finishing_position > 0 AND rr.finishing_position < 99`);
-
   
   // ── Bonus helpers (verbatim) ────────────────────────────────────────────
   function daysBetween(a: string, b: string): number {
@@ -319,8 +298,8 @@
       'form_n','form_avgpos_w','form_top3rate_w','form_pos_slope',
       // Stage 4c: cross-features (interaction history)
       'tv_starts','tv_top3','jv_starts','jv_top3','jdb_starts','jdb_top3',
-      // Stage 5: track-condition specialization (jockey/trainer × going)
-      'jg_starts','jg_top3','tg_starts','tg_top3',
+      // Stage 6: field-relative ELO (per-runner minus today's field mean)
+      'h_elo_rel','j_elo_rel','t_elo_rel','weight_rel',
       'finishing_position','is_top1','is_top3',
     ];
   writeFileSync(OUT, HEADER.join(',') + '\n');
@@ -347,6 +326,23 @@
     const top3Set = new Set(sorted.slice(0, 3).map(r => r.horse_id));
     const fieldSize = runners.length;
 
+    // ── Stage 6: two-pass per-race so we can compute field-relative ELO ──
+    type Pending = {
+      r: RunnerRow;
+      hElo: number | null; jElo: number | null; tElo: number | null;
+      eloComposite: number | null; daysSince: number | null;
+      dF: { starts: number; top3: number } | undefined;
+      gF: { starts: number; top3: number } | undefined;
+      drawF: { starts: number; top3: number } | undefined;
+      wF: { avg_w: number | null } | undefined;
+      cF: { starts: number; top3: number } | undefined;
+      formN: number; formAvgPosW: number | null; formTop3RateW: number | null; formPosSlope: number | null;
+      tvF: { starts: number; top3: number } | undefined;
+      jvF: { starts: number; top3: number } | undefined;
+      jdbF: { starts: number; top3: number } | undefined;
+      factorBonus: number; baselineScore: number | null;
+    };
+    const pending: Pending[] = [];
     for (const r of runners) {
       const hElo = readElo('horse', r.horse_id, meta.date);
       const jElo = readElo('jockey', r.jockey_id, meta.date);
@@ -363,41 +359,34 @@
       const wF = qWeightDelta.get(r.horse_id, meta.date) as { avg_w: number | null } | undefined;
       const cF = (r.jockey_id && r.trainer_id) ? qCombo.get(r.jockey_id, r.trainer_id, meta.date) as { starts: number; top3: number } | undefined : undefined;
 
-        // ── Stage 4c features ──
-        // Recency-weighted form from last 5 starts
-        const formRows = qFormLast5.all(r.horse_id, meta.date) as { pos: number; field: number }[];
-        const formN = formRows.length;
-        let formAvgPosW: number | null = null, formTop3RateW: number | null = null, formPosSlope: number | null = null;
-        if (formN > 0) {
-          const wAll = [0.40, 0.25, 0.15, 0.10, 0.10];
-          const w = wAll.slice(0, formN);
-          const wSum = w.reduce((a, b) => a + b, 0);
-          const normPos = formRows.map(f => f.field > 0 ? f.pos / f.field : 0.5);
-          formAvgPosW = normPos.reduce((s, p, ix) => s + p * w[ix], 0) / wSum;
-          const top3 = formRows.map(f => f.pos >= 1 && f.pos <= 3 ? 1 : 0);
-          formTop3RateW = top3.reduce((s, t, ix) => s + t * w[ix], 0) / wSum;
-          if (formN >= 2) {
-            // Linear slope of -pos over time index (most recent = highest x).
-            // Positive slope = improving (positions getting better over time).
-            const xs = formRows.map((_, ix) => formN - 1 - ix);
-            const ys = formRows.map(f => -f.pos);
-            const xMean = xs.reduce((a, b) => a + b, 0) / formN;
-            const yMean = ys.reduce((a, b) => a + b, 0) / formN;
-            let num = 0, den = 0;
-            for (let k = 0; k < formN; k++) { num += (xs[k] - xMean) * (ys[k] - yMean); den += (xs[k] - xMean) ** 2; }
-            formPosSlope = den > 0 ? num / den : 0;
-          } else {
-            formPosSlope = 0;
-          }
+      // Recency-weighted form from last 5 starts
+      const formRows = qFormLast5.all(r.horse_id, meta.date) as { pos: number; field: number }[];
+      const formN = formRows.length;
+      let formAvgPosW: number | null = null, formTop3RateW: number | null = null, formPosSlope: number | null = null;
+      if (formN > 0) {
+        const wAll = [0.40, 0.25, 0.15, 0.10, 0.10];
+        const w = wAll.slice(0, formN);
+        const wSum = w.reduce((a, b) => a + b, 0);
+        const normPos = formRows.map(f => f.field > 0 ? f.pos / f.field : 0.5);
+        formAvgPosW = normPos.reduce((s, p, ix) => s + p * w[ix], 0) / wSum;
+        const top3 = formRows.map(f => f.pos >= 1 && f.pos <= 3 ? 1 : 0);
+        formTop3RateW = top3.reduce((s, t, ix) => s + t * w[ix], 0) / wSum;
+        if (formN >= 2) {
+          const xs = formRows.map((_, ix) => formN - 1 - ix);
+          const ys = formRows.map(f => -f.pos);
+          const xMean = xs.reduce((a, b) => a + b, 0) / formN;
+          const yMean = ys.reduce((a, b) => a + b, 0) / formN;
+          let num = 0, den = 0;
+          for (let k = 0; k < formN; k++) { num += (xs[k] - xMean) * (ys[k] - yMean); den += (xs[k] - xMean) ** 2; }
+          formPosSlope = den > 0 ? num / den : 0;
+        } else {
+          formPosSlope = 0;
         }
-        // Cross-features
-        const tvF = r.trainer_id ? qTrainerVenue.get(r.trainer_id, meta.venue, meta.date) as { starts: number; top3: number } | undefined : undefined;
-        const jvF = r.jockey_id ? qJockeyVenue.get(r.jockey_id, meta.venue, meta.date) as { starts: number; top3: number } | undefined : undefined;
-        const jdbF = r.jockey_id ? qJockeyDistBand.get(r.jockey_id, meta.distance - 200, meta.distance + 200, meta.date) as { starts: number; top3: number } | undefined : undefined
-        // Stage 5
-        const jgF = (r.jockey_id && meta.going) ? qJockeyGoing.get(r.jockey_id, meta.going, meta.date) as { starts: number; top3: number } | undefined : undefined;
-        const tgF = (r.trainer_id && meta.going) ? qTrainerGoing.get(r.trainer_id, meta.going, meta.date) as { starts: number; top3: number } | undefined : undefined;;
-  
+      }
+      const tvF = r.trainer_id ? qTrainerVenue.get(r.trainer_id, meta.venue, meta.date) as { starts: number; top3: number } | undefined : undefined;
+      const jvF = r.jockey_id ? qJockeyVenue.get(r.jockey_id, meta.venue, meta.date) as { starts: number; top3: number } | undefined : undefined;
+      const jdbF = r.jockey_id ? qJockeyDistBand.get(r.jockey_id, meta.distance - 200, meta.distance + 200, meta.date) as { starts: number; top3: number } | undefined : undefined;
+
       const fRecency = recencyBonus(daysSince);
       const fDist = rateBonus(dF?.starts ?? 0, dF?.top3 ?? 0, 15);
       const fGoing = rateBonus(gF?.starts ?? 0, gF?.top3 ?? 0, 12);
@@ -407,16 +396,37 @@
       const factorBonus = fRecency + fDist + fGoing + fDraw + fWeight + fCombo;
       const baselineScore = eloComposite != null ? eloComposite + factorBonus : null;
 
+      pending.push({
+        r, hElo, jElo, tElo, eloComposite, daysSince,
+        dF, gF, drawF, wF, cF,
+        formN, formAvgPosW, formTop3RateW, formPosSlope,
+        tvF, jvF, jdbF, factorBonus, baselineScore,
+      });
+    }
+    // Compute field means (only over runners that actually had a value)
+    function fieldMean(getter: (p: Pending) => number | null): number | null {
+      const xs: number[] = [];
+      for (const p of pending) { const v = getter(p); if (v != null && Number.isFinite(v)) xs.push(v); }
+      return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null;
+    }
+    const meanH = fieldMean(p => p.hElo);
+    const meanJ = fieldMean(p => p.jElo);
+    const meanT = fieldMean(p => p.tElo);
+    const meanW = fieldMean(p => p.r.actual_weight);
+    const rel = (v: number | null, m: number | null) => (v == null || m == null) ? null : v - m;
+
+    for (const p of pending) {
+      const r = p.r;
       const row = [
           meta.id, meta.date, meta.venue, meta.race_number, meta.distance, meta.going, fieldSize,
           r.horse_id, r.jockey_id, r.trainer_id, r.draw, r.actual_weight, r.win_odds,
-          hElo, jElo, tElo, daysSince,
-          dF?.starts ?? 0, dF?.top3 ?? 0, gF?.starts ?? 0, gF?.top3 ?? 0,
-          drawF?.starts ?? 0, drawF?.top3 ?? 0, cF?.starts ?? 0, cF?.top3 ?? 0, wF?.avg_w ?? null,
-          eloComposite, factorBonus, baselineScore,
-          formN, formAvgPosW, formTop3RateW, formPosSlope,
-          tvF?.starts ?? 0, tvF?.top3 ?? 0, jvF?.starts ?? 0, jvF?.top3 ?? 0, jdbF?.starts ?? 0, jdbF?.top3 ?? 0,
-          jgF?.starts ?? 0, jgF?.top3 ?? 0, tgF?.starts ?? 0, tgF?.top3 ?? 0,
+          p.hElo, p.jElo, p.tElo, p.daysSince,
+          p.dF?.starts ?? 0, p.dF?.top3 ?? 0, p.gF?.starts ?? 0, p.gF?.top3 ?? 0,
+          p.drawF?.starts ?? 0, p.drawF?.top3 ?? 0, p.cF?.starts ?? 0, p.cF?.top3 ?? 0, p.wF?.avg_w ?? null,
+          p.eloComposite, p.factorBonus, p.baselineScore,
+          p.formN, p.formAvgPosW, p.formTop3RateW, p.formPosSlope,
+          p.tvF?.starts ?? 0, p.tvF?.top3 ?? 0, p.jvF?.starts ?? 0, p.jvF?.top3 ?? 0, p.jdbF?.starts ?? 0, p.jdbF?.top3 ?? 0,
+          rel(p.hElo, meanH), rel(p.jElo, meanJ), rel(p.tElo, meanT), rel(r.actual_weight, meanW),
           r.finishing_position,
           r.horse_id === top1Id ? 1 : 0,
           top3Set.has(r.horse_id) ? 1 : 0,
