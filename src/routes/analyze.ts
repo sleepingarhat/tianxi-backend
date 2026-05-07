@@ -57,6 +57,37 @@ export const analyzeRoutes = new Hono<{ Bindings: Env }>();
     ).run();
   }
   
+// 共用 helper：將一隻 pick 轉為一句中文「點解揀佢」原因
+function buildPickReason(pick: any): string {
+  if (!pick) return '資料不全';
+  const parts: string[] = [];
+  if (pick.eloComposite != null) {
+    const elos: string[] = [];
+    if (pick.horseElo != null) elos.push(`馬${Math.round(pick.horseElo)}`);
+    if (pick.jockeyElo != null) elos.push(`騎${Math.round(pick.jockeyElo)}`);
+    if (pick.trainerElo != null) elos.push(`練${Math.round(pick.trainerElo)}`);
+    parts.push(`綜合ELO ${Math.round(pick.eloComposite)}` + (elos.length ? ` (${elos.join('·')})` : ''));
+  }
+  const fb = pick.factorBreakdown;
+  if (fb) {
+    const cand: { label: string; bonus: number }[] = [
+      { label: '途程', bonus: fb.distance?.bonus ?? 0 },
+      { label: '場地', bonus: fb.going?.bonus ?? 0 },
+      { label: '檔位', bonus: fb.draw?.bonus ?? 0 },
+      { label: '負磅', bonus: fb.weight?.bonus ?? 0 },
+      { label: '狀態', bonus: fb.condition?.bonus ?? 0 },
+      { label: '傷患', bonus: fb.injury?.bonus ?? 0 },
+      { label: '騎練', bonus: fb.jtCombo?.bonus ?? 0 },
+      { label: '恢復', bonus: fb.recency?.bonus ?? 0 },
+    ].filter(x => Math.abs(x.bonus) >= 1);
+    cand.sort((a, b) => Math.abs(b.bonus) - Math.abs(a.bonus));
+    const top = cand.slice(0, 3).map(f => `${f.label}${f.bonus >= 0 ? '+' : ''}${f.bonus.toFixed(0)}`);
+    if (top.length) parts.push(top.join(' '));
+  }
+  if (pick.pWin != null) parts.push(`勝率 ${(pick.pWin * 100).toFixed(1)}%`);
+  return parts.join(' · ') || '無因子數據';
+}
+
 // 共用 helper：計算指定賽事日的命中率統計（被 /hit-rate 與 /hit-rate-rollup 共用）
 export async function computeHitRateStats(db: any, date: string, engine: EloEngine): Promise<
   | { error: string; status: number }
@@ -102,6 +133,7 @@ export async function computeHitRateStats(db: any, date: string, engine: EloEngi
     let top1Hits = 0, top3AnyHits = 0, top3SumIntersect = 0, racesEvaluated = 0;
     let quinellaHits = 0, qpHits = 0, trioHits = 0, tierceHits = 0;
     let first4Hits = 0, first4Eligible = 0;
+    let top4SumIntersect = 0, top4Eligible = 0;
     const races = picksData.races.map((race: any) => {
       const actualSorted = (actualByRace.get(race.raceNumber) ?? []).sort((a: any, b: any) => a.finishing_position - b.finishing_position);
       const predictedTop3 = (race.picks ?? []).slice(0, 3);
@@ -147,9 +179,13 @@ export async function computeHitRateStats(db: any, date: string, engine: EloEngi
         if (trioHit) trioHits++;
         if (tierceHit) tierceHits++;
       }
+      // ── New: 首選/次選/三選/四選 命中數（top-4 set overlap, 0..4） ──
+      const top4IntersectCount = predictedTop4.filter((p: any) => actualTop4Ids.has(p.horseId)).length;
       if (actualTop4.length >= 4) {
         first4Eligible++;
         if (first4Hit) first4Hits++;
+        top4Eligible++;
+        top4SumIntersect += top4IntersectCount;
       }
 
       return {
@@ -160,11 +196,28 @@ export async function computeHitRateStats(db: any, date: string, engine: EloEngi
           horseElo: p.horseElo, jockeyElo: p.jockeyElo, trainerElo: p.trainerElo,
           eloComposite: p.eloComposite, finalScore: p.finalScore, pWin: p.pWin,
         })),
+        // New: top-4 picks (rank 1-4) with per-pick reason text + hit flag
+        predictedTop4: predictedTop4.map((p: any) => ({
+          rank: p.rank, horseNumber: p.horseNumber, horseId: p.horseId,
+          nameCh: p.nameCh, jockeyCh: p.jockeyCh, trainerCh: p.trainerCh,
+          horseElo: p.horseElo, jockeyElo: p.jockeyElo, trainerElo: p.trainerElo,
+          eloComposite: p.eloComposite, finalScore: p.finalScore, pWin: p.pWin,
+          factorBonus: p.factorBonus,
+          reason: buildPickReason(p),
+          hit: actualTop4Ids.has(p.horseId),
+        })),
         actualTop3: actualTop3.map((a: any) => ({
           position: a.finishing_position, horseNumber: a.horse_number, horseId: a.horse_id,
           nameCh: a.name_ch, winOdds: a.win_odds,
         })),
+        // New: actual top-4 with hit flag (whether we picked it in our top-4)
+        actualTop4: actualTop4.map((a: any) => ({
+          position: a.finishing_position, horseNumber: a.horse_number, horseId: a.horse_id,
+          nameCh: a.name_ch, winOdds: a.win_odds,
+          hit: predictedTop4.some((p: any) => p.horseId === a.horse_id),
+        })),
         top1Hit, top3IntersectCount: intersect, top3AnyHit,
+        top4IntersectCount,
         quinellaHit, qpHit, trioHit, tierceHit, first4Hit,
       };
     });
@@ -185,6 +238,9 @@ export async function computeHitRateStats(db: any, date: string, engine: EloEngi
         top1Hits, top3AnyHits, top3SumIntersect,
         quinellaHits, qpHits, trioHits, tierceHits,
         first4Hits, first4Eligible,
+        // New: 首/次/三/四選平均命中數 (out of 4)
+        top4SumIntersect, top4Eligible,
+        top4AvgIntersect: top4Eligible ? Math.round(top4SumIntersect / top4Eligible * 100) / 100 : null,
       },
     };
   }
