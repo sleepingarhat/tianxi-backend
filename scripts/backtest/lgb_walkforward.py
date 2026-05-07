@@ -49,9 +49,6 @@ FEATURE_COLS = [
         # Stage 5: track-condition specialization
         "jg_starts", "jg_top3",     # jockey × going
         "tg_starts", "tg_top3",     # trainer × going
-      # Stage B: race-pace from running_position history
-      "style_score", "closer_index", "style_n",
-      "pace_fit", "front_pressure", "race_avg_style", "style_dist_inter",
       # going_code is appended below as a categorical feature.
   ]
 
