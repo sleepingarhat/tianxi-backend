@@ -49,9 +49,6 @@ FEATURE_COLS = [
         # Stage 5: track-condition specialization
         "jg_starts", "jg_top3",     # jockey × going
         "tg_starts", "tg_top3",     # trainer × going
-      # Stage A: horse-specific recency (last-N rich signals)
-      "last_pos", "last_margin_norm", "last_class_diff", "last_dist_diff",
-      "days_since_best", "recent_top3_streak", "runs_30d", "runs_90d", "peak_pos_last5",
       # going_code is appended below as a categorical feature.
   ]
 
