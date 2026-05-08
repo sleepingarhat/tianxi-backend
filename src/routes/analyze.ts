@@ -1685,6 +1685,7 @@ analyzeRoutes.get('/factors', (c) => {
                   let totalRaces = 0, totalTop1Hits = 0, totalTop3AnyHits = 0, totalTop3Intersect = 0;
             let totalQuinella = 0, totalQp = 0, totalTrio = 0, totalTierce = 0;
             let totalFirst4 = 0, totalFirst4Eligible = 0;
+            let totalTop4Intersect = 0, totalTop4Eligible = 0;
             const perMeeting: any[] = [];
             const errors: any[] = [];
             for (const m of meetingDates) {
@@ -1712,6 +1713,8 @@ analyzeRoutes.get('/factors', (c) => {
                 totalTierce += s.tierceHits ?? 0;
                 totalFirst4 += s.first4Hits ?? 0;
                 totalFirst4Eligible += s.first4Eligible ?? 0;
+                totalTop4Intersect += s.top4SumIntersect ?? 0;
+                totalTop4Eligible += s.top4Eligible ?? 0;
               } catch (e: any) { errors.push({date: m.date, error: e?.message || String(e)}); }
             }
             const rRate = (n: number, d: number) => d ? Math.round(n / d * 1000) / 10 : null;
@@ -1728,6 +1731,8 @@ analyzeRoutes.get('/factors', (c) => {
               trioHitRate: rRate(totalTrio, totalRaces),
               tierceHitRate: rRate(totalTierce, totalRaces),
               first4HitRate: rRate(totalFirst4, totalFirst4Eligible),
+              top4AvgIntersect: totalTop4Eligible ? Math.round(totalTop4Intersect / totalTop4Eligible * 100) / 100 : null,
+              top4Eligible: totalTop4Eligible,
               top1Hits: totalTop1Hits, top3AnyHits: totalTop3AnyHits,
               quinellaHits: totalQuinella, qpHits: totalQp,
               trioHits: totalTrio, tierceHits: totalTierce,
