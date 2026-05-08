@@ -1694,7 +1694,7 @@ analyzeRoutes.get('/factors', (c) => {
                 // Falls back to live compute (and back-fills cache) when row missing
                 // or has stale Stage-4a shape (no quinellaHits field).
                 let r: any = await readHitRateCache(db, m.date, engine);
-                if (!r?.summary || r.summary.quinellaHits === undefined) {
+                if (!r?.summary || r.summary.quinellaHits === undefined || r.summary.top4SumIntersect === undefined) {
                   const computed = await computeHitRateStats(db, m.date, engine);
                   if ('error' in computed) { errors.push({date: m.date, error: computed.error}); continue; }
                   await writeHitRateCache(db, m.date, engine, computed).catch(() => {});
