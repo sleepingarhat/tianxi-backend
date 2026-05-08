@@ -221,7 +221,6 @@ def main() -> int:
             "elo_top3_hit_rate":    rate("elo_top3_hit"),
             "market_top1_hit_rate": rate("market_top1_hit"),
         },
-        "profitability": profitability,
         "feature_importance_gain": (
             dict(zip(feat_cols,
                      booster.feature_importance(importance_type="gain").tolist()))
