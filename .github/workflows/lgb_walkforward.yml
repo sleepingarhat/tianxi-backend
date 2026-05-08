@@ -156,15 +156,12 @@ jobs:
             --out=features.csv
           echo "feature rows (incl header): $(wc -l < features.csv)"
           head -2 features.csv
-          echo "dividend rows (incl header): $(wc -l < features.dividends.csv)"
-          head -3 features.dividends.csv
 
       - name: Walk-forward LGB
         working-directory: tianxi-backend
         run: |
           python scripts/backtest/lgb_walkforward.py \
             --features features.csv \
-            --dividends features.dividends.csv \
             --out results.json \
             --min-train-races ${{ inputs.min_train_races }} \
             --retrain-every-races ${{ inputs.retrain_every }} \
@@ -190,6 +187,5 @@ jobs:
           path: |
             tianxi-backend/results.json
             tianxi-backend/features.csv
-            tianxi-backend/features.dividends.csv
             tianxi-backend/lgb_stdout.txt
           retention-days: 14
