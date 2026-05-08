@@ -287,7 +287,6 @@
   type RunnerRow = {
     race_id: string; horse_id: string; jockey_id: string | null; trainer_id: string | null;
     finishing_position: number; draw: number | null; actual_weight: number | null; win_odds: number | null;
-    horse_number: number | null;
   };
 
   const races = db.prepare(`
@@ -301,7 +300,7 @@
 
   const qRunners = db.prepare(`
     SELECT race_id, horse_id, jockey_id, trainer_id, finishing_position,
-           draw, actual_weight, win_odds, horse_number
+           draw, actual_weight, win_odds
       FROM race_results
      WHERE race_id = ?
        AND finishing_position BETWEEN 1 AND 98`);
@@ -311,7 +310,7 @@
 
   const HEADER = [
       'race_id','race_date','venue','race_no','distance','going','field_size',
-      'horse_id','horse_number','jockey_id','trainer_id','draw','actual_weight','win_odds',
+      'horse_id','jockey_id','trainer_id','draw','actual_weight','win_odds',
       'h_elo','j_elo','t_elo','days_since_last',
       'dist_starts','dist_top3','going_starts','going_top3',
       'draw_starts','draw_top3','combo_starts','combo_top3','weight_avg5',
@@ -410,7 +409,7 @@
 
       const row = [
           meta.id, meta.date, meta.venue, meta.race_number, meta.distance, meta.going, fieldSize,
-          r.horse_id, r.horse_number, r.jockey_id, r.trainer_id, r.draw, r.actual_weight, r.win_odds,
+          r.horse_id, r.jockey_id, r.trainer_id, r.draw, r.actual_weight, r.win_odds,
           hElo, jElo, tElo, daysSince,
           dF?.starts ?? 0, dF?.top3 ?? 0, gF?.starts ?? 0, gF?.top3 ?? 0,
           drawF?.starts ?? 0, drawF?.top3 ?? 0, cF?.starts ?? 0, cF?.top3 ?? 0, wF?.avg_w ?? null,
@@ -430,24 +429,5 @@
   }
   flush();
   console.error(`[dump-features] done: ${written} rows × ${HEADER.length} cols → ${OUT}`);
-
-  // ── Stage C: dump dividends for the same race window so backtest can score profitability ──
-  const DIV_OUT = OUT.replace(/\.csv$/i, '') + '.dividends.csv';
-  const qDiv = db.prepare(`
-    SELECT d.race_id AS race_id, d.pool_type AS pool_type, d.combination AS combination, d.dividend AS dividend
-      FROM dividends d
-      JOIN races r ON r.id = d.race_id
-      JOIN race_meetings rm ON rm.id = r.meeting_id
-     WHERE rm.date BETWEEN ? AND ?
-       AND d.dividend IS NOT NULL`);
-  const divRows = qDiv.all(FROM, TO) as { race_id: string; pool_type: string; combination: string | null; dividend: number }[];
-  const divHeader = ['race_id', 'pool_type', 'combination', 'dividend'];
-  const divLines = [divHeader.join(',')];
-  for (const d of divRows) {
-    divLines.push([d.race_id, d.pool_type, d.combination ?? '', d.dividend].map(csv).join(','));
-  }
-  writeFileSync(DIV_OUT, divLines.join('\n') + '\n');
-  console.error(`[dump-features] dividends: ${divRows.length} rows → ${DIV_OUT}`);
-
   db.close();
   
