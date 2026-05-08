@@ -15,6 +15,8 @@
   // @ts-ignore
   import { HorseRacingAPI } from 'hkjc-api';
   import { entryId } from './ingest/lib/ids.js';
+    import { ensureSchema } from './ingest/lib/db.js';
+    import { resolve as resolvePath } from 'node:path';
 
   function arg(name: string, fallback = ''): string {
     const hit = process.argv.find(a => a.startsWith(`--${name}=`));
@@ -82,6 +84,14 @@
 
     const db = new Database(dbPath);
     db.exec('PRAGMA foreign_keys = OFF;'); // scratch DB: FK off, push-delta handles referential ordering
+
+    // Ensure schema exists (safe to re-run; handles cache-miss / fresh-DB scenario)
+    const schemaDir = resolvePath(process.cwd(), 'src', 'db');
+    ensureSchema(db, [
+      resolvePath(schemaDir, 'schema.sql'),
+      resolvePath(schemaDir, 'schema_v2.sql'),
+      resolvePath(schemaDir, 'schema_silks.sql'),
+    ]);
 
     const deleteSentinels = db.prepare(
       'DELETE FROM entries_upcoming WHERE race_date = ? AND venue = ? AND race_number = 0',
