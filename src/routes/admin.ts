@@ -982,7 +982,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
 
     <h2>即日賽事全因子預測</h2>
     <div class="actions-row">
-      <button class="tp-run" id="btnTodayPredict" onclick="runTodayPredictions()">▶ 運算即日賽事全因子預測（ELO v1.2 + 7 因子）</button>
+      <button class="tp-run" id="btnTodayPredict" onclick="runTodayPredictions()">▶ 運算即日賽事全因子預測（ELO v1.2 + 8 因子）</button>
       <span id="todayPredictStatus" style="font-size:12px;color:var(--mut)"></span>
     </div>
     <div id="todayPredictResults"></div>
@@ -1206,6 +1206,9 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
           + tile('Trio 三重彩', d.trioHitRate, d.trioHits, d.racesEvaluated, 5, 1)
           + tile('Tierce 3T', d.tierceHitRate, d.tierceHits, d.racesEvaluated, 1.5, 0.3)
           + tile('First 4', d.first4HitRate, d.first4Hits, d.first4Eligible, 1, 0.2)
+          + '<div><div style="font-size:10px;color:var(--mut);text-transform:uppercase;letter-spacing:.5px">首/次/三/四選平均命中</div>'
+            + '<div style="font-size:20px;font-weight:700;font-variant-numeric:tabular-nums">' + (d.top4AvgIntersect != null ? d.top4AvgIntersect.toFixed(2) : '—') + '<span style="font-size:12px;color:var(--mut)"> / 4</span></div>'
+            + '<div style="font-size:10px;color:var(--mut)">' + (d.top4Eligible || 0) + ' 場可評</div></div>'
           + '<div><div style="font-size:10px;color:var(--mut);text-transform:uppercase;letter-spacing:.5px">Top 3 平均交集</div>'
             + '<div style="font-size:20px;font-weight:700;font-variant-numeric:tabular-nums">' + (d.top3AvgIntersect != null ? d.top3AvgIntersect.toFixed(2) : '—') + '<span style="font-size:12px;color:var(--mut)"> / 3</span></div></div>'
         + (d.perMeeting && d.perMeeting.length ? '<div style="margin-left:auto;flex:1;min-width:280px"><div style="font-size:10px;color:var(--mut);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">逐場日 (Top1% / Top3任一%)</div>'
