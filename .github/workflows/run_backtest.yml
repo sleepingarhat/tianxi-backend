@@ -2,6 +2,11 @@ name: Run backtest report
 
 on:
   workflow_dispatch:
+    inputs:
+      date:
+        description: "YYYY-MM-DD (blank = latest)"
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -12,30 +17,25 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-
-      - name: Diff diagnostic
+      - name: Pure-qimen day report
         env:
           BASE: "https://tianxi-backend.tianxi-entertainment.workers.dev"
+          DATE: "${{ inputs.date }}"
         run: |
           set +e
           mkdir -p reports
-          OUT="reports/latest-backtest.md"
+          OUT="reports/qimen-only-day.md"
           : > "$OUT"
-          echo "# Backtest DIFF diagnostic @ $(date -u +%FT%TZ)" >> "$OUT"
+          echo "# Pure Qimen one-day backtest @ $(date -u +%FT%TZ)" >> "$OUT"
           echo "" >> "$OUT"
-          echo "## /backtest-diff" >> "$OUT"
-          echo "\`\`\`json" >> "$OUT"
-          curl -sS --max-time 60 "$BASE/api/analyze/backtest-diff" | python3 -m json.tool >> "$OUT" 2>&1
-          echo "\`\`\`" >> "$OUT"
-          echo "" >> "$OUT"
-          echo "## /backtest-report (full)" >> "$OUT"
-          curl -sS --max-time 120 "$BASE/api/analyze/backtest-report" >> "$OUT" 2>&1
+          if [ -n "$DATE" ]; then URL="$BASE/api/analyze/qimen-only-day?date=$DATE"; else URL="$BASE/api/analyze/qimen-only-day"; fi
+          echo "GET $URL" >> "$OUT"; echo "" >> "$OUT"
+          curl -sS --max-time 60 "$URL" | python3 -m json.tool >> "$OUT" 2>&1
           cat "$OUT" >> "$GITHUB_STEP_SUMMARY"
-
       - name: Commit
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add reports/latest-backtest.md
-          git commit -m "diag: backtest diff" || echo "no changes"
+          git add reports/qimen-only-day.md
+          git commit -m "report: pure qimen one-day" || echo "no changes"
           git push
