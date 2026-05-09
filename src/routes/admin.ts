@@ -999,7 +999,6 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
       </label>
       <span id="accStatus" style="margin-left:10px;font-size:12px;color:var(--mut)"></span>
       <button onclick="triggerBackfill()" style="margin-left:10px;padding:3px 10px;font-size:12px">🔄 立即回填賽果</button>
-        <button onclick="triggerBacktest()" style="margin-left:6px;padding:3px 10px;font-size:12px;background:#e8f4ff">🕰️ 跑 90 日歷史回測</button>
     </div>
     <div id="predAccuracyResults"></div>
 
@@ -1621,36 +1620,6 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
         statusEl.textContent = '錯誤：' + e.message;
       }
     }
-    async function triggerBacktest() {
-        var statusEl = document.getElementById('accStatus');
-        if (!confirm('將跑過去 90 日所有賽事的歷史回測（baseline-bt + qimen-bt 兩個變體寫入 prediction_log）。將逐日處理，預計 1-3 分鐘。確定？')) return;
-        statusEl.textContent = '取得日期清單…';
-        try {
-          var listRes = await fetch('/api/analyze/backtest-dates?days=90');
-          var listData = await listRes.json();
-          if (listData.error || !listData.dates) { statusEl.textContent = '錯誤：取不到日期清單 ' + (listData.detail||''); return; }
-          var dates = listData.dates;
-          if (!dates.length) { statusEl.textContent = '90 日內無賽事'; return; }
-          var total = dates.length, done = 0, races = 0, horses = 0, baseRows = 0, qimenRows = 0, joined = 0, errors = 0;
-          var t0 = Date.now();
-          for (var i = 0; i < dates.length; i++) {
-            var d = dates[i];
-            statusEl.textContent = '回測中 ' + (i+1) + '/' + total + ' (' + d + ')…';
-            try {
-              var res = await fetch('/api/analyze/run-backtest-day?date=' + d, { method: 'POST' });
-              var data = await res.json();
-              if (data.error) { errors++; }
-              else { races += data.races||0; horses += data.horses||0; baseRows += data.baselineRows||0; qimenRows += data.qimenRows||0; joined += data.joined||0; }
-            } catch (e) { errors++; }
-            done++;
-          }
-          var secs = Math.round((Date.now()-t0)/1000);
-          statusEl.textContent = '完成：' + done + '/' + total + ' 日 / ' + races + ' 場 / ' + horses + ' 馬 → baseline ' + baseRows + ' / qimen ' + qimenRows + ' / joined ' + joined + (errors?' / 錯誤 '+errors:'') + ' (' + secs + 's)';
-          await loadPredictionAccuracy();
-        } catch (e) {
-          statusEl.textContent = '錯誤：' + e.message;
-        }
-      }
 
     function renderTodayPredictions(data) {
       var el = document.getElementById('todayPredictResults');
