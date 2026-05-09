@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+  import { paipan, qimenScoreForHorse } from '../lib/qimen';
 import type { Env, AnalyzeRequest } from '../types';
 import { runTimesFMAnalysis } from '../services/timesfm';
 import { generateAnalysisSummary } from '../services/ai';
@@ -1817,6 +1818,64 @@ analyzeRoutes.get('/factors', (c) => {
         // Phase A: write each prediction to prediction_log for back-test (idempotent).
         const logResult = await writePredictionLog(db, payload, 'baseline').catch((e) => ({ rows: 0, error: String(e?.message ?? e) }));
         payload.predictionLog = logResult;
+
+        // === Phase B: 奇門遁甲 variant (parallel A/B for back-test) ===
+        try {
+          const qimenPayload = JSON.parse(JSON.stringify(payload));
+          qimenPayload.qimenEnabled = true;
+          // 排盤 once per race-day (use first race post-time if available, else 13:00 HKT)
+          const dayStr: string = qimenPayload.date;
+          const baseRaceTime = new Date(`${dayStr}T05:00:00Z`); // 13:00 HKT default
+          const dayPaipan = paipan(baseRaceTime);
+          qimenPayload.qimenSummary = {
+            ju: dayPaipan.ju,
+            yang: dayPaipan.yang,
+            zhiFu: dayPaipan.zhiFu,
+            zhiShi: dayPaipan.zhiShi,
+            palaceScores: dayPaipan.palaceScores,
+          };
+          for (const race of (qimenPayload.races ?? [])) {
+            if (!race?.picks?.length) continue;
+            // Compute qimen score per horse + add to finalScore
+            for (const p of race.picks) {
+              const q = qimenScoreForHorse(dayPaipan, {
+                raceTime: baseRaceTime,
+                horseNumber: p.horseNumber ?? 0,
+                draw: p.draw ?? 0,
+                horseNameCh: p.nameCh ?? '',
+                jockeyNameCh: p.jockeyCh ?? '',
+              });
+              p.qimenScore = q.qimenScore;
+              p.qimenDetails = q.details;
+              p.factorBonus = (p.factorBonus ?? 0) + q.qimenScore;
+              p.finalScore = (p.finalScore ?? p.eloComposite ?? 0) + q.qimenScore;
+              p._score = (p._score ?? 0) + q.qimenScore / 100;
+            }
+            // Re-sort, re-rank, re-softmax
+            race.picks.sort((a: any, b: any) => (b._score ?? 0) - (a._score ?? 0));
+            // Re-compute pWin / pTop3 via softmax over finalScore (same scheme as baseline)
+            const scores = race.picks.map((p: any) => p.finalScore ?? 0);
+            const maxS = Math.max(...scores);
+            const T = 8; // softmax temperature (rough match to baseline)
+            const exps = scores.map((s: number) => Math.exp((s - maxS) / T));
+            const sumExp = exps.reduce((a: number, b: number) => a + b, 0) || 1;
+            for (let i = 0; i < race.picks.length; i++) {
+              race.picks[i].rank = i + 1;
+              race.picks[i].pWin = Math.round((exps[i] / sumExp) * 1000) / 1000;
+            }
+            // pTop3: simple normalized inverse-rank fallback (re-rank within race)
+            const top3Sum = race.picks.slice(0, 3).reduce((a: number, p: any) => a + (p.pWin ?? 0), 0);
+            for (const p of race.picks) {
+              // approximate pTop3 ~ 3*pWin capped at 0.95
+              p.pTop3 = Math.min(0.95, Math.round((p.pWin ?? 0) * 3 * 1000) / 1000);
+            }
+          }
+          const qLog = await writePredictionLog(db, qimenPayload, 'qimen').catch((e) => ({ rows: 0, error: String(e?.message ?? e) }));
+          payload.qimenSummary = qimenPayload.qimenSummary;
+          payload.qimenLog = qLog;
+        } catch (qErr: any) {
+          payload.qimenError = String(qErr?.message ?? qErr);
+        }
         await writeRaceDayReportCache(db, targetDate, engine, meeting.venue, payload, computeMs).catch(() => {});
         return payload;
       }
