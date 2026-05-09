@@ -1,177 +1,4 @@
-import {
-      // ── 梅花解讀 helper ───────────────────────────────────────
-      function buildMeihuaReason(m: any) {
-        const parts: string[] = [];
-        parts.push(`上卦〔${m.upperTrigram}〕(馬號+檔位=${m.upperSum}) ／ 下卦〔${m.lowerTrigram}〕(馬名筆畫${m.horseStrokes}+騎師筆畫${m.jockeyStrokes}=${m.lowerSum})`);
-        parts.push(`動爻：第${m.dongLine}爻 (時辰地支${m.hourZhi})`);
-        parts.push(`本卦：${m.benGuaName}(${m.benGuaNum}) → ${m.benGuaScore >= 0 ? '+' : ''}${m.benGuaScore}`);
-        parts.push(`變卦：${m.bianGuaName}(${m.bianGuaNum}) → ${m.bianGuaScore >= 0 ? '+' : ''}${m.bianGuaScore}`);
-        parts.push(`體用：體〔${m.ti}${m.dongLine<=3?'(上卦)':'(下卦)'}〕 ↔ 用〔${m.yong}${m.dongLine<=3?'(下卦)':'(上卦)'}〕 → ${m.tiyongRelation} (${m.tiyongMod >= 0 ? '+' : ''}${m.tiyongMod})`);
-        const total = m.meihuaScore ?? 0;
-        const verdict = total >= 3 ? '★★★ 易卦大旺：本卦變卦俱吉，體用相生，宜重注'
-                      : total >= 1.5 ? '★★ 易卦偏旺：吉氣略勝'
-                      : total >= 0 ? '★ 易卦平和：吉凶互見'
-                      : total >= -1.5 ? '✗ 易卦偏弱：凶氣略勝'
-                      : '✗✗ 易卦大凶：本卦變卦俱凶，不宜下注';
-        return { verdict, breakdown: parts, totalScore: total };
-      }
-
-      // GET /api/analyze/meihua-only-day?date=YYYY-MM-DD&reasoning=1
-      analyzeRoutes.get('/meihua-only-day', async (c) => {
-        try {
-          const db = c.env.DB;
-          const reasoning = c.req.query('reasoning') === '1';
-          let date = c.req.query('date') || '';
-          if (!date) {
-            const latest = await db.prepare(`SELECT m.date FROM race_meetings m JOIN races r ON r.meeting_id=m.id JOIN race_results rr ON rr.race_id=r.id WHERE rr.finishing_position IS NOT NULL ORDER BY m.date DESC LIMIT 1`).first<{date:string}>();
-            if (!latest?.date) return c.json({ error: 'no race day with results' }, 404);
-            date = latest.date;
-          }
-          const meeting = await db.prepare(`SELECT * FROM race_meetings WHERE date = ? LIMIT 1`).bind(date).first<any>();
-          if (!meeting) return c.json({ error: 'no meeting on date', date }, 404);
-          const { results: races } = await db.prepare(`SELECT id, race_number, distance, going FROM races WHERE meeting_id = ? AND race_number > 0 ORDER BY race_number`).bind(meeting.id).all<any>();
-          if (!races?.length) return c.json({ error: 'no races', date }, 404);
-          const raceIds = races.map((r: any) => r.id);
-          const ph = raceIds.map(() => '?').join(',');
-          const { results: entries } = await db.prepare(
-            `SELECT rr.race_id, rr.horse_number, rr.draw, rr.finishing_position, rr.win_odds,
-                    h.name_ch as horse_name_ch, j.name_ch as jockey_name_ch
-               FROM race_results rr LEFT JOIN horses h ON h.id = rr.horse_id LEFT JOIN jockeys j ON j.id = rr.jockey_id
-              WHERE rr.race_id IN (${ph})`
-          ).bind(...raceIds).all<any>();
-
-          const byRace = new Map<string, any[]>();
-          for (const e of entries ?? []) { if (!byRace.has(e.race_id)) byRace.set(e.race_id, []); byRace.get(e.race_id)!.push(e); }
-
-          const raceReports: any[] = [];
-          let top1Hits = 0, top3AnyHits = 0, top3IntersectSum = 0, racesEvaluated = 0;
-          const raceTime = new Date(`${date}T05:00:00Z`); // ~13:00 HK 午時
-
-          for (const race of races) {
-            const raceEntries = byRace.get(race.id) ?? [];
-            if (!raceEntries.length) continue;
-            const picks = raceEntries.map((e: any) => {
-              const m = meihuaScoreForHorse({
-                raceTime, horseNumber: e.horse_number ?? 0, draw: e.draw ?? 0,
-                horseNameCh: e.horse_name_ch ?? '', jockeyNameCh: e.jockey_name_ch ?? '',
-              });
-              return { horseNumber: e.horse_number, draw: e.draw, nameCh: e.horse_name_ch, jockeyCh: e.jockey_name_ch,
-                       meihuaScore: m.meihuaScore, meihuaDetails: m,
-                       actualFinish: e.finishing_position, winOdds: e.win_odds };
-            });
-            picks.sort((a: any, b: any) => (b.meihuaScore ?? 0) - (a.meihuaScore ?? 0));
-            picks.forEach((p: any, i: number) => { p.rank = i + 1; });
-
-            const top3pred = picks.slice(0,3).map((p:any)=>p.horseNumber);
-            const top3act = picks.filter((p:any)=>p.actualFinish&&p.actualFinish<=3).map((p:any)=>p.horseNumber);
-            const intersect = top3pred.filter((h:number)=>top3act.includes(h)).length;
-            const top1Hit = picks[0]?.actualFinish === 1;
-            racesEvaluated++;
-            if (top1Hit) top1Hits++;
-            if (intersect>0) top3AnyHits++;
-            top3IntersectSum += intersect;
-
-            raceReports.push({
-              raceNumber: race.race_number, distance: race.distance, going: race.going,
-              meihuaTop3: picks.slice(0, 3).map((p: any) => ({
-                rank: p.rank, horseNumber: p.horseNumber, nameCh: p.nameCh, jockeyCh: p.jockeyCh,
-                meihuaScore: p.meihuaScore, actualFinish: p.actualFinish, winOdds: p.winOdds,
-                ...(reasoning ? { reason: buildMeihuaReason(p.meihuaDetails) } : {}),
-              })),
-              actualTop3: picks.filter((p: any) => p.actualFinish && p.actualFinish <= 3)
-                                .sort((a: any, b: any) => a.actualFinish - b.actualFinish)
-                                .map((p: any) => ({ pos: p.actualFinish, horseNumber: p.horseNumber, nameCh: p.nameCh, meihuaRank: p.rank, meihuaScore: p.meihuaScore, winOdds: p.winOdds })),
-              top1Hit, top3AnyHit: intersect>0, top3Intersect: intersect,
-            });
-          }
-
-          return c.json({
-            date,
-            summary: {
-              racesEvaluated,
-              top1HitRate: racesEvaluated ? Math.round(top1Hits / racesEvaluated * 1000) / 10 : null,
-              top3AnyHitRate: racesEvaluated ? Math.round(top3AnyHits / racesEvaluated * 1000) / 10 : null,
-              top3AvgIntersect: racesEvaluated ? Math.round(top3IntersectSum / racesEvaluated * 100) / 100 : null,
-              top1Hits, top3AnyHits, top3IntersectSum,
-            },
-            races: raceReports, generatedAt: new Date().toISOString(),
-          });
-        } catch (err: any) {
-          return c.json({ error: 'meihua-only-day failed', detail: err?.message ?? String(err) }, 500);
-        }
-      });
-
-      // GET /api/analyze/meihua-only-range?days=30
-      analyzeRoutes.get('/meihua-only-range', async (c) => {
-        try {
-          const db = c.env.DB;
-          const days = Math.min(120, Math.max(1, Number(c.req.query('days') ?? 30)));
-          const { results: dayRows } = await db.prepare(
-            `SELECT DISTINCT m.date FROM race_meetings m JOIN races r ON r.meeting_id=m.id JOIN race_results rr ON rr.race_id=r.id
-              WHERE rr.finishing_position IS NOT NULL AND m.date >= date('now','-' || ? || ' days')
-              ORDER BY m.date DESC`
-          ).bind(days).all<{date:string}>();
-          const allDates = (dayRows ?? []).map(r => r.date);
-          if (!allDates.length) return c.json({ error: 'no race days', days }, 404);
-
-          let totalRaces = 0, totalTop1 = 0, totalTop3Any = 0, totalIntersect = 0;
-          const perDay: any[] = [];
-
-          for (const date of allDates) {
-            const meeting = await db.prepare(`SELECT * FROM race_meetings WHERE date = ? LIMIT 1`).bind(date).first<any>();
-            if (!meeting) continue;
-            const { results: races } = await db.prepare(`SELECT id, race_number FROM races WHERE meeting_id = ? AND race_number > 0`).bind(meeting.id).all<any>();
-            if (!races?.length) continue;
-            const raceIds = races.map((r: any) => r.id);
-            const ph = raceIds.map(() => '?').join(',');
-            const { results: entries } = await db.prepare(
-              `SELECT rr.race_id, rr.horse_number, rr.draw, rr.finishing_position,
-                      h.name_ch as horse_name_ch, j.name_ch as jockey_name_ch
-                 FROM race_results rr LEFT JOIN horses h ON h.id = rr.horse_id LEFT JOIN jockeys j ON j.id = rr.jockey_id
-                WHERE rr.race_id IN (${ph})`
-            ).bind(...raceIds).all<any>();
-            const byRace = new Map<string, any[]>();
-            for (const e of entries ?? []) { if (!byRace.has(e.race_id)) byRace.set(e.race_id, []); byRace.get(e.race_id)!.push(e); }
-            const raceTime = new Date(`${date}T05:00:00Z`);
-
-            let dRaces=0, dT1=0, dT3=0, dIs=0;
-            for (const race of races) {
-              const raceEntries = byRace.get(race.id) ?? [];
-              if (!raceEntries.length) continue;
-              const picks = raceEntries.map((e: any) => {
-                const m = meihuaScoreForHorse({ raceTime, horseNumber: e.horse_number ?? 0, draw: e.draw ?? 0,
-                  horseNameCh: e.horse_name_ch ?? '', jockeyNameCh: e.jockey_name_ch ?? '' });
-                return { horseNumber: e.horse_number, meihuaScore: m.meihuaScore, actualFinish: e.finishing_position };
-              });
-              picks.sort((a: any, b: any) => (b.meihuaScore ?? 0) - (a.meihuaScore ?? 0));
-              const top3pred = picks.slice(0,3).map((p:any)=>p.horseNumber);
-              const top3act = picks.filter((p:any)=>p.actualFinish&&p.actualFinish<=3).map((p:any)=>p.horseNumber);
-              const inter = top3pred.filter((h:number)=>top3act.includes(h)).length;
-              dRaces++;
-              if (picks[0]?.actualFinish === 1) dT1++;
-              if (inter > 0) dT3++;
-              dIs += inter;
-            }
-            totalRaces += dRaces; totalTop1 += dT1; totalTop3Any += dT3; totalIntersect += dIs;
-            perDay.push({ date, races: dRaces, top1: dT1, top3Any: dT3, intersect: dIs });
-          }
-
-          return c.json({
-            rangeDays: days, datesEvaluated: allDates.length, dates: allDates,
-            summary: {
-              totalRaces, top1Hits: totalTop1, top3AnyHits: totalTop3Any, top3IntersectSum: totalIntersect,
-              top1HitRate: totalRaces ? Math.round(totalTop1/totalRaces*1000)/10 : null,
-              top3AnyHitRate: totalRaces ? Math.round(totalTop3Any/totalRaces*1000)/10 : null,
-              top3AvgIntersect: totalRaces ? Math.round(totalIntersect/totalRaces*100)/100 : null,
-            },
-            perDay, generatedAt: new Date().toISOString(),
-          });
-        } catch (err: any) {
-          return c.json({ error: 'meihua-only-range failed', detail: err?.message ?? String(err) }, 500);
-        }
-      });
-
-   Hono } from 'hono';
+import { Hono } from 'hono';
   import { paipan, qimenScoreForHorse } from '../lib/qimen';
 import type { Env, AnalyzeRequest } from '../types';
 import { runTimesFMAnalysis } from '../services/timesfm';
@@ -2887,3 +2714,176 @@ analyzeRoutes.get('/factors', (c) => {
           return c.json({ error: 'hit-rate-rollup failed', detail: err?.message ?? String(err) }, 500);
         }
       });
+      // ── 梅花解讀 helper ───────────────────────────────────────
+      function buildMeihuaReason(m: any) {
+        const parts: string[] = [];
+        parts.push(`上卦〔${m.upperTrigram}〕(馬號+檔位=${m.upperSum}) ／ 下卦〔${m.lowerTrigram}〕(馬名筆畫${m.horseStrokes}+騎師筆畫${m.jockeyStrokes}=${m.lowerSum})`);
+        parts.push(`動爻：第${m.dongLine}爻 (時辰地支${m.hourZhi})`);
+        parts.push(`本卦：${m.benGuaName}(${m.benGuaNum}) → ${m.benGuaScore >= 0 ? '+' : ''}${m.benGuaScore}`);
+        parts.push(`變卦：${m.bianGuaName}(${m.bianGuaNum}) → ${m.bianGuaScore >= 0 ? '+' : ''}${m.bianGuaScore}`);
+        parts.push(`體用：體〔${m.ti}${m.dongLine<=3?'(上卦)':'(下卦)'}〕 ↔ 用〔${m.yong}${m.dongLine<=3?'(下卦)':'(上卦)'}〕 → ${m.tiyongRelation} (${m.tiyongMod >= 0 ? '+' : ''}${m.tiyongMod})`);
+        const total = m.meihuaScore ?? 0;
+        const verdict = total >= 3 ? '★★★ 易卦大旺：本卦變卦俱吉，體用相生，宜重注'
+                      : total >= 1.5 ? '★★ 易卦偏旺：吉氣略勝'
+                      : total >= 0 ? '★ 易卦平和：吉凶互見'
+                      : total >= -1.5 ? '✗ 易卦偏弱：凶氣略勝'
+                      : '✗✗ 易卦大凶：本卦變卦俱凶，不宜下注';
+        return { verdict, breakdown: parts, totalScore: total };
+      }
+
+      // GET /api/analyze/meihua-only-day?date=YYYY-MM-DD&reasoning=1
+      analyzeRoutes.get('/meihua-only-day', async (c) => {
+        try {
+          const db = c.env.DB;
+          const reasoning = c.req.query('reasoning') === '1';
+          let date = c.req.query('date') || '';
+          if (!date) {
+            const latest = await db.prepare(`SELECT m.date FROM race_meetings m JOIN races r ON r.meeting_id=m.id JOIN race_results rr ON rr.race_id=r.id WHERE rr.finishing_position IS NOT NULL ORDER BY m.date DESC LIMIT 1`).first<{date:string}>();
+            if (!latest?.date) return c.json({ error: 'no race day with results' }, 404);
+            date = latest.date;
+          }
+          const meeting = await db.prepare(`SELECT * FROM race_meetings WHERE date = ? LIMIT 1`).bind(date).first<any>();
+          if (!meeting) return c.json({ error: 'no meeting on date', date }, 404);
+          const { results: races } = await db.prepare(`SELECT id, race_number, distance, going FROM races WHERE meeting_id = ? AND race_number > 0 ORDER BY race_number`).bind(meeting.id).all<any>();
+          if (!races?.length) return c.json({ error: 'no races', date }, 404);
+          const raceIds = races.map((r: any) => r.id);
+          const ph = raceIds.map(() => '?').join(',');
+          const { results: entries } = await db.prepare(
+            `SELECT rr.race_id, rr.horse_number, rr.draw, rr.finishing_position, rr.win_odds,
+                    h.name_ch as horse_name_ch, j.name_ch as jockey_name_ch
+               FROM race_results rr LEFT JOIN horses h ON h.id = rr.horse_id LEFT JOIN jockeys j ON j.id = rr.jockey_id
+              WHERE rr.race_id IN (${ph})`
+          ).bind(...raceIds).all<any>();
+
+          const byRace = new Map<string, any[]>();
+          for (const e of entries ?? []) { if (!byRace.has(e.race_id)) byRace.set(e.race_id, []); byRace.get(e.race_id)!.push(e); }
+
+          const raceReports: any[] = [];
+          let top1Hits = 0, top3AnyHits = 0, top3IntersectSum = 0, racesEvaluated = 0;
+          const raceTime = new Date(`${date}T05:00:00Z`);
+
+          for (const race of races) {
+            const raceEntries = byRace.get(race.id) ?? [];
+            if (!raceEntries.length) continue;
+            const picks = raceEntries.map((e: any) => {
+              const m = meihuaScoreForHorse({
+                raceTime, horseNumber: e.horse_number ?? 0, draw: e.draw ?? 0,
+                horseNameCh: e.horse_name_ch ?? '', jockeyNameCh: e.jockey_name_ch ?? '',
+              });
+              return { horseNumber: e.horse_number, draw: e.draw, nameCh: e.horse_name_ch, jockeyCh: e.jockey_name_ch,
+                       meihuaScore: m.meihuaScore, meihuaDetails: m,
+                       actualFinish: e.finishing_position, winOdds: e.win_odds };
+            });
+            picks.sort((a: any, b: any) => (b.meihuaScore ?? 0) - (a.meihuaScore ?? 0));
+            picks.forEach((p: any, i: number) => { p.rank = i + 1; });
+
+            const top3pred = picks.slice(0,3).map((p:any)=>p.horseNumber);
+            const top3act = picks.filter((p:any)=>p.actualFinish&&p.actualFinish<=3).map((p:any)=>p.horseNumber);
+            const intersect = top3pred.filter((h:number)=>top3act.includes(h)).length;
+            const top1Hit = picks[0]?.actualFinish === 1;
+            racesEvaluated++;
+            if (top1Hit) top1Hits++;
+            if (intersect>0) top3AnyHits++;
+            top3IntersectSum += intersect;
+
+            raceReports.push({
+              raceNumber: race.race_number, distance: race.distance, going: race.going,
+              meihuaTop3: picks.slice(0, 3).map((p: any) => ({
+                rank: p.rank, horseNumber: p.horseNumber, nameCh: p.nameCh, jockeyCh: p.jockeyCh,
+                meihuaScore: p.meihuaScore, actualFinish: p.actualFinish, winOdds: p.winOdds,
+                ...(reasoning ? { reason: buildMeihuaReason(p.meihuaDetails) } : {}),
+              })),
+              actualTop3: picks.filter((p: any) => p.actualFinish && p.actualFinish <= 3)
+                                .sort((a: any, b: any) => a.actualFinish - b.actualFinish)
+                                .map((p: any) => ({ pos: p.actualFinish, horseNumber: p.horseNumber, nameCh: p.nameCh, meihuaRank: p.rank, meihuaScore: p.meihuaScore, winOdds: p.winOdds })),
+              top1Hit, top3AnyHit: intersect>0, top3Intersect: intersect,
+            });
+          }
+
+          return c.json({
+            date,
+            summary: {
+              racesEvaluated,
+              top1HitRate: racesEvaluated ? Math.round(top1Hits / racesEvaluated * 1000) / 10 : null,
+              top3AnyHitRate: racesEvaluated ? Math.round(top3AnyHits / racesEvaluated * 1000) / 10 : null,
+              top3AvgIntersect: racesEvaluated ? Math.round(top3IntersectSum / racesEvaluated * 100) / 100 : null,
+              top1Hits, top3AnyHits, top3IntersectSum,
+            },
+            races: raceReports, generatedAt: new Date().toISOString(),
+          });
+        } catch (err: any) {
+          return c.json({ error: 'meihua-only-day failed', detail: err?.message ?? String(err) }, 500);
+        }
+      });
+
+      // GET /api/analyze/meihua-only-range?days=30
+      analyzeRoutes.get('/meihua-only-range', async (c) => {
+        try {
+          const db = c.env.DB;
+          const days = Math.min(120, Math.max(1, Number(c.req.query('days') ?? 30)));
+          const { results: dayRows } = await db.prepare(
+            `SELECT DISTINCT m.date FROM race_meetings m JOIN races r ON r.meeting_id=m.id JOIN race_results rr ON rr.race_id=r.id
+              WHERE rr.finishing_position IS NOT NULL AND m.date >= date('now','-' || ? || ' days')
+              ORDER BY m.date DESC`
+          ).bind(days).all<{date:string}>();
+          const allDates = (dayRows ?? []).map(r => r.date);
+          if (!allDates.length) return c.json({ error: 'no race days', days }, 404);
+
+          let totalRaces = 0, totalTop1 = 0, totalTop3Any = 0, totalIntersect = 0;
+          const perDay: any[] = [];
+
+          for (const date of allDates) {
+            const meeting = await db.prepare(`SELECT * FROM race_meetings WHERE date = ? LIMIT 1`).bind(date).first<any>();
+            if (!meeting) continue;
+            const { results: races } = await db.prepare(`SELECT id, race_number FROM races WHERE meeting_id = ? AND race_number > 0`).bind(meeting.id).all<any>();
+            if (!races?.length) continue;
+            const raceIds = races.map((r: any) => r.id);
+            const ph = raceIds.map(() => '?').join(',');
+            const { results: entries } = await db.prepare(
+              `SELECT rr.race_id, rr.horse_number, rr.draw, rr.finishing_position,
+                      h.name_ch as horse_name_ch, j.name_ch as jockey_name_ch
+                 FROM race_results rr LEFT JOIN horses h ON h.id = rr.horse_id LEFT JOIN jockeys j ON j.id = rr.jockey_id
+                WHERE rr.race_id IN (${ph})`
+            ).bind(...raceIds).all<any>();
+            const byRace = new Map<string, any[]>();
+            for (const e of entries ?? []) { if (!byRace.has(e.race_id)) byRace.set(e.race_id, []); byRace.get(e.race_id)!.push(e); }
+            const raceTime = new Date(`${date}T05:00:00Z`);
+
+            let dRaces=0, dT1=0, dT3=0, dIs=0;
+            for (const race of races) {
+              const raceEntries = byRace.get(race.id) ?? [];
+              if (!raceEntries.length) continue;
+              const picks = raceEntries.map((e: any) => {
+                const m = meihuaScoreForHorse({ raceTime, horseNumber: e.horse_number ?? 0, draw: e.draw ?? 0,
+                  horseNameCh: e.horse_name_ch ?? '', jockeyNameCh: e.jockey_name_ch ?? '' });
+                return { horseNumber: e.horse_number, meihuaScore: m.meihuaScore, actualFinish: e.finishing_position };
+              });
+              picks.sort((a: any, b: any) => (b.meihuaScore ?? 0) - (a.meihuaScore ?? 0));
+              const top3pred = picks.slice(0,3).map((p:any)=>p.horseNumber);
+              const top3act = picks.filter((p:any)=>p.actualFinish&&p.actualFinish<=3).map((p:any)=>p.horseNumber);
+              const inter = top3pred.filter((h:number)=>top3act.includes(h)).length;
+              dRaces++;
+              if (picks[0]?.actualFinish === 1) dT1++;
+              if (inter > 0) dT3++;
+              dIs += inter;
+            }
+            totalRaces += dRaces; totalTop1 += dT1; totalTop3Any += dT3; totalIntersect += dIs;
+            perDay.push({ date, races: dRaces, top1: dT1, top3Any: dT3, intersect: dIs });
+          }
+
+          return c.json({
+            rangeDays: days, datesEvaluated: allDates.length, dates: allDates,
+            summary: {
+              totalRaces, top1Hits: totalTop1, top3AnyHits: totalTop3Any, top3IntersectSum: totalIntersect,
+              top1HitRate: totalRaces ? Math.round(totalTop1/totalRaces*1000)/10 : null,
+              top3AnyHitRate: totalRaces ? Math.round(totalTop3Any/totalRaces*1000)/10 : null,
+              top3AvgIntersect: totalRaces ? Math.round(totalIntersect/totalRaces*100)/100 : null,
+            },
+            perDay, generatedAt: new Date().toISOString(),
+          });
+        } catch (err: any) {
+          return c.json({ error: 'meihua-only-range failed', detail: err?.message ?? String(err) }, 500);
+        }
+      });
+
+  
