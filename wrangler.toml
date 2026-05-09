@@ -24,10 +24,10 @@ database_id = "aad1636e-869a-43f5-aa95-4a19e3aa5517"
 
   [triggers]
   crons = [
-    "0 19 * * *",       # 03:00 HKT daily — refresh past-meeting hit-rate cache
-    "0 22 * * *",       # 06:00 HKT daily — pre-build race-day report (post-trackwork sync)
-    "0 3 * * 0,3,6",    # 11:00 HKT Sun/Wed/Sat — refresh report 1.5h before ST first race
-    "0 10 * * 3",       # 18:00 HKT Wed — refresh report 1h before HV first race
-    "0 4 * * 0,6",      # 12:00 HKT Sun/Sat — second pre-race refresh
+    "0 19 * * *",  # 03:00 HKT daily — refresh past-meeting hit-rate cache
+    "0 22 * * *",  # 06:00 HKT daily — pre-build race-day report (post-trackwork sync)
+    "0 3 * * *",   # 11:00 HKT daily — refresh report ~1.5h before ST first race
+    "0 4 * * *",   # 12:00 HKT daily — second pre-race refresh
+    "0 10 * * *",  # 18:00 HKT daily — refresh report 1h before HV first race
   ]
   
