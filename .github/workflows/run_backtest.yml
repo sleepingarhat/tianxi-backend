@@ -9,87 +9,52 @@ permissions:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
-      - name: Discover URL + fetch report
+      - name: Trigger full 90-day backtest + fetch report
         env:
-          CF_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CF_ACCOUNT_ID: "653a13852ac331972d14432741113f6f"
+          BASE: "https://tianxi-backend.tianxi-entertainment.workers.dev"
         run: |
           set +e
           mkdir -p reports
           OUT="reports/latest-backtest.md"
           : > "$OUT"
           echo "# Backtest report run @ $(date -u +%FT%TZ)" >> "$OUT"
-          echo "" >> "$OUT"
 
-          # 1. Get account subdomain via CF API
-          SUB_RESP=$(curl -sS --max-time 30 -H "Authorization: Bearer $CF_API_TOKEN" \
-            "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/workers/subdomain")
-          echo "## Subdomain API resp" >> "$OUT"
-          echo "$SUB_RESP" >> "$OUT"
-          SUB=$(echo "$SUB_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get(\"result\",{}).get(\"subdomain\",\"\"))")
-          echo "" >> "$OUT"
-          echo "Detected subdomain: [$SUB]" >> "$OUT"
+          echo "" >> "$OUT"; echo "## Initial status" >> "$OUT"
+          curl -sS --max-time 30 "$BASE/api/analyze/backtest-status" >> "$OUT" 2>&1; echo "" >> "$OUT"
 
-          # 2. List candidate URLs
-          URLS=()
-          if [ -n "$SUB" ]; then
-            URLS+=("https://tianxi-backend.$SUB.workers.dev")
-          fi
-          URLS+=("https://api.tianxi.racing")
-
-          # 3. List CF Workers domain routes too
-          echo "" >> "$OUT"
-          echo "## Worker custom domains" >> "$OUT"
-          curl -sS --max-time 30 -H "Authorization: Bearer $CF_API_TOKEN" \
-            "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/workers/domains" >> "$OUT"
-          echo "" >> "$OUT"
-
-          # 4. Try each URL for healthz then report
-          BASE=""
-          for u in "${URLS[@]}"; do
-            echo "" >> "$OUT"
-            echo "## Trying base: $u" >> "$OUT"
-            HTTP=$(curl -sS -o pa.txt -w "%{http_code}" --max-time 30 "$u/api/analyze/prediction-accuracy")
-            echo "/prediction-accuracy HTTP=$HTTP" >> "$OUT"
-            head -c 300 pa.txt >> "$OUT"; echo "" >> "$OUT"
-            if [ "$HTTP" = "200" ]; then BASE="$u"; break; fi
+          echo "" >> "$OUT"; echo "## Kick /start-backtest-bg (days=90)" >> "$OUT"
+          for verb in POST GET; do
+            for path in "/api/analyze/start-backtest-bg?days=90" "/api/analyze/start-backtest-bg" "/api/analyze/run-backtest?days=90"; do
+              echo "Try $verb $path" >> "$OUT"
+              HTTP=$(curl -sS -o kick.txt -w "%{http_code}" --max-time 60 -X $verb "$BASE$path")
+              echo "  HTTP=$HTTP" >> "$OUT"
+              head -c 500 kick.txt >> "$OUT"; echo "" >> "$OUT"
+              [ "$HTTP" = "200" ] && break 2
+            done
           done
 
-          if [ -z "$BASE" ]; then
-            echo "" >> "$OUT"
-            echo "## ✘ No reachable base URL — aborting" >> "$OUT"
-            cat "$OUT" >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-
-          echo "" >> "$OUT"
-          echo "## Using BASE=$BASE" >> "$OUT"
-
-          # 5. Fetch report (auto-runs backtest first call)
-          for attempt in 1 2 3 4 5 6 7 8; do
-            echo "" >> "$OUT"
-            echo "--- /backtest-report attempt $attempt ---" >> "$OUT"
-            HTTP=$(curl -sS -o body.txt -w "%{http_code}" --max-time 180 "$BASE/api/analyze/backtest-report")
-            BYTES=$(wc -c < body.txt 2>/dev/null || echo 0)
-            echo "HTTP=$HTTP bytes=$BYTES" >> "$OUT"
-            if [ "$HTTP" = "200" ] && [ "$BYTES" -gt 200 ]; then
-              echo "" >> "$OUT"
-              echo "## Report body" >> "$OUT"
-              cat body.txt >> "$OUT"
-              break
-            fi
-            echo "Body preview:" >> "$OUT"
-            head -c 800 body.txt >> "$OUT"; echo "" >> "$OUT"
+          echo "" >> "$OUT"; echo "## Poll status (max ~10 min)" >> "$OUT"
+          PREV_DAYS=0; STAGNANT=0
+          for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
             sleep 30
+            S=$(curl -sS --max-time 30 "$BASE/api/analyze/backtest-status")
+            DAYS=$(echo "$S" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get(\"baseline\",{}).get(\"days\",0))" 2>/dev/null || echo 0)
+            echo "[t=$((i*30))s] days=$DAYS  raw=$S" >> "$OUT"
+            if [ "$DAYS" -ge 80 ]; then echo "Reached >=80 days, stop polling" >> "$OUT"; break; fi
+            if [ "$DAYS" = "$PREV_DAYS" ]; then STAGNANT=$((STAGNANT+1)); else STAGNANT=0; fi
+            if [ "$STAGNANT" -ge 6 ] && [ "$DAYS" -gt 10 ]; then echo "Stagnant 3 min, stop polling" >> "$OUT"; break; fi
+            PREV_DAYS=$DAYS
           done
 
+          echo "" >> "$OUT"; echo "## Final /backtest-report" >> "$OUT"
+          HTTP=$(curl -sS -o body.txt -w "%{http_code}" --max-time 120 "$BASE/api/analyze/backtest-report")
+          echo "HTTP=$HTTP bytes=$(wc -c < body.txt)" >> "$OUT"
           echo "" >> "$OUT"
-          echo "## /backtest-status" >> "$OUT"
-          curl -sS --max-time 30 "$BASE/api/analyze/backtest-status" >> "$OUT" 2>&1 || true
+          cat body.txt >> "$OUT"
 
           cat "$OUT" >> "$GITHUB_STEP_SUMMARY"
 
@@ -98,5 +63,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add reports/latest-backtest.md
-          git commit -m "report: backtest snapshot" || echo "no changes"
+          git commit -m "report: full 90-day backtest" || echo "no changes"
           git push
