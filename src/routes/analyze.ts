@@ -2281,6 +2281,111 @@ analyzeRoutes.get('/factors', (c) => {
         }
       });
 
+      // GET /api/analyze/qimen-only-day?date=YYYY-MM-DD — 只用奇門遁甲（唔用 ELO）預測一日賽事，對比實際結果
+      analyzeRoutes.get('/qimen-only-day', async (c) => {
+        try {
+          const db = c.env.DB;
+          let date = c.req.query('date') || '';
+          // If no date, find latest race day with finishing positions
+          if (!date) {
+            const latest = await db.prepare(`SELECT m.date FROM race_meetings m JOIN races r ON r.meeting_id=m.id JOIN race_results rr ON rr.race_id=r.id WHERE rr.finishing_position IS NOT NULL ORDER BY m.date DESC LIMIT 1`).first<{date:string}>();
+            if (!latest?.date) return c.json({ error: 'no race day with results found' }, 404);
+            date = latest.date;
+          }
+          const meeting = await db.prepare(`SELECT * FROM race_meetings WHERE date = ? LIMIT 1`).bind(date).first<any>();
+          if (!meeting) return c.json({ error: 'no meeting on date', date }, 404);
+          const { results: races } = await db.prepare(`SELECT id, race_number, distance, going FROM races WHERE meeting_id = ? AND race_number > 0 ORDER BY race_number`).bind(meeting.id).all<any>();
+          if (!races?.length) return c.json({ error: 'no races', date }, 404);
+          const raceIds = races.map((r: any) => r.id);
+          const ph = raceIds.map(() => '?').join(',');
+          const { results: entries } = await db.prepare(
+            `SELECT rr.race_id, rr.horse_id, rr.horse_number, rr.draw, rr.jockey_id, rr.finishing_position, rr.win_odds,
+                    h.name_ch as horse_name_ch, j.name_ch as jockey_name_ch
+               FROM race_results rr
+               LEFT JOIN horses h ON h.id = rr.horse_id
+               LEFT JOIN jockeys j ON j.id = rr.jockey_id
+              WHERE rr.race_id IN (${ph})`
+          ).bind(...raceIds).all<any>();
+          if (!entries?.length) return c.json({ error: 'no entries', date }, 404);
+
+          const dayPaipan = paipan(new Date(`${date}T05:00:00Z`));
+
+          const byRace = new Map<string, any[]>();
+          for (const e of entries) { if (!byRace.has(e.race_id)) byRace.set(e.race_id, []); byRace.get(e.race_id)!.push(e); }
+
+          const raceReports: any[] = [];
+          let top1Hits = 0, top3AnyHits = 0, top3IntersectSum = 0, racesEvaluated = 0;
+          for (const race of races) {
+            const raceEntries = byRace.get(race.id) ?? [];
+            if (!raceEntries.length) continue;
+            const picks = raceEntries.map((e: any) => {
+              const q = qimenScoreForHorse(dayPaipan, {
+                raceTime: new Date(`${date}T05:00:00Z`),
+                horseNumber: e.horse_number ?? 0,
+                draw: e.draw ?? 0,
+                horseNameCh: e.horse_name_ch ?? '',
+                jockeyNameCh: e.jockey_name_ch ?? '',
+              });
+              return {
+                horseNumber: e.horse_number,
+                draw: e.draw,
+                nameCh: e.horse_name_ch,
+                jockeyCh: e.jockey_name_ch,
+                qimenScore: q.qimenScore,
+                rawScore: q.rawScore,
+                actualFinish: e.finishing_position,
+                winOdds: e.win_odds,
+              };
+            });
+            // Pure qimen ranking — sort by qimenScore desc
+            picks.sort((a: any, b: any) => (b.qimenScore ?? 0) - (a.qimenScore ?? 0));
+            picks.forEach((p: any, i: number) => { p.rank = i + 1; });
+
+            const winner = picks.find((p: any) => p.actualFinish === 1);
+            const top3Actual = picks.filter((p: any) => p.actualFinish && p.actualFinish <= 3).map((p: any) => p.horseNumber);
+            const top3Pred = picks.slice(0, 3).map((p: any) => p.horseNumber);
+            const intersect = top3Pred.filter((h: number) => top3Actual.includes(h)).length;
+            const top1Hit = picks[0]?.actualFinish === 1;
+            const top3AnyHit = intersect > 0;
+
+            racesEvaluated++;
+            if (top1Hit) top1Hits++;
+            if (top3AnyHit) top3AnyHits++;
+            top3IntersectSum += intersect;
+
+            raceReports.push({
+              raceNumber: race.race_number,
+              distance: race.distance,
+              going: race.going,
+              qimenTop3: picks.slice(0, 3).map((p: any) => ({
+                rank: p.rank, horseNumber: p.horseNumber, nameCh: p.nameCh,
+                jockeyCh: p.jockeyCh, qimenScore: p.qimenScore, actualFinish: p.actualFinish, winOdds: p.winOdds,
+              })),
+              actualTop3: picks.filter((p: any) => p.actualFinish && p.actualFinish <= 3)
+                                .sort((a: any, b: any) => a.actualFinish - b.actualFinish)
+                                .map((p: any) => ({ pos: p.actualFinish, horseNumber: p.horseNumber, nameCh: p.nameCh, qimenRank: p.rank, qimenScore: p.qimenScore, winOdds: p.winOdds })),
+              top1Hit, top3AnyHit, top3Intersect: intersect,
+            });
+          }
+
+          return c.json({
+            date,
+            paipan: { ju: dayPaipan.ju, yang: dayPaipan.yang, chaibu: dayPaipan.chaibu, palaceScores: dayPaipan.palaceScores },
+            summary: {
+              racesEvaluated,
+              top1HitRate: racesEvaluated ? Math.round(top1Hits / racesEvaluated * 1000) / 10 : null,
+              top3AnyHitRate: racesEvaluated ? Math.round(top3AnyHits / racesEvaluated * 1000) / 10 : null,
+              top3AvgIntersect: racesEvaluated ? Math.round(top3IntersectSum / racesEvaluated * 100) / 100 : null,
+              top1Hits, top3AnyHits, top3IntersectSum,
+            },
+            races: raceReports,
+            generatedAt: new Date().toISOString(),
+          });
+        } catch (err: any) {
+          return c.json({ error: 'qimen-only-day failed', detail: err?.message ?? String(err) }, 500);
+        }
+      });
+
       // GET /api/analyze/backtest-status — poll progress
       analyzeRoutes.get('/backtest-status', async (c) => {
         try {
