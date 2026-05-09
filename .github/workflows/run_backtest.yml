@@ -1,48 +1,47 @@
 name: Run backtest report
 
-  on:
-    workflow_dispatch:
-      inputs:
-        days:
-          description: "Range days for meihua agg (default 30)"
-          required: false
-          default: "30"
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "Range days for meihua agg"
+        required: false
+        default: "30"
 
-  permissions:
-    contents: write
+permissions:
+  contents: write
 
-  jobs:
-    run:
-      runs-on: ubuntu-latest
-      timeout-minutes: 15
-      steps:
-        - uses: actions/checkout@v4
-        - name: Meihua range + reasoning
-          env:
-            BASE: "https://tianxi-backend.tianxi-entertainment.workers.dev"
-            DAYS: "${{ inputs.days }}"
-          run: |
-            set +e
-            mkdir -p reports
-            OUT="reports/meihua-pure.md"
-            : > "$OUT"
-            echo "# 純梅花易數(後天數) backtest @ $(date -u +%FT%TZ)" >> "$OUT"
-            echo "" >> "$OUT"
-            echo "## A. 30日 aggregate" >> "$OUT"
-            echo '```json' >> "$OUT"
-            curl -sS --max-time 180 "$BASE/api/analyze/meihua-only-range?days=$DAYS" | python3 -m json.tool >> "$OUT" 2>&1
-            echo '```' >> "$OUT"
-            echo "" >> "$OUT"
-            echo "## B. 最近賽日 — 每場 Top3 含專業梅花解讀" >> "$OUT"
-            echo '```json' >> "$OUT"
-            curl -sS --max-time 90 "$BASE/api/analyze/meihua-only-day?reasoning=1" | python3 -m json.tool >> "$OUT" 2>&1
-            echo '```' >> "$OUT"
-            cat "$OUT" >> "$GITHUB_STEP_SUMMARY"
-        - name: Commit
-          run: |
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add reports/meihua-pure.md
-            git commit -m "report: pure meihua 30d + reasoning" || echo "no changes"
-            git push
-  
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Meihua range + reasoning
+        env:
+          BASE: "https://tianxi-backend.tianxi-entertainment.workers.dev"
+          DAYS: "${{ inputs.days }}"
+        run: |
+          set +e
+          mkdir -p reports
+          OUT="reports/meihua-pure.md"
+          : > "$OUT"
+          echo "# 純梅花易數(後天數) backtest @ $(date -u +%FT%TZ)" >> "$OUT"
+          echo "" >> "$OUT"
+          echo "## A. 30日 aggregate" >> "$OUT"
+          echo '```json' >> "$OUT"
+          curl -sS --max-time 180 "$BASE/api/analyze/meihua-only-range?days=$DAYS" | python3 -m json.tool >> "$OUT" 2>&1
+          echo '```' >> "$OUT"
+          echo "" >> "$OUT"
+          echo "## B. 最近賽日 — 每場 Top3 含專業梅花解讀" >> "$OUT"
+          echo '```json' >> "$OUT"
+          curl -sS --max-time 90 "$BASE/api/analyze/meihua-only-day?reasoning=1" | python3 -m json.tool >> "$OUT" 2>&1
+          echo '```' >> "$OUT"
+          cat "$OUT" >> "$GITHUB_STEP_SUMMARY"
+      - name: Commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add reports/meihua-pure.md
+          git commit -m "report: pure meihua 30d + reasoning" || echo "no changes"
+          git push
