@@ -1830,8 +1830,12 @@ analyzeRoutes.get('/factors', (c) => {
           qimenPayload.qimenSummary = {
             ju: dayPaipan.ju,
             yang: dayPaipan.yang,
+            chaibu: dayPaipan.chaibu,
             zhiFu: dayPaipan.zhiFu,
             zhiShi: dayPaipan.zhiShi,
+            stars: dayPaipan.stars,
+            doors: dayPaipan.doors,
+            gods: dayPaipan.gods,
             palaceScores: dayPaipan.palaceScores,
           };
           for (const race of (qimenPayload.races ?? [])) {
