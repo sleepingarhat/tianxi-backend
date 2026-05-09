@@ -14,7 +14,7 @@ import { loungeRoutes } from './routes/lounge';
 import { silksRoutes } from './routes/silks';
 import { silksSvgRoutes } from './routes/silks_svg';
 import { adminRoutes } from './routes/admin';
-  import { computeHitRateStats, ensureHitRateCacheTable, writeHitRateCache, readHitRateCache, ensureRaceDayReportCacheTable } from './routes/analyze';
+  import { computeHitRateStats, ensureHitRateCacheTable, writeHitRateCache, readHitRateCache, ensureRaceDayReportCacheTable, joinPredictionResults, ensurePredictionLogTable } from './routes/analyze';
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -91,7 +91,33 @@ app.onError((err, c) => {
   // Surface cached lookup so admin can display "cache populated" without a DB hit elsewhere
   void readHitRateCache;
 
-  // Pre-compute today's race-day report so admin page renders instantly.
+  // Backfill prediction_log with actual results for recent past meetings (last 7 days).
+    async function backfillPredictionResults(env: Env): Promise<{ daysProcessed: number; totalUpdated: number }> {
+      try {
+        await ensurePredictionLogTable(env.DB);
+        const today = new Date().toISOString().substring(0, 10);
+        const { results } = await env.DB.prepare(
+          `SELECT m.date FROM race_meetings m
+             WHERE m.date < ?
+               AND m.date >= date(?, '-7 days')
+               AND EXISTS (SELECT 1 FROM races r JOIN race_results rr ON rr.race_id = r.id WHERE r.meeting_id = m.id AND rr.finishing_position > 0)
+             ORDER BY m.date DESC`
+        ).bind(today, today).all<{ date: string }>().catch(() => ({ results: [] as { date: string }[] }));
+        let totalUpdated = 0;
+        for (const row of (results ?? [])) {
+          try { const r = await joinPredictionResults(env.DB, row.date); totalUpdated += r.updated; } catch {}
+        }
+        return { daysProcessed: results?.length ?? 0, totalUpdated };
+      } catch (e: any) { return { daysProcessed: 0, totalUpdated: 0 }; }
+    }
+
+    // Manual trigger: POST /admin/api/backfill-prediction-results
+    app.post('/admin/api/backfill-prediction-results', async (c) => {
+      const out = await backfillPredictionResults(c.env);
+      return c.json({ ok: true, ...out, ranAt: new Date().toISOString() });
+    });
+
+    // Pre-compute today's race-day report so admin page renders instantly.
   async function refreshRaceDayReport(env: Env): Promise<{ ok: boolean; date?: string; venue?: string; races?: number; computeMs?: number; seedSummary?: any; error?: string }> {
     try {
       await ensureRaceDayReportCacheTable(env.DB);
@@ -117,6 +143,9 @@ app.onError((err, c) => {
       );
       ctx.waitUntil(
         refreshRaceDayReport(env).then((r) => console.log('[cron] race-day report refresh', r)),
+      );
+      ctx.waitUntil(
+        backfillPredictionResults(env).then((r) => console.log('[cron] prediction backfill', r)),
       );
     },
   };
