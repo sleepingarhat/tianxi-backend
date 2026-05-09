@@ -27,6 +27,6 @@ name: Verify race-day cache
             echo "=== seed summary + sample seeded horses ==="
             jq '[.races[].picks[] | select(.eloSource != null and .eloSource != "snapshot" and .eloSource != "none") | {race:.horseNumber,horse:.nameCh,source:.eloSource,elo:.horseElo,conf:.horseConfidence,rating:.rating}] | {seededCount: length, sample: .[:8]}' /tmp/r2.json
             echo ""
-            echo "=== ELO completeness (snapshot vs seed vs none) ==="
+            echo "=== ELO source breakdown ==="
             jq '[.races[].picks[].eloSource] | group_by(.) | map({source:.[0], count:length})' /tmp/r2.json
   
