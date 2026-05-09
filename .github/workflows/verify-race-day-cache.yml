@@ -1,32 +1,31 @@
 name: Verify race-day cache
-  on:
-    workflow_dispatch:
-  jobs:
-    verify:
-      runs-on: ubuntu-latest
-      steps:
-        - name: Force-rebuild + verify cache
-          run: |
-            set -e
-            echo "=== fresh=1 (force compute + write cache) ==="
-            T0=$(date +%s%N)
-            curl -sS -m 120 'https://api.tianxi.racing/api/analyze/today-picks?fresh=1' -o /tmp/r1.json
-            T1=$(date +%s%N)
-            MS1=$(( (T1 - T0) / 1000000 ))
-            echo "  client elapsed: ${MS1}ms"
-            jq '{date,venue,races:(.races|length),fromCache,computeMs,cachedComputeMs,cachedGeneratedAt,generatedAt,seedSummary,eloReady,eloEngine}' /tmp/r1.json
-            echo ""
-            echo "=== cache hit (no fresh param) ==="
-            T2=$(date +%s%N)
-            curl -sS -m 60 'https://api.tianxi.racing/api/analyze/today-picks' -o /tmp/r2.json
-            T3=$(date +%s%N)
-            MS2=$(( (T3 - T2) / 1000000 ))
-            echo "  client elapsed: ${MS2}ms"
-            jq '{date,venue,races:(.races|length),fromCache,computeMs,cachedComputeMs,cachedGeneratedAt}' /tmp/r2.json
-            echo ""
-            echo "=== seed summary + sample seeded horses ==="
-            jq '[.races[].picks[] | select(.eloSource != null and .eloSource != "snapshot" and .eloSource != "none") | {race:.horseNumber,horse:.nameCh,source:.eloSource,elo:.horseElo,conf:.horseConfidence,rating:.rating}] | {seededCount: length, sample: .[:8]}' /tmp/r2.json
-            echo ""
-            echo "=== ELO source breakdown ==="
-            jq '[.races[].picks[].eloSource] | group_by(.) | map({source:.[0], count:length})' /tmp/r2.json
-  
+on:
+  workflow_dispatch:
+  push:
+    paths: [.github/workflows/verify-race-day-cache.yml]
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Force-rebuild + verify cache
+        run: |
+          set -e
+          echo "=== fresh=1 (force compute + write cache) ==="
+          T0=$(date +%s%N)
+          curl -sS -m 120 'https://api.tianxi.racing/api/analyze/today-picks?fresh=1' -o /tmp/r1.json
+          T1=$(date +%s%N)
+          echo "  client elapsed: $(( (T1 - T0) / 1000000 ))ms"
+          jq '{date,venue,races:(.races|length),fromCache,computeMs,cachedComputeMs,cachedGeneratedAt,generatedAt,seedSummary,eloReady,eloEngine}' /tmp/r1.json
+          echo ""
+          echo "=== cache hit (no fresh param) ==="
+          T2=$(date +%s%N)
+          curl -sS -m 60 'https://api.tianxi.racing/api/analyze/today-picks' -o /tmp/r2.json
+          T3=$(date +%s%N)
+          echo "  client elapsed: $(( (T3 - T2) / 1000000 ))ms"
+          jq '{date,venue,races:(.races|length),fromCache,computeMs,cachedComputeMs,cachedGeneratedAt}' /tmp/r2.json
+          echo ""
+          echo "=== seed summary + sample seeded horses ==="
+          jq '[.races[].picks[] | select(.eloSource != null and .eloSource != "snapshot" and .eloSource != "none")] | {seededCount: length, sample: [.[:8] | .[] | {race:.horseNumber,horse:.nameCh,source:.eloSource,elo:.horseElo,conf:.horseConfidence,rating:.rating}]}' /tmp/r2.json
+          echo ""
+          echo "=== ELO source breakdown ==="
+          jq '[.races[].picks[].eloSource] | group_by(.) | map({source:.[0], count:length})' /tmp/r2.json
