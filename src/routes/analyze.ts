@@ -2114,6 +2114,24 @@ analyzeRoutes.get('/factors', (c) => {
         }
       });
 
+      // GET /api/analyze/backtest-dates?days=90 — list dates with race_results in window
+      analyzeRoutes.get('/backtest-dates', async (c) => {
+        try {
+          const days = Math.max(1, Math.min(365, Number(c.req.query('days') ?? '90')));
+          const today = new Date().toISOString().substring(0, 10);
+          const since = new Date(Date.now() - days * 86400000).toISOString().substring(0, 10);
+          const { results } = await c.env.DB.prepare(
+            `SELECT m.date FROM race_meetings m
+               WHERE m.date >= ? AND m.date < ?
+                 AND EXISTS (SELECT 1 FROM races r JOIN race_results rr ON rr.race_id = r.id WHERE r.meeting_id = m.id AND rr.finishing_position > 0)
+               ORDER BY m.date ASC`
+          ).bind(since, today).all<{ date: string }>();
+          return c.json({ ok: true, days, dates: (results ?? []).map(r => r.date) });
+        } catch (err: any) {
+          return c.json({ error: 'list failed', detail: err?.message ?? String(err) }, 500);
+        }
+      });
+
       // POST /api/analyze/run-backtest-day?date=YYYY-MM-DD — single-day backtest
       analyzeRoutes.post('/run-backtest-day', async (c) => {
         try {
