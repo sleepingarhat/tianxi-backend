@@ -14,7 +14,7 @@ import { loungeRoutes } from './routes/lounge';
 import { silksRoutes } from './routes/silks';
 import { silksSvgRoutes } from './routes/silks_svg';
 import { adminRoutes } from './routes/admin';
-  import { computeHitRateStats, ensureHitRateCacheTable, writeHitRateCache, readHitRateCache } from './routes/analyze';
+  import { computeHitRateStats, ensureHitRateCacheTable, writeHitRateCache, readHitRateCache, ensureRaceDayReportCacheTable } from './routes/analyze';
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -91,11 +91,32 @@ app.onError((err, c) => {
   // Surface cached lookup so admin can display "cache populated" without a DB hit elsewhere
   void readHitRateCache;
 
+  // Pre-compute today's race-day report so admin page renders instantly.
+  async function refreshRaceDayReport(env: Env): Promise<{ ok: boolean; date?: string; venue?: string; races?: number; computeMs?: number; seedSummary?: any; error?: string }> {
+    try {
+      await ensureRaceDayReportCacheTable(env.DB);
+      const url = new URL('https://internal/api/analyze/today-picks?fresh=1');
+      const req = new Request(url.toString(), { method: 'GET' });
+      const res = await app.fetch(req, env, { waitUntil: () => {}, passThroughOnException: () => {} } as any);
+      const data: any = await res.json().catch(() => ({}));
+      if (data?.error) return { ok: false, error: data.error };
+      return { ok: true, date: data.date, venue: data.venue, races: data.races?.length ?? 0, computeMs: data.computeMs, seedSummary: data.seedSummary };
+    } catch (e: any) { return { ok: false, error: e?.message ?? String(e) }; }
+  }
+
+  app.post('/admin/api/refresh-race-day-report', async (c) => {
+    const out = await refreshRaceDayReport(c.env);
+    return c.json({ ...out, ranAt: new Date().toISOString() });
+  });
+
   export default {
     fetch: app.fetch,
     async scheduled(_event: any, env: Env, ctx: any): Promise<void> {
       ctx.waitUntil(
         refreshHitRateCache(env).then((r) => console.log('[cron] hit-rate refresh', r)),
+      );
+      ctx.waitUntil(
+        refreshRaceDayReport(env).then((r) => console.log('[cron] race-day report refresh', r)),
       );
     },
   };
