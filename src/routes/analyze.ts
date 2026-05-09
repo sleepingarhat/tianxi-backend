@@ -2718,7 +2718,7 @@ analyzeRoutes.get('/factors', (c) => {
       // ── 梅花解讀 helper ───────────────────────────────────────
       function buildMeihuaReason(m: any) {
         const parts: string[] = [];
-        parts.push(`上卦〔${m.upperTrigram}〕(馬號+檔位=${m.upperSum}) ／ 下卦〔${m.lowerTrigram}〕(馬名筆畫${m.horseStrokes}+騎師筆畫${m.jockeyStrokes}=${m.lowerSum})`);
+        parts.push(`上卦〔${m.upperTrigram}〕(數·馬號+檔位=${m.upperSum}) ／ 下卦〔${m.lowerTrigram}〕(象·投票:${m.xiangBreakdown})`);
         parts.push(`動爻：第${m.dongLine}爻 (時辰地支${m.hourZhi})`);
         parts.push(`本卦：${m.benGuaName}(${m.benGuaNum}) → ${m.benGuaScore >= 0 ? '+' : ''}${m.benGuaScore}`);
         parts.push(`變卦：${m.bianGuaName}(${m.bianGuaNum}) → ${m.bianGuaScore >= 0 ? '+' : ''}${m.bianGuaScore}`);
