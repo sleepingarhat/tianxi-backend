@@ -1509,29 +1509,46 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
 
   
     // ── 即日全因子預測 ──
-    async function runTodayPredictions() {
-      var btn = document.getElementById('btnTodayPredict');
-      var statusEl = document.getElementById('todayPredictStatus');
-      var resultsEl = document.getElementById('todayPredictResults');
-      btn.disabled = true;
-      statusEl.textContent = '運算中，請稍候（每場約 5-10 秒）…';
-      resultsEl.innerHTML = '';
-      try {
-        var res = await fetch('/api/analyze/today-picks');
-        var data = await res.json();
-        if (data.error) { statusEl.textContent = '錯誤：' + data.error; return; }
-        var engTag = data.eloEngine === 'v12' ? 'v1.2' : (data.eloEngine || '—');
-        statusEl.textContent = (data.date||'') + ' ' + (data.venue||'') + ' · '
-          + data.races.length + ' 場 · ELO引擎 ' + engTag
-          + (data.eloReady ? ' · ✓ ELO就緒' : ' · ⚠ ELO資料未就緒')
-          + ' · 運算完成 ' + new Date().toLocaleTimeString('zh-HK');
-        renderTodayPredictions(data);
-      } catch (e) {
-        statusEl.textContent = '錯誤：' + e.message;
-      } finally {
-        btn.disabled = false;
+    // Cache-first: cron pre-builds the report at HKT 06:00/11:00/12:00/18:00 so this is instant.
+      async function loadTodayPredictions(force) {
+        var btn = document.getElementById('btnTodayPredict');
+        var btnForce = document.getElementById('btnTodayPredictForce');
+        var statusEl = document.getElementById('todayPredictStatus');
+        var resultsEl = document.getElementById('todayPredictResults');
+        if (btn) btn.disabled = true;
+        if (btnForce) btnForce.disabled = true;
+        statusEl.textContent = force ? '強制重新運算中（每場約 5-10 秒）…' : '載入快取報告中…';
+        try {
+          var url = force ? '/api/analyze/today-picks?fresh=1' : '/api/analyze/today-picks';
+          var res = await fetch(url);
+          var data = await res.json();
+          if (data.error) { statusEl.textContent = '錯誤：' + data.error; return; }
+          var engTag = data.eloEngine === 'v12' ? 'v1.2' : (data.eloEngine || '—');
+          var stampSrc = data.fromCache ? '快取' : '即時運算';
+          var stampTime = data.cachedGeneratedAt || data.generatedAt;
+          var stampLocal = stampTime ? new Date(stampTime).toLocaleString('zh-HK', { hour12: false }) : '—';
+          var seedNote = '';
+          if (data.seedSummary && data.seedSummary.totalSeeded > 0) {
+            seedNote = ' · 新馬 seed ' + data.seedSummary.totalSeeded + ' 隻 (評分 ' + (data.seedSummary.ratingSeeded||0) + ' / 班次 ' + (data.seedSummary.classSeeded||0) + ')';
+          }
+          statusEl.innerHTML = (data.date||'') + ' ' + (data.venue||'') + ' · '
+            + (data.races ? data.races.length : 0) + ' 場 · ELO引擎 ' + engTag
+            + (data.eloReady ? ' · <span style="color:#0a0">✓ ELO就緒</span>' : ' · <span style="color:#f80">⚠ ELO未就緒</span>')
+            + seedNote
+            + ' · 報告產生 <strong>' + stampLocal + '</strong> (' + stampSrc + (data.computeMs ? ' ' + data.computeMs + 'ms' : '') + ')';
+          renderTodayPredictions(data);
+        } catch (e) {
+          statusEl.textContent = '錯誤：' + e.message;
+        } finally {
+          if (btn) btn.disabled = false;
+          if (btnForce) btnForce.disabled = false;
+        }
       }
-    }
+      async function runTodayPredictions() { return loadTodayPredictions(false); }
+      async function forceRebuildTodayPredictions() {
+        if (!confirm('將忽略快取重新運算（約 30-60 秒），確定？')) return;
+        return loadTodayPredictions(true);
+      }
 
     function renderTodayPredictions(data) {
       var el = document.getElementById('todayPredictResults');
