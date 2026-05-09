@@ -147,5 +147,18 @@ app.onError((err, c) => {
       ctx.waitUntil(
         backfillPredictionResults(env).then((r) => console.log('[cron] prediction backfill', r)),
       );
+      ctx.waitUntil(
+          (async () => {
+            try {
+              const existing = await env.DB.prepare(`SELECT COUNT(*) as c FROM prediction_log WHERE variant IN ('baseline-bt','qimen-bt')`).first<{ c: number }>();
+              if ((existing?.c ?? 0) === 0) {
+                const r = await runBacktestRange(env.DB, 90, 'v12');
+                console.log('[cron] auto-backtest first run', { days: r.days, races: r.totalRaces, baseline: r.totalBaselineRows, qimen: r.totalQimenRows, ms: r.elapsedMs });
+              }
+            } catch (e: any) {
+              console.error('[cron] auto-backtest error', e?.message ?? e);
+            }
+          })()
+        );
     },
   };
