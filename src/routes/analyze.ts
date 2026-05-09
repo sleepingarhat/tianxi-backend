@@ -247,6 +247,189 @@ export const analyzeRoutes = new Hono<{ Bindings: Env }>();
     }));
     return { sinceDate, days, summary };
   }
+
+  // === Phase B+: Walk-forward backtest (v1: ELO + qimen only, skip micro-factors) ===
+  // 用歷史 race_results + horse/jockey/trainer snapshots (as_of_date < race_date) 回測，
+  // 寫入 prediction_log 用 variant='baseline-bt' / 'qimen-bt'，無未來資訊洩漏。
+  export async function runBacktestForDate(db: D1Database, date: string, engine: string = 'v12'): Promise<{ races: number; horses: number; baselineRows: number; qimenRows: number; joined: number; skipped?: string }> {
+    await ensurePredictionLogTable(db);
+    // 1. Load races + meeting
+    const meeting = await db.prepare(`SELECT * FROM race_meetings WHERE date = ? LIMIT 1`).bind(date).first<any>().catch(() => null);
+    if (!meeting) return { races: 0, horses: 0, baselineRows: 0, qimenRows: 0, joined: 0, skipped: 'no meeting' };
+    const { results: races } = await db.prepare(`SELECT id, race_number, distance, going, track FROM races WHERE meeting_id = ? AND race_number > 0 ORDER BY race_number`).bind(meeting.id).all<any>();
+    if (!races?.length) return { races: 0, horses: 0, baselineRows: 0, qimenRows: 0, joined: 0, skipped: 'no races' };
+
+    // 2. Load all results with joined horse/jockey/trainer names
+    const raceIds = races.map((r: any) => r.id);
+    const placeholders = raceIds.map(() => '?').join(',');
+    const { results: entries } = await db.prepare(
+      `SELECT rr.race_id, rr.horse_id, rr.horse_number, rr.draw, rr.jockey_id, rr.trainer_id,
+              rr.finishing_position, rr.win_odds, rr.declared_weight, rr.actual_weight,
+              h.name_ch as horse_name_ch, h.name_en as horse_name_en,
+              j.name_ch as jockey_name_ch, j.name_en as jockey_name_en,
+              t.name_ch as trainer_name_ch, t.name_en as trainer_name_en
+         FROM race_results rr
+         LEFT JOIN horses h ON h.id = rr.horse_id
+         LEFT JOIN jockeys j ON j.id = rr.jockey_id
+         LEFT JOIN trainers t ON t.id = rr.trainer_id
+        WHERE rr.race_id IN (${placeholders})`
+    ).bind(...raceIds).all<any>();
+    if (!entries?.length) return { races: races.length, horses: 0, baselineRows: 0, qimenRows: 0, joined: 0, skipped: 'no results' };
+
+    // 3. Bulk-load latest ELO snapshots strictly before this date
+    const horseIds = Array.from(new Set(entries.map((e: any) => e.horse_id).filter(Boolean)));
+    const jockeyIds = Array.from(new Set(entries.map((e: any) => e.jockey_id).filter(Boolean)));
+    const trainerIds = Array.from(new Set(entries.map((e: any) => e.trainer_id).filter(Boolean)));
+
+    async function loadLatest(table: string, idCol: string, ids: string[], extraWhere: string = ''): Promise<Map<string, any>> {
+      if (!ids.length) return new Map();
+      const m = new Map<string, any>();
+      // Chunk to avoid SQL var limit
+      for (let i = 0; i < ids.length; i += 50) {
+        const chunk = ids.slice(i, i + 50);
+        const ph = chunk.map(() => '?').join(',');
+        const sql = `SELECT s.* FROM ${table} s
+          WHERE s.${idCol} IN (${ph}) ${extraWhere ? 'AND ' + extraWhere : ''} AND s.as_of_date < ?
+            AND NOT EXISTS (SELECT 1 FROM ${table} s2 WHERE s2.${idCol} = s.${idCol} ${extraWhere ? 'AND ' + extraWhere.replace(/s\./g, 's2.') : ''} AND s2.as_of_date < ? AND s2.as_of_date > s.as_of_date)`;
+        const { results } = await db.prepare(sql).bind(...chunk, date, date).all<any>().catch(() => ({ results: [] as any[] }));
+        for (const r of (results ?? [])) m.set(r[idCol], r);
+      }
+      return m;
+    }
+
+    const horseElo = await loadLatest('horse_elo_snapshots', 'horse_id', horseIds, "s.axis_key='overall'");
+    const jockeyElo = await loadLatest('jockey_elo_snapshots', 'jockey_id', jockeyIds);
+    const trainerElo = await loadLatest('trainer_elo_snapshots', 'trainer_id', trainerIds);
+
+    // 4. Build per-race picks (baseline + qimen)
+    const W_HORSE = 0.7, W_JOCKEY = 0.2, W_TRAINER = 0.1;
+    const baselinePayload: any = { date, eloEngine: engine, generatedAt: new Date().toISOString(), races: [] };
+    const qimenPayload: any = { date, eloEngine: engine, generatedAt: new Date().toISOString(), races: [] };
+
+    // Use 13:00 HKT as reference paipan time for the day
+    const dayPaipan = paipan(new Date(`${date}T05:00:00Z`));
+    qimenPayload.qimenSummary = { ju: dayPaipan.ju, yang: dayPaipan.yang, chaibu: dayPaipan.chaibu };
+
+    // Group entries by race_id
+    const entriesByRace = new Map<string, any[]>();
+    for (const e of entries) {
+      if (!entriesByRace.has(e.race_id)) entriesByRace.set(e.race_id, []);
+      entriesByRace.get(e.race_id)!.push(e);
+    }
+
+    for (const race of races) {
+      const raceEntries = entriesByRace.get(race.id) ?? [];
+      if (!raceEntries.length) continue;
+
+      // Baseline: ELO composite + softmax
+      const baselinePicks = raceEntries.map((e: any) => {
+        const h = horseElo.get(e.horse_id);
+        const j = e.jockey_id ? jockeyElo.get(e.jockey_id) : null;
+        const t = e.trainer_id ? trainerElo.get(e.trainer_id) : null;
+        const hElo = h?.rating ?? null;
+        const horseConfFactor = h ? (h.confidence ?? 1) : 0;
+        const effHorseW = W_HORSE * horseConfFactor;
+        const parts: number[] = [];
+        if (hElo != null) parts.push(hElo * effHorseW);
+        if (j?.rating != null) parts.push(j.rating * W_JOCKEY);
+        if (t?.rating != null) parts.push(t.rating * W_TRAINER);
+        const wSum = (hElo != null ? effHorseW : 0) + (j?.rating != null ? W_JOCKEY : 0) + (t?.rating != null ? W_TRAINER : 0);
+        const eloComposite = wSum > 0 ? parts.reduce((a, b) => a + b, 0) / wSum : null;
+        const finalScore = eloComposite;
+        const _score = eloComposite != null ? (eloComposite - 1500) / 200 : 0;
+        return {
+          horseId: e.horse_id,
+          horseNumber: e.horse_number,
+          nameCh: e.horse_name_ch,
+          jockeyCh: e.jockey_name_ch,
+          draw: e.draw,
+          horseElo: hElo != null ? Math.round(hElo * 10) / 10 : null,
+          eloComposite: eloComposite != null ? Math.round(eloComposite * 10) / 10 : null,
+          eloSource: h ? 'snapshot' : 'none',
+          horseConfidence: h?.confidence ?? null,
+          factorBonus: 0,
+          finalScore: finalScore != null ? Math.round(finalScore * 10) / 10 : null,
+          _score,
+        };
+      });
+      const expS = baselinePicks.map((p: any) => Math.exp(p._score));
+      const Z = expS.reduce((a: number, b: number) => a + b, 0) || 1;
+      baselinePicks.forEach((p: any, i: number) => {
+        p.pWin = Math.round((expS[i] / Z) * 1000) / 1000;
+        p.pTop3 = Math.round(Math.min(p.pWin * 3, 0.99) * 1000) / 1000;
+      });
+      baselinePicks.sort((a: any, b: any) => b.pWin - a.pWin);
+      baselinePicks.forEach((p: any, i: number) => { p.rank = i + 1; });
+      baselinePayload.races.push({ raceNumber: race.race_number, picks: baselinePicks });
+
+      // Qimen: same as baseline + qimenScore
+      const qimenPicks = baselinePicks.map((p: any) => ({ ...p }));
+      for (const p of qimenPicks) {
+        const q = qimenScoreForHorse(dayPaipan, {
+          raceTime: new Date(`${date}T05:00:00Z`),
+          horseNumber: p.horseNumber ?? 0,
+          draw: p.draw ?? 0,
+          horseNameCh: p.nameCh ?? '',
+          jockeyNameCh: p.jockeyCh ?? '',
+        });
+        p.qimenScore = q.qimenScore;
+        p.factorBonus = q.qimenScore;
+        p.finalScore = (p.finalScore ?? p.eloComposite ?? 0) + q.qimenScore;
+        p._score = (p._score ?? 0) + q.qimenScore / 100;
+      }
+      const expQ = qimenPicks.map((p: any) => Math.exp(p._score));
+      const ZQ = expQ.reduce((a: number, b: number) => a + b, 0) || 1;
+      qimenPicks.forEach((p: any, i: number) => {
+        p.pWin = Math.round((expQ[i] / ZQ) * 1000) / 1000;
+        p.pTop3 = Math.round(Math.min(p.pWin * 3, 0.99) * 1000) / 1000;
+      });
+      qimenPicks.sort((a: any, b: any) => b.pWin - a.pWin);
+      qimenPicks.forEach((p: any, i: number) => { p.rank = i + 1; });
+      qimenPayload.races.push({ raceNumber: race.race_number, picks: qimenPicks });
+    }
+
+    // 5. Write to prediction_log
+    const baseLog = await writePredictionLog(db, baselinePayload, 'baseline-bt').catch(() => ({ rows: 0 }));
+    const qimenLog = await writePredictionLog(db, qimenPayload, 'qimen-bt').catch(() => ({ rows: 0 }));
+
+    // 6. Auto-join (results already exist for past races)
+    const joinResult = await joinPredictionResults(db, date).catch(() => ({ updated: 0 }));
+
+    return {
+      races: races.length,
+      horses: entries.length,
+      baselineRows: baseLog.rows ?? 0,
+      qimenRows: qimenLog.rows ?? 0,
+      joined: joinResult.updated ?? 0,
+    };
+  }
+
+  // Run backtest over a date range. Returns per-day summary.
+  export async function runBacktestRange(db: D1Database, daysBack: number = 90, engine: string = 'v12'): Promise<{ days: number; perDay: any[]; totalRaces: number; totalHorses: number; totalBaselineRows: number; totalQimenRows: number; totalJoined: number; elapsedMs: number }> {
+    const t0 = Date.now();
+    const today = new Date().toISOString().substring(0, 10);
+    const since = new Date(Date.now() - daysBack * 86400000).toISOString().substring(0, 10);
+    const { results: meetings } = await db.prepare(
+      `SELECT m.date FROM race_meetings m
+         WHERE m.date >= ? AND m.date < ?
+           AND EXISTS (SELECT 1 FROM races r JOIN race_results rr ON rr.race_id = r.id WHERE r.meeting_id = m.id AND rr.finishing_position > 0)
+         ORDER BY m.date ASC`
+    ).bind(since, today).all<{ date: string }>().catch(() => ({ results: [] as any[] }));
+    const perDay: any[] = [];
+    let totalRaces = 0, totalHorses = 0, totalBaselineRows = 0, totalQimenRows = 0, totalJoined = 0;
+    for (const m of (meetings ?? [])) {
+      try {
+        const r = await runBacktestForDate(db, m.date, engine);
+        perDay.push({ date: m.date, ...r });
+        totalRaces += r.races; totalHorses += r.horses;
+        totalBaselineRows += r.baselineRows; totalQimenRows += r.qimenRows; totalJoined += r.joined;
+      } catch (e: any) {
+        perDay.push({ date: m.date, error: String(e?.message ?? e) });
+      }
+    }
+    return { days: meetings?.length ?? 0, perDay, totalRaces, totalHorses, totalBaselineRows, totalQimenRows, totalJoined, elapsedMs: Date.now() - t0 };
+  }
+  
   
 
   // === New-horse ELO seed (Stage 8 data-completeness fix) ==============
@@ -1916,6 +2099,31 @@ analyzeRoutes.get('/factors', (c) => {
           return c.json(summary);
         } catch (err: any) {
           return c.json({ error: 'summary failed', detail: err?.message ?? String(err) }, 500);
+        }
+      });
+
+      // POST /api/analyze/run-backtest?days=90 — full walk-forward backtest over date range
+      analyzeRoutes.post('/run-backtest', async (c) => {
+        try {
+          const days = Math.max(1, Math.min(365, Number(c.req.query('days') ?? '90')));
+          const engine = c.req.query('engine') === 'v11' ? 'v11' : 'v12';
+          const result = await runBacktestRange(c.env.DB, days, engine);
+          return c.json({ ok: true, ...result });
+        } catch (err: any) {
+          return c.json({ error: 'backtest failed', detail: err?.message ?? String(err) }, 500);
+        }
+      });
+
+      // POST /api/analyze/run-backtest-day?date=YYYY-MM-DD — single-day backtest
+      analyzeRoutes.post('/run-backtest-day', async (c) => {
+        try {
+          const date = c.req.query('date');
+          if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return c.json({ error: 'date=YYYY-MM-DD required' }, 400);
+          const engine = c.req.query('engine') === 'v11' ? 'v11' : 'v12';
+          const result = await runBacktestForDate(c.env.DB, date, engine);
+          return c.json({ ok: true, date, ...result });
+        } catch (err: any) {
+          return c.json({ error: 'backtest day failed', detail: err?.message ?? String(err) }, 500);
         }
       });
 
