@@ -56,6 +56,80 @@ export const analyzeRoutes = new Hono<{ Bindings: Env }>();
       new Date().toISOString(),
     ).run();
   }
+
+  // === Race-day report cache (Stage 8: scheduled pre-compute) ===========
+  // Avoids running the full today-picks compute on every admin page hit.
+  // Rebuilt by cron triggers in src/index.ts at HKT 06:00 / 11:00 / 18:00.
+  export async function ensureRaceDayReportCacheTable(db: D1Database): Promise<void> {
+    await db.prepare(`CREATE TABLE IF NOT EXISTS race_day_report_cache (
+      date TEXT NOT NULL,
+      engine TEXT NOT NULL DEFAULT 'v12',
+      venue TEXT,
+      payload_json TEXT NOT NULL,
+      generated_at TEXT NOT NULL,
+      compute_ms INTEGER,
+      PRIMARY KEY (date, engine)
+    )`).run();
+  }
+
+  export async function readRaceDayReportCache(db: D1Database, date: string, engine: string): Promise<any | null> {
+    try {
+      await ensureRaceDayReportCacheTable(db);
+      const r = await db.prepare(
+        `SELECT payload_json, generated_at, compute_ms FROM race_day_report_cache WHERE date = ? AND engine = ?`
+      ).bind(date, engine).first<any>().catch(() => null);
+      if (!r?.payload_json) return null;
+      const p = JSON.parse(r.payload_json);
+      p.cachedGeneratedAt = r.generated_at;
+      p.cachedComputeMs = r.compute_ms;
+      p.fromCache = true;
+      return p;
+    } catch { return null; }
+  }
+
+  export async function writeRaceDayReportCache(db: D1Database, date: string, engine: string, venue: string | null, payload: any, computeMs: number): Promise<void> {
+    await ensureRaceDayReportCacheTable(db);
+    await db.prepare(
+      `INSERT INTO race_day_report_cache (date, engine, venue, payload_json, generated_at, compute_ms)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(date, engine) DO UPDATE SET
+         venue = excluded.venue,
+         payload_json = excluded.payload_json,
+         generated_at = excluded.generated_at,
+         compute_ms = excluded.compute_ms`
+    ).bind(date, engine, venue, JSON.stringify(payload), new Date().toISOString(), computeMs).run();
+  }
+
+  // === New-horse ELO seed (Stage 8 data-completeness fix) ==============
+  // When horse_elo_snapshots has no row (first-time runner / newly-imported),
+  // derive a baseline ELO from HKJC handicap rating, or class median if none.
+  // Marked with eloSource='rating-seed'|'class-seed' and lower confidence.
+  export function classBaselineRating(raceClass: string | null | undefined): number {
+    if (!raceClass) return 52;
+    const s = String(raceClass);
+    if (/Group\s*1|G1|一級|第一班/i.test(s)) return 105;
+    if (/Group\s*2|G2|二級|第二班/i.test(s)) return 95;
+    if (/Group\s*3|G3|三級|第三班/i.test(s)) return 85;
+    if (/Griffin|新馬/i.test(s)) return 52;
+    if (/第四班|Class\s*4/i.test(s)) return 55;
+    if (/第五班|Class\s*5/i.test(s)) return 45;
+    const m = s.match(/[1-5]/);
+    if (m) {
+      return ({ '1': 85, '2': 75, '3': 65, '4': 55, '5': 45 } as Record<string, number>)[m[0]] ?? 52;
+    }
+    return 52;
+  }
+
+  export function seedHorseElo(rating: number | string | null | undefined, raceClass: string | null | undefined): { rating: number; source: 'rating-seed' | 'class-seed'; confidence: number } {
+    let r: number | null = null;
+    if (typeof rating === 'string') { const p = parseInt(rating.trim(), 10); r = Number.isFinite(p) ? p : null; }
+    else if (typeof rating === 'number' && Number.isFinite(rating)) r = rating;
+    if (r != null && r > 0) {
+      return { rating: 1500 + (r - 60) * 8, source: 'rating-seed', confidence: 0.4 };
+    }
+    return { rating: 1500 + (classBaselineRating(raceClass) - 60) * 8, source: 'class-seed', confidence: 0.2 };
+  }
+  
   
 // 共用 helper：將一隻 pick 轉為一句中文「點解揀佢」原因
 function buildPickReason(pick: any): string {
@@ -1442,10 +1516,11 @@ analyzeRoutes.get('/factors', (c) => {
       }
 
       // GET /api/analyze/today-picks — 即日排位全因子預測 (batch-query version; ~20 D1 queries)
-    analyzeRoutes.get('/today-picks', async (c) => {
-      try {
-        const db = c.env.DB;
-        const engine: EloEngine = c.req.query('engine') === 'v11' ? 'v11' : 'v12';
+    // === Race-day report compute (Stage 8) ============================
+      // Extracted so cron + admin manual trigger can re-use the same logic.
+      // Cache-first by default; pass { fresh: true } to force recompute + cache write.
+      async function runRaceDayReportCompute(db: D1Database, engine: EloEngine, opts: { fresh?: boolean } = {}): Promise<any> {
+        const fresh = opts.fresh === true;
         const todayStr = new Date().toISOString().split('T')[0];
         let targetDate: string | null = await db.prepare(
           `SELECT MIN(race_date) FROM entries_upcoming WHERE race_date >= ?`
@@ -1453,9 +1528,16 @@ analyzeRoutes.get('/factors', (c) => {
         if (!targetDate) {
           targetDate = await db.prepare(`SELECT MAX(race_date) FROM entries_upcoming`).first<string>('MAX(race_date)').catch(() => null);
         }
-        if (!targetDate) return c.json({ error: '排位表未有資料' }, 404);
+        if (!targetDate) return { error: '排位表未有資料', status: 404 };
+
+        if (!fresh) {
+          const cached = await readRaceDayReportCache(db, targetDate, engine);
+          if (cached) return cached;
+        }
+        const t0 = Date.now();
+
         const meeting = await db.prepare(`SELECT * FROM race_meetings WHERE date = ? LIMIT 1`).bind(targetDate).first<any>().catch(() => null);
-        if (!meeting) return c.json({ error: `${targetDate} 賽馬日記錄不存在` }, 404);
+        if (!meeting) return { error: `${targetDate} 賽馬日記錄不存在`, status: 404 };
         const loadEntries = async (withVenue: boolean) => {
           const q = withVenue
             ? `SELECT e.race_number, e.horse_number, e.horse_id, e.horse_code,
@@ -1480,14 +1562,14 @@ analyzeRoutes.get('/factors', (c) => {
         };
         let entries = await loadEntries(true);
         if (!entries.length) entries = await loadEntries(false);
-        if (!entries.length) return c.json({ error: `${targetDate} 排位表無資料` }, 404);
+        if (!entries.length) return { error: `${targetDate} 排位表無資料`, status: 404 };
         const prefixId = (raw: string | null | undefined, kind: 'horse' | 'jockey' | 'trainer'): string | null => {
           if (!raw) return null;
           const p = kind + '_';
           return raw.startsWith(p) ? raw : p + raw;
         };
         const allHorseIds = [...new Set(entries.map(e => prefixId(e.horse_id ?? e.horse_code, 'horse')).filter(Boolean) as string[])];
-        const horseEloIds = allHorseIds; // prefixed 'horse_J243' — matches D1 horse_elo_snapshots.horse_id
+        const horseEloIds = allHorseIds;
         const allJockeyIds = [...new Set(entries.map(e => prefixId(e.jockey_id ?? e.jockey_name, 'jockey')).filter(Boolean) as string[])];
         const allTrainerIds = [...new Set(entries.map(e => prefixId(e.trainer_id ?? e.trainer_name, 'trainer')).filter(Boolean) as string[])];
         const [horseEloMap, jockeyEloMap, trainerEloMap, recencyMap, distMap, goingMap, drawMap, condMap, injMap, wtMap, jtMap] = await Promise.all([
@@ -1510,6 +1592,7 @@ analyzeRoutes.get('/factors', (c) => {
         const raceMap = new Map<number, any[]>();
         for (const e of entries) { const rn = e.race_number ?? 0; if (!raceMap.has(rn)) raceMap.set(rn, []); raceMap.get(rn)!.push(e); }
         const raceNumbers = Array.from(raceMap.keys()).sort((a, b) => a - b);
+        let seedRatingCount = 0, seedClassCount = 0;
         const racePredictions = raceNumbers.map(raceNum => {
           const raceEntries = raceMap.get(raceNum)!;
           const firstE = raceEntries[0];
@@ -1523,14 +1606,24 @@ analyzeRoutes.get('/factors', (c) => {
           const raceClass: string | null = firstE.race_class ?? null;
           const enriched = raceEntries.map((e: any) => {
             const horseId: string | null = e.horse_id ?? e.horse_code ?? null;
-            if (!horseId) return { horseId: null, horseNumber: e.horse_number, nameCh: e.name_ch ?? String(e.horse_number), nameEn: e.name_en, jockeyCh: e.jockey_name, trainerCh: e.trainer_name, draw: e.draw, declaredWeight: e.declared_weight, rating: e.rating, horseElo: null, jockeyElo: null, trainerElo: null, eloComposite: null, eloEngine: engine, horseConfidence: null, horseFrozen: false, horseRetired: false, factorBonus: 0, factorBreakdown: null, finalScore: null, daysSinceLast: null, _score: 0 };
-            const horseEloId = horseId; // 'horse_J243' — matches D1 horse_elo_snapshots.horse_id
+            if (!horseId) return { horseId: null, horseNumber: e.horse_number, nameCh: e.name_ch ?? String(e.horse_number), nameEn: e.name_en, jockeyCh: e.jockey_name, trainerCh: e.trainer_name, draw: e.draw, declaredWeight: e.declared_weight, rating: e.rating, horseElo: null, jockeyElo: null, trainerElo: null, eloComposite: null, eloEngine: engine, eloSource: 'none', horseConfidence: null, horseFrozen: false, horseRetired: false, factorBonus: 0, factorBreakdown: null, finalScore: null, daysSinceLast: null, _score: 0 };
+            const horseEloId = horseId;
             const jSnapshotId: string | null = prefixId(e.jockey_id ?? e.jockey_name, 'jockey');
             const tSnapshotId: string | null = prefixId(e.trainer_id ?? e.trainer_name, 'trainer');
             const hRead = horseEloMap.get(horseEloId) ?? null;
             const jRead = jSnapshotId ? (jockeyEloMap.get(jSnapshotId) ?? null) : null;
             const tRead = tSnapshotId ? (trainerEloMap.get(tSnapshotId) ?? null) : null;
-            const hElo = hRead?.rating ?? null; const jElo = jRead?.rating ?? null; const tElo = tRead?.rating ?? null;
+            let hElo: number | null = hRead?.rating ?? null;
+            let eloSource: 'snapshot' | 'rating-seed' | 'class-seed' | 'none' = hRead ? 'snapshot' : 'none';
+            let seedConfidence: number | null = null;
+            if (hElo == null) {
+              const seed = seedHorseElo(e.rating, raceClass);
+              hElo = seed.rating;
+              eloSource = seed.source;
+              seedConfidence = seed.confidence;
+              if (seed.source === 'rating-seed') seedRatingCount++; else seedClassCount++;
+            }
+            const jElo = jRead?.rating ?? null; const tElo = tRead?.rating ?? null;
             const parts: number[] = [];
             if (hElo != null) parts.push(hElo * ELO_WEIGHTS.horse);
             if (jElo != null) parts.push(jElo * ELO_WEIGHTS.jockey);
@@ -1547,11 +1640,12 @@ analyzeRoutes.get('/factors', (c) => {
             const fCond = condMap.get(horseId) ?? { bonus: 0, conf: 0, note: '無晨操記錄' };
             const fInjury = injMap.get(horseId) ?? { bonus: 0, conf: 0, note: '無傷病記錄' };
             const fJT = jtMap.get(`${jSnapshotId ?? ''}:${tSnapshotId ?? ''}`) ?? { bonus: 0, conf: 0, note: '騎練配對資料不全' };
-            const factorBreakdown = { recency: { bonus: recency, conf: daysSince != null ? 1 : 0, note: daysSince != null ? `距上次 ${daysSince} 天` : '無上次紀錄' }, distance: fDist, going: fGoing, draw: fDraw, weight: fWeight, condition: fCond, injury: fInjury, jtCombo: fJT };
+            const factorBreakdown = { recency: { bonus: recency, conf: daysSince != null ? 1 : 0, note: daysSince != null ? `距上次 ${daysSince} 天` : (eloSource !== 'snapshot' ? '新馬未曾出賽' : '無上次紀錄') }, distance: fDist, going: fGoing, draw: fDraw, weight: fWeight, condition: fCond, injury: fInjury, jtCombo: fJT };
             const factorBonus = recency + fDist.bonus + fGoing.bonus + fDraw.bonus + fWeight.bonus + fCond.bonus + fInjury.bonus + fJT.bonus;
             const base = eloComposite != null ? (eloComposite - 1500) / 200 : 0;
             const finalScore = eloComposite != null ? eloComposite + factorBonus : null;
-            return { horseId, horseNumber: e.horse_number, nameCh: e.name_ch, nameEn: e.name_en, jockeyCh: e.jockey_name, trainerCh: e.trainer_name, draw: e.draw, declaredWeight: e.declared_weight, rating: e.rating, horseElo: hElo != null ? Math.round(hElo*10)/10 : null, jockeyElo: jElo != null ? Math.round(jElo*10)/10 : null, trainerElo: tElo != null ? Math.round(tElo*10)/10 : null, eloComposite: eloComposite != null ? Math.round(eloComposite*10)/10 : null, eloEngine: hRead?.engine ?? engine, horseConfidence: hRead?.confidence != null ? Math.round(hRead.confidence*100)/100 : null, horseFrozen: hRead?.isFrozen ?? false, horseRetired: hRead?.isRetired ?? false, factorBonus: Math.round(factorBonus*10)/10, factorBreakdown, finalScore: finalScore != null ? Math.round(finalScore*10)/10 : null, daysSinceLast: daysSince, _score: base + factorBonus / 100 };
+            const computedConf = hRead?.confidence != null ? Math.round(hRead.confidence*100)/100 : (seedConfidence != null ? seedConfidence : null);
+            return { horseId, horseNumber: e.horse_number, nameCh: e.name_ch, nameEn: e.name_en, jockeyCh: e.jockey_name, trainerCh: e.trainer_name, draw: e.draw, declaredWeight: e.declared_weight, rating: e.rating, horseElo: hElo != null ? Math.round(hElo*10)/10 : null, jockeyElo: jElo != null ? Math.round(jElo*10)/10 : null, trainerElo: tElo != null ? Math.round(tElo*10)/10 : null, eloComposite: eloComposite != null ? Math.round(eloComposite*10)/10 : null, eloEngine: hRead?.engine ?? engine, eloSource, horseConfidence: computedConf, horseFrozen: hRead?.isFrozen ?? false, horseRetired: hRead?.isRetired ?? false, factorBonus: Math.round(factorBonus*10)/10, factorBreakdown, finalScore: finalScore != null ? Math.round(finalScore*10)/10 : null, daysSinceLast: daysSince, _score: base + factorBonus / 100 };
           });
           const expScores = enriched.map((s) => Math.exp(s._score));
           const Z = expScores.reduce((a, b) => a + b, 0) || 1;
@@ -1561,11 +1655,40 @@ analyzeRoutes.get('/factors', (c) => {
           return { raceId, raceNumber: raceNum, title: raceTitle, class: raceClass, distance: raceDistance, going: raceGoing, track: raceTrack, course: raceCourse, picks };
         });
         const eloReady = racePredictions.some((r) => r.picks?.some((p: any) => p.eloComposite != null));
-        return c.json({ date: targetDate, venue: meeting.venue, trackCondition: meeting.track_condition, eloEngine: engine, eloWeights: ELO_WEIGHTS, eloReady, races: racePredictions, generatedAt: new Date().toISOString() });
-      } catch (err: any) {
-        return c.json({ error: 'today-picks failed', detail: err?.message ?? String(err) }, 500);
+        const computeMs = Date.now() - t0;
+        const payload = {
+          date: targetDate, venue: meeting.venue, trackCondition: meeting.track_condition,
+          eloEngine: engine, eloWeights: ELO_WEIGHTS, eloReady, races: racePredictions,
+          seedSummary: { ratingSeeded: seedRatingCount, classSeeded: seedClassCount, totalSeeded: seedRatingCount + seedClassCount },
+          computeMs, generatedAt: new Date().toISOString(),
+        };
+        await writeRaceDayReportCache(db, targetDate, engine, meeting.venue, payload, computeMs).catch(() => {});
+        return payload;
       }
-    });
+
+      analyzeRoutes.get('/today-picks', async (c) => {
+        try {
+          const engine: EloEngine = c.req.query('engine') === 'v11' ? 'v11' : 'v12';
+          const fresh = c.req.query('fresh') === '1';
+          const result = await runRaceDayReportCompute(c.env.DB, engine, { fresh });
+          if (result?.error) return c.json({ error: result.error }, (result.status ?? 500) as any);
+          return c.json(result);
+        } catch (err: any) {
+          return c.json({ error: 'today-picks failed', detail: err?.message ?? String(err) }, 500);
+        }
+      });
+
+      // POST /admin/api/refresh-race-day-report — manual rebuild trigger (admin only via token gate upstream)
+      analyzeRoutes.post('/refresh-race-day-report', async (c) => {
+        try {
+          const engine: EloEngine = c.req.query('engine') === 'v11' ? 'v11' : 'v12';
+          const result = await runRaceDayReportCompute(c.env.DB, engine, { fresh: true });
+          if (result?.error) return c.json({ error: result.error }, (result.status ?? 500) as any);
+          return c.json({ ok: true, date: result.date, venue: result.venue, races: result.races?.length ?? 0, computeMs: result.computeMs, seedSummary: result.seedSummary, generatedAt: result.generatedAt });
+        } catch (err: any) {
+          return c.json({ error: 'refresh failed', detail: err?.message ?? String(err) }, 500);
+        }
+      });
     
 
       // GET /api/analyze/picks-by-date?date=YYYY-MM-DD — 指定賽事日全因子預測（支援未來/過去日期）
