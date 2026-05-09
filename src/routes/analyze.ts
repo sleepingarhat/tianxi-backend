@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
   import { paipan, qimenScoreForHorse } from '../lib/qimen';
+import { meihuaScoreForHorse } from '../lib/meihua';
 import type { Env, AnalyzeRequest } from '../types';
 import { runTimesFMAnalysis } from '../services/timesfm';
 import { generateAnalysisSummary } from '../services/ai';
