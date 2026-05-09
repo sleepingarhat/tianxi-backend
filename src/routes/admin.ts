@@ -982,7 +982,8 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
 
     <h2>即日賽事全因子預測</h2>
     <div class="actions-row">
-      <button class="tp-run" id="btnTodayPredict" onclick="runTodayPredictions()">▶ 運算即日賽事全因子預測（ELO v1.2 + 8 因子）</button>
+      <button class="tp-run" id="btnTodayPredict" onclick="loadTodayPredictions(false)">▶ 載入即日賽事預測報告（ELO v1.2 + 8 因子）</button>
+        <button class="tp-run" id="btnTodayPredictForce" onclick="forceRebuildTodayPredictions()" style="background:#444;margin-left:6px">⟳ 強制重新運算</button>
       <span id="todayPredictStatus" style="font-size:12px;color:var(--mut)"></span>
     </div>
     <div id="todayPredictResults"></div>
@@ -1615,6 +1616,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
   safeRender('renderRuns', renderRuns);
   safeRender('renderMeetings', renderMeetings);
   safeRender('loadHitRateRollup', loadHitRateRollup);
+        safeRender('loadTodayPredictions', () => loadTodayPredictions(false));
     safeRender('renderNextRaceDay', renderNextRaceDay);
   document.getElementById('refreshClock').textContent = '載入時間：' + new Date().toLocaleTimeString('zh-HK') + ' · 每 60 秒自動刷新';
   // Auto-reload page every 60s for fresh data — but skip while autoLoadHitChain is running
