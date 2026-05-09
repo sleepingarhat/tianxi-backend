@@ -1621,6 +1621,20 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
         statusEl.textContent = '錯誤：' + e.message;
       }
     }
+      async function triggerBacktest() {
+        var statusEl = document.getElementById('accStatus');
+        if (!confirm('將跑過去 90 日所有賽事的歷史回測（baseline-bt + qimen-bt 兩個變體寫入 prediction_log）。可能耗時 1-3 分鐘，期間請勿關閉視窗。確定？')) return;
+        statusEl.textContent = '回測進行中（可能需 1-3 分鐘）…';
+        try {
+          var res = await fetch('/api/analyze/run-backtest?days=90', { method: 'POST' });
+          var data = await res.json();
+          if (data.error) { statusEl.textContent = '錯誤：' + data.error + ' / ' + (data.detail || ''); return; }
+          statusEl.textContent = '回測完成：' + data.days + ' 日 / ' + data.totalRaces + ' 場 / ' + data.totalHorses + ' 馬 → baseline ' + data.totalBaselineRows + ' / qimen ' + data.totalQimenRows + ' / joined ' + data.totalJoined + ' (耗時 ' + Math.round(data.elapsedMs/1000) + 's)';
+          await loadPredictionAccuracy();
+        } catch (e) {
+          statusEl.textContent = '錯誤：' + e.message;
+        }
+      }
 
     function renderTodayPredictions(data) {
       var el = document.getElementById('todayPredictResults');
