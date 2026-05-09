@@ -999,6 +999,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
       </label>
       <span id="accStatus" style="margin-left:10px;font-size:12px;color:var(--mut)"></span>
       <button onclick="triggerBackfill()" style="margin-left:10px;padding:3px 10px;font-size:12px">🔄 立即回填賽果</button>
+        <button onclick="triggerBacktest()" style="margin-left:6px;padding:3px 10px;font-size:12px;background:#e8f4ff">🕰️ 跑 90 日歷史回測</button>
     </div>
     <div id="predAccuracyResults"></div>
 
