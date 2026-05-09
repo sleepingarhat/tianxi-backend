@@ -2281,12 +2281,42 @@ analyzeRoutes.get('/factors', (c) => {
         }
       });
 
-      // GET /api/analyze/qimen-only-day?date=YYYY-MM-DD — 只用奇門遁甲（唔用 ELO）預測一日賽事，對比實際結果
+      // ── 奇門解讀 helper ───────────────────────────────────────
+      // Given paipan + a qimen score, produce Chinese reasoning for each of 4 palace components.
+      function buildQimenReason(pp: any, q: any) {
+        const palaceLabel = (p: number) => ({1:'坎一(北)',2:'坤二(西南)',3:'震三(東)',4:'巽四(東南)',5:'中五',6:'乾六(西北)',7:'兌七(西)',8:'艮八(東北)',9:'離九(南)'} as any)[p] ?? `宮${p}`;
+        const describePalace = (p: number) => {
+          const star = pp.stars?.[p] ?? '?';
+          const door = pp.doors?.[p] ?? '無門(中宮寄坤)';
+          const god = pp.gods?.[p] ?? '無神(中宮寄坤)';
+          const score = pp.palaceScores?.[p] ?? 0;
+          const tag = score >= 4 ? '大吉' : score >= 2 ? '吉' : score >= -1 ? '平' : score <= -4 ? '大凶' : '凶';
+          return `${palaceLabel(p)}: 〔${star}〕星 +〔${door}〕門 +〔${god}〕神 → ${score}分(${tag})`;
+        };
+        const d = q.details ?? {};
+        const parts: string[] = [];
+        parts.push(`馬號入${describePalace(d.horseNumberPalace?.palace)}`);
+        parts.push(`檔位入${describePalace(d.drawPalace?.palace)}`);
+        const hn = d.horseNamePalace ?? {};
+        parts.push(`馬名「${hn.firstChar ?? '?'}」屬${hn.wx ?? '?'}行 → ${describePalace(hn.palace)}（筆畫修正 ${hn.strokeMod ?? 0}）`);
+        const jk = d.jockeyPalace ?? {};
+        parts.push(`騎師(總筆畫${jk.totalStroke ?? '?'}) → ${describePalace(jk.palace)}`);
+        // Headline judgement
+        const total = q.qimenScore ?? 0;
+        const verdict = total >= 2 ? '★★★ 奇門大旺：四宮多吉星吉門相會，宜重注'
+                      : total >= 1 ? '★★ 奇門偏旺：吉氣略勝凶氣'
+                      : total >= 0 ? '★ 奇門平和：吉凶互見，無明顯助力'
+                      : total >= -1 ? '✗ 奇門偏弱：凶氣略勝'
+                      : '✗✗ 奇門大凶：四宮多凶星凶門，不宜下注';
+        return { verdict, breakdown: parts, totalScore: total };
+      }
+
+      // GET /api/analyze/qimen-only-day?date=YYYY-MM-DD&reasoning=1 — 只用奇門遁甲（唔用 ELO）預測一日賽事，含專業解讀
       analyzeRoutes.get('/qimen-only-day', async (c) => {
         try {
           const db = c.env.DB;
+          const reasoning = c.req.query('reasoning') === '1';
           let date = c.req.query('date') || '';
-          // If no date, find latest race day with finishing positions
           if (!date) {
             const latest = await db.prepare(`SELECT m.date FROM race_meetings m JOIN races r ON r.meeting_id=m.id JOIN race_results rr ON rr.race_id=r.id WHERE rr.finishing_position IS NOT NULL ORDER BY m.date DESC LIMIT 1`).first<{date:string}>();
             if (!latest?.date) return c.json({ error: 'no race day with results found' }, 404);
@@ -2301,15 +2331,12 @@ analyzeRoutes.get('/factors', (c) => {
           const { results: entries } = await db.prepare(
             `SELECT rr.race_id, rr.horse_id, rr.horse_number, rr.draw, rr.jockey_id, rr.finishing_position, rr.win_odds,
                     h.name_ch as horse_name_ch, j.name_ch as jockey_name_ch
-               FROM race_results rr
-               LEFT JOIN horses h ON h.id = rr.horse_id
-               LEFT JOIN jockeys j ON j.id = rr.jockey_id
+               FROM race_results rr LEFT JOIN horses h ON h.id = rr.horse_id LEFT JOIN jockeys j ON j.id = rr.jockey_id
               WHERE rr.race_id IN (${ph})`
           ).bind(...raceIds).all<any>();
           if (!entries?.length) return c.json({ error: 'no entries', date }, 404);
 
           const dayPaipan = paipan(new Date(`${date}T05:00:00Z`));
-
           const byRace = new Map<string, any[]>();
           for (const e of entries) { if (!byRace.has(e.race_id)) byRace.set(e.race_id, []); byRace.get(e.race_id)!.push(e); }
 
@@ -2321,56 +2348,42 @@ analyzeRoutes.get('/factors', (c) => {
             const picks = raceEntries.map((e: any) => {
               const q = qimenScoreForHorse(dayPaipan, {
                 raceTime: new Date(`${date}T05:00:00Z`),
-                horseNumber: e.horse_number ?? 0,
-                draw: e.draw ?? 0,
-                horseNameCh: e.horse_name_ch ?? '',
-                jockeyNameCh: e.jockey_name_ch ?? '',
+                horseNumber: e.horse_number ?? 0, draw: e.draw ?? 0,
+                horseNameCh: e.horse_name_ch ?? '', jockeyNameCh: e.jockey_name_ch ?? '',
               });
-              return {
-                horseNumber: e.horse_number,
-                draw: e.draw,
-                nameCh: e.horse_name_ch,
-                jockeyCh: e.jockey_name_ch,
-                qimenScore: q.qimenScore,
-                rawScore: q.rawScore,
-                actualFinish: e.finishing_position,
-                winOdds: e.win_odds,
-              };
+              return { horseNumber: e.horse_number, draw: e.draw, nameCh: e.horse_name_ch, jockeyCh: e.jockey_name_ch,
+                       qimenScore: q.qimenScore, rawScore: q.rawScore, qimenDetails: q,
+                       actualFinish: e.finishing_position, winOdds: e.win_odds };
             });
-            // Pure qimen ranking — sort by qimenScore desc
             picks.sort((a: any, b: any) => (b.qimenScore ?? 0) - (a.qimenScore ?? 0));
             picks.forEach((p: any, i: number) => { p.rank = i + 1; });
 
-            const winner = picks.find((p: any) => p.actualFinish === 1);
-            const top3Actual = picks.filter((p: any) => p.actualFinish && p.actualFinish <= 3).map((p: any) => p.horseNumber);
-            const top3Pred = picks.slice(0, 3).map((p: any) => p.horseNumber);
-            const intersect = top3Pred.filter((h: number) => top3Actual.includes(h)).length;
+            const intersect = picks.slice(0,3).map((p:any)=>p.horseNumber).filter((h:number)=>picks.filter((p:any)=>p.actualFinish&&p.actualFinish<=3).map((p:any)=>p.horseNumber).includes(h)).length;
             const top1Hit = picks[0]?.actualFinish === 1;
-            const top3AnyHit = intersect > 0;
-
             racesEvaluated++;
             if (top1Hit) top1Hits++;
-            if (top3AnyHit) top3AnyHits++;
+            if (intersect>0) top3AnyHits++;
             top3IntersectSum += intersect;
 
             raceReports.push({
-              raceNumber: race.race_number,
-              distance: race.distance,
-              going: race.going,
+              raceNumber: race.race_number, distance: race.distance, going: race.going,
               qimenTop3: picks.slice(0, 3).map((p: any) => ({
-                rank: p.rank, horseNumber: p.horseNumber, nameCh: p.nameCh,
-                jockeyCh: p.jockeyCh, qimenScore: p.qimenScore, actualFinish: p.actualFinish, winOdds: p.winOdds,
+                rank: p.rank, horseNumber: p.horseNumber, nameCh: p.nameCh, jockeyCh: p.jockeyCh,
+                qimenScore: p.qimenScore, actualFinish: p.actualFinish, winOdds: p.winOdds,
+                ...(reasoning ? { reason: buildQimenReason(dayPaipan, p.qimenDetails) } : {}),
               })),
               actualTop3: picks.filter((p: any) => p.actualFinish && p.actualFinish <= 3)
                                 .sort((a: any, b: any) => a.actualFinish - b.actualFinish)
                                 .map((p: any) => ({ pos: p.actualFinish, horseNumber: p.horseNumber, nameCh: p.nameCh, qimenRank: p.rank, qimenScore: p.qimenScore, winOdds: p.winOdds })),
-              top1Hit, top3AnyHit, top3Intersect: intersect,
+              top1Hit, top3AnyHit: intersect>0, top3Intersect: intersect,
             });
           }
 
           return c.json({
             date,
-            paipan: { ju: dayPaipan.ju, yang: dayPaipan.yang, chaibu: dayPaipan.chaibu, palaceScores: dayPaipan.palaceScores },
+            paipan: { ju: dayPaipan.ju, yang: dayPaipan.yang, chaibu: dayPaipan.chaibu,
+                      palaceScores: dayPaipan.palaceScores, stars: dayPaipan.stars, doors: dayPaipan.doors, gods: dayPaipan.gods,
+                      zhiFu: dayPaipan.zhiFu, zhiShi: dayPaipan.zhiShi },
             summary: {
               racesEvaluated,
               top1HitRate: racesEvaluated ? Math.round(top1Hits / racesEvaluated * 1000) / 10 : null,
@@ -2378,11 +2391,94 @@ analyzeRoutes.get('/factors', (c) => {
               top3AvgIntersect: racesEvaluated ? Math.round(top3IntersectSum / racesEvaluated * 100) / 100 : null,
               top1Hits, top3AnyHits, top3IntersectSum,
             },
-            races: raceReports,
-            generatedAt: new Date().toISOString(),
+            races: raceReports, generatedAt: new Date().toISOString(),
           });
         } catch (err: any) {
           return c.json({ error: 'qimen-only-day failed', detail: err?.message ?? String(err) }, 500);
+        }
+      });
+
+      // GET /api/analyze/qimen-only-range?days=30 — Pure qimen aggregated over recent N days
+      analyzeRoutes.get('/qimen-only-range', async (c) => {
+        try {
+          const db = c.env.DB;
+          const days = Math.min(120, Math.max(1, Number(c.req.query('days') ?? 30)));
+          // Find all race days with results in last N days
+          const { results: dayRows } = await db.prepare(
+            `SELECT DISTINCT m.date FROM race_meetings m JOIN races r ON r.meeting_id=m.id JOIN race_results rr ON rr.race_id=r.id
+              WHERE rr.finishing_position IS NOT NULL AND m.date >= date('now','-' || ? || ' days')
+              ORDER BY m.date DESC`
+          ).bind(days).all<{date:string}>();
+          const allDates = (dayRows ?? []).map(r => r.date);
+          if (!allDates.length) return c.json({ error: 'no race days in range', days }, 404);
+
+          let totalRaces = 0, totalTop1 = 0, totalTop3Any = 0, totalIntersect = 0;
+          const perDay: any[] = [];
+          // Compare: pure qimen vs ELO baseline (using prediction_log baseline-bt rows if available)
+          for (const date of allDates) {
+            const meeting = await db.prepare(`SELECT * FROM race_meetings WHERE date = ? LIMIT 1`).bind(date).first<any>();
+            if (!meeting) continue;
+            const { results: races } = await db.prepare(`SELECT id, race_number FROM races WHERE meeting_id = ? AND race_number > 0`).bind(meeting.id).all<any>();
+            if (!races?.length) continue;
+            const raceIds = races.map((r: any) => r.id);
+            const ph = raceIds.map(() => '?').join(',');
+            const { results: entries } = await db.prepare(
+              `SELECT rr.race_id, rr.horse_number, rr.draw, rr.finishing_position,
+                      h.name_ch as horse_name_ch, j.name_ch as jockey_name_ch
+                 FROM race_results rr LEFT JOIN horses h ON h.id = rr.horse_id LEFT JOIN jockeys j ON j.id = rr.jockey_id
+                WHERE rr.race_id IN (${ph})`
+            ).bind(...raceIds).all<any>();
+            const dayPaipan = paipan(new Date(`${date}T05:00:00Z`));
+            const byRace = new Map<string, any[]>();
+            for (const e of entries ?? []) { if (!byRace.has(e.race_id)) byRace.set(e.race_id, []); byRace.get(e.race_id)!.push(e); }
+
+            let dayRaces = 0, dayT1 = 0, dayT3 = 0, dayIs = 0;
+            for (const race of races) {
+              const raceEntries = byRace.get(race.id) ?? [];
+              if (!raceEntries.length) continue;
+              const picks = raceEntries.map((e: any) => {
+                const q = qimenScoreForHorse(dayPaipan, { raceTime: new Date(`${date}T05:00:00Z`),
+                  horseNumber: e.horse_number ?? 0, draw: e.draw ?? 0,
+                  horseNameCh: e.horse_name_ch ?? '', jockeyNameCh: e.jockey_name_ch ?? '' });
+                return { horseNumber: e.horse_number, qimenScore: q.qimenScore, actualFinish: e.finishing_position };
+              });
+              picks.sort((a: any, b: any) => (b.qimenScore ?? 0) - (a.qimenScore ?? 0));
+              const top3pred = picks.slice(0,3).map((p:any)=>p.horseNumber);
+              const top3act = picks.filter((p:any)=>p.actualFinish&&p.actualFinish<=3).map((p:any)=>p.horseNumber);
+              const inter = top3pred.filter((h:number)=>top3act.includes(h)).length;
+              dayRaces++;
+              if (picks[0]?.actualFinish === 1) dayT1++;
+              if (inter > 0) dayT3++;
+              dayIs += inter;
+            }
+            totalRaces += dayRaces; totalTop1 += dayT1; totalTop3Any += dayT3; totalIntersect += dayIs;
+            perDay.push({ date, races: dayRaces, top1: dayT1, top3Any: dayT3, intersect: dayIs,
+                         ju: dayPaipan.ju, yang: dayPaipan.yang });
+          }
+
+          // Fetch ELO baseline-bt comparison from prediction_log (if it exists for these dates)
+          const dateList = allDates.map(()=>'?').join(',');
+          const eloAgg = await db.prepare(
+            `SELECT COUNT(DISTINCT date||':'||race_number) AS races,
+                    SUM(CASE WHEN predicted_rank=1 AND is_hit_top1=1 THEN 1 ELSE 0 END) AS top1,
+                    SUM(CASE WHEN predicted_rank<=3 AND is_hit_top3=1 THEN 1 ELSE 0 END) AS top3hits_rows
+              FROM prediction_log
+             WHERE variant='baseline-bt' AND date IN (${dateList}) AND actual_finish IS NOT NULL`
+          ).bind(...allDates).first<any>().catch(() => null);
+
+          return c.json({
+            rangeDays: days, datesEvaluated: allDates.length, dates: allDates,
+            summary: {
+              totalRaces, top1Hits: totalTop1, top3AnyHits: totalTop3Any, top3IntersectSum: totalIntersect,
+              top1HitRate: totalRaces ? Math.round(totalTop1/totalRaces*1000)/10 : null,
+              top3AnyHitRate: totalRaces ? Math.round(totalTop3Any/totalRaces*1000)/10 : null,
+              top3AvgIntersect: totalRaces ? Math.round(totalIntersect/totalRaces*100)/100 : null,
+            },
+            eloBaselineComparison: eloAgg,
+            perDay, generatedAt: new Date().toISOString(),
+          });
+        } catch (err: any) {
+          return c.json({ error: 'qimen-only-range failed', detail: err?.message ?? String(err) }, 500);
         }
       });
 
