@@ -1,4 +1,4 @@
-# 純梅花易數(後天數) backtest @ 2026-05-09T18:58:50Z
+# 純梅花易數(後天數) backtest @ 2026-05-09T19:42:30Z
 
 ## A. 30日 aggregate
 ```json
@@ -17,12 +17,12 @@
     ],
     "summary": {
         "totalRaces": 72,
-        "top1Hits": 7,
-        "top3AnyHits": 51,
-        "top3IntersectSum": 65,
-        "top1HitRate": 9.7,
-        "top3AnyHitRate": 70.8,
-        "top3AvgIntersect": 0.9
+        "top1Hits": 6,
+        "top3AnyHits": 49,
+        "top3IntersectSum": 59,
+        "top1HitRate": 8.3,
+        "top3AnyHitRate": 68.1,
+        "top3AvgIntersect": 0.82
     },
     "perDay": [
         {
@@ -36,53 +36,53 @@
             "date": "2026-05-03",
             "races": 11,
             "top1": 2,
-            "top3Any": 8,
+            "top3Any": 9,
             "intersect": 9
         },
         {
             "date": "2026-04-29",
             "races": 9,
             "top1": 0,
-            "top3Any": 7,
-            "intersect": 10
+            "top3Any": 5,
+            "intersect": 6
         },
         {
             "date": "2026-04-26",
             "races": 11,
             "top1": 3,
-            "top3Any": 10,
-            "intersect": 15
+            "top3Any": 8,
+            "intersect": 10
         },
         {
             "date": "2026-04-22",
             "races": 9,
             "top1": 0,
             "top3Any": 5,
-            "intersect": 7
+            "intersect": 5
         },
         {
             "date": "2026-04-19",
             "races": 11,
-            "top1": 1,
+            "top1": 0,
             "top3Any": 7,
             "intersect": 8
         },
         {
             "date": "2026-04-15",
             "races": 9,
-            "top1": 0,
-            "top3Any": 6,
-            "intersect": 7
+            "top1": 1,
+            "top3Any": 7,
+            "intersect": 11
         },
         {
             "date": "2026-04-12",
             "races": 11,
-            "top1": 1,
+            "top1": 0,
             "top3Any": 8,
-            "intersect": 9
+            "intersect": 10
         }
     ],
-    "generatedAt": "2026-05-09T18:58:51.788Z"
+    "generatedAt": "2026-05-09T19:42:31.387Z"
 }
 ```
 
@@ -107,62 +107,62 @@
             "meihuaTop3": [
                 {
                     "rank": 1,
-                    "horseNumber": 8,
-                    "nameCh": "\u904b\u4f86\u52c7\u58eb",
-                    "jockeyCh": "\u9ec3\u667a\u5f18",
-                    "meihuaScore": 3.9,
-                    "actualFinish": 11,
-                    "winOdds": 88,
+                    "horseNumber": 4,
+                    "nameCh": "\u5341\u529b",
+                    "jockeyCh": "\u5967\u723e\u6c11",
+                    "meihuaScore": 5,
+                    "actualFinish": 6,
+                    "winOdds": 28,
                     "reason": {
                         "verdict": "\u2605\u2605\u2605 \u6613\u5366\u5927\u65fa\uff1a\u672c\u5366\u8b8a\u5366\u4ff1\u5409\uff0c\u9ad4\u7528\u76f8\u751f\uff0c\u5b9c\u91cd\u6ce8",
                         "breakdown": [
-                            "\u4e0a\u5366\u3014\u4e7e\u3015(\u6578\u00b7\u99ac\u865f+\u6a94\u4f4d=13) \uff0f \u4e0b\u5366\u3014\u5764\u3015(\u8c61\u00b7\u6295\u7968:\u904b\u2192\u5764\u3001\u52c7\u2192\u9707\u3001\u9ec3\u2192\u5764\u3001\u667a\u2192\u574e)",
-                            "\u52d5\u723b\uff1a\u7b2c2\u723b (\u6642\u8fb0\u5730\u652f7)",
-                            "\u672c\u5366\uff1a\u5730\u5929\u6cf0(11) \u2192 +5",
-                            "\u8b8a\u5366\uff1a\u6c34\u5929\u9700(5) \u2192 +1",
-                            "\u9ad4\u7528\uff1a\u9ad4\u3014\u4e7e(\u4e0a\u5366)\u3015 \u2194 \u7528\u3014\u5764(\u4e0b\u5366)\u3015 \u2192 \u7528\u751f\u9ad4(\u5f97\u52a9,\u5409) (+0.5)"
+                            "\u4e0a\u5366\u3014\u826e\u3015(\u6578\u00b7\u99ac\u865f+\u6a94\u4f4d=7) \uff0f \u4e0b\u5366\u3014\u5764\u3015(\u8c61\u00b7\u6295\u7968:\u723e\u2192\u5764\u00d70.5)",
+                            "\u52d5\u723b\uff1a\u7b2c5\u723b (\u6642\u8fb0\u5730\u652f7)",
+                            "\u672c\u5366\uff1a\u5730\u5c71\u8b19(15) \u2192 +5",
+                            "\u8b8a\u5366\uff1a\u5730\u98a8\u5347(46) \u2192 +4",
+                            "\u9ad4\u7528\uff1a\u9ad4\u3014\u5764(\u4e0b\u5366)\u3015 \u2194 \u7528\u3014\u826e(\u4e0a\u5366)\u3015 \u2192 \u6bd4\u548c(\u5c0f\u5409) (+0.5)"
                         ],
-                        "totalScore": 3.9
+                        "totalScore": 5
                     }
                 },
                 {
                     "rank": 2,
-                    "horseNumber": 1,
-                    "nameCh": "\u5149\u8f1d\u6b72\u6708",
-                    "jockeyCh": "\u970d\u5b8f\u8072",
-                    "meihuaScore": 2.3,
-                    "actualFinish": 4,
-                    "winOdds": 6.3,
+                    "horseNumber": 14,
+                    "nameCh": "\u6a02\u77da\u5fc3\u6a5f",
+                    "jockeyCh": "\u694a\u660e\u7db8",
+                    "meihuaScore": 4.6,
+                    "actualFinish": 8,
+                    "winOdds": 74,
                     "reason": {
-                        "verdict": "\u2605\u2605 \u6613\u5366\u504f\u65fa\uff1a\u5409\u6c23\u7565\u52dd",
+                        "verdict": "\u2605\u2605\u2605 \u6613\u5366\u5927\u65fa\uff1a\u672c\u5366\u8b8a\u5366\u4ff1\u5409\uff0c\u9ad4\u7528\u76f8\u751f\uff0c\u5b9c\u91cd\u6ce8",
                         "breakdown": [
-                            "\u4e0a\u5366\u3014\u96e2\u3015(\u6578\u00b7\u99ac\u865f+\u6a94\u4f4d=8) \uff0f \u4e0b\u5366\u3014\u96e2\u3015(\u8c61\u00b7\u6295\u7968:\u5149\u2192\u96e2\u3001\u8f1d\u2192\u96e2\u3001\u8072\u2192\u9707)",
-                            "\u52d5\u723b\uff1a\u7b2c2\u723b (\u6642\u8fb0\u5730\u652f7)",
-                            "\u672c\u5366\uff1a\u96e2\u70ba\u706b(30) \u2192 +1",
-                            "\u8b8a\u5366\uff1a\u5929\u706b\u540c\u4eba(13) \u2192 +3",
-                            "\u9ad4\u7528\uff1a\u9ad4\u3014\u96e2(\u4e0a\u5366)\u3015 \u2194 \u7528\u3014\u96e2(\u4e0b\u5366)\u3015 \u2192 \u6bd4\u548c(\u5c0f\u5409) (+0.5)"
+                            "\u4e0a\u5366\u3014\u5dfd\u3015(\u6578\u00b7\u99ac\u865f+\u6a94\u4f4d=28) \uff0f \u4e0b\u5366\u3014\u5764\u3015(\u8c61\u00b7\u6295\u7968:\u6a02\u2192\u5764\u00d73\u3001\u5fc3\u2192\u96e2\u00d72\u3001\u694a\u2192\u5dfd\u00d70.5\u3001\u660e\u2192\u96e2\u00d70.5)",
+                            "\u52d5\u723b\uff1a\u7b2c1\u723b (\u6642\u8fb0\u5730\u652f7)",
+                            "\u672c\u5366\uff1a\u5730\u98a8\u5347(46) \u2192 +4",
+                            "\u8b8a\u5366\uff1a\u96f7\u98a8\u6046(32) \u2192 +3",
+                            "\u9ad4\u7528\uff1a\u9ad4\u3014\u5dfd(\u4e0a\u5366)\u3015 \u2194 \u7528\u3014\u5764(\u4e0b\u5366)\u3015 \u2192 \u9ad4\u514b\u7528(\u5927\u5409) (+1)"
                         ],
-                        "totalScore": 2.3
+                        "totalScore": 4.6
                     }
                 },
                 {
                     "rank": 3,
-                    "horseNumber": 6,
-                    "nameCh": "\u5e78\u904b\u50b3\u627f",
-                    "jockeyCh": "\u83ab\u96f7\u62c9",
-                    "meihuaScore": 2.3,
-                    "actualFinish": 7,
+                    "horseNumber": 10,
+                    "nameCh": "\u4e00\u9e7f\u6b61\u9a30",
+                    "jockeyCh": "\u937e\u6613\u79ae",
+                    "meihuaScore": 3.6,
+                    "actualFinish": 5,
                     "winOdds": 12,
                     "reason": {
-                        "verdict": "\u2605\u2605 \u6613\u5366\u504f\u65fa\uff1a\u5409\u6c23\u7565\u52dd",
+                        "verdict": "\u2605\u2605\u2605 \u6613\u5366\u5927\u65fa\uff1a\u672c\u5366\u8b8a\u5366\u4ff1\u5409\uff0c\u9ad4\u7528\u76f8\u751f\uff0c\u5b9c\u91cd\u6ce8",
                         "breakdown": [
-                            "\u4e0a\u5366\u3014\u5764\u3015(\u6578\u00b7\u99ac\u865f+\u6a94\u4f4d=18) \uff0f \u4e0b\u5366\u3014\u5764\u3015(\u8c61\u00b7\u6295\u7968:\u904b\u2192\u5764\u3001\u96f7\u2192\u9707)",
-                            "\u52d5\u723b\uff1a\u7b2c5\u723b (\u6642\u8fb0\u5730\u652f7)",
-                            "\u672c\u5366\uff1a\u5764\u70ba\u5730(2) \u2192 +3",
-                            "\u8b8a\u5366\uff1a\u5730\u6c34\u5e2b(7) \u2192 +0",
-                            "\u9ad4\u7528\uff1a\u9ad4\u3014\u5764(\u4e0b\u5366)\u3015 \u2194 \u7528\u3014\u5764(\u4e0a\u5366)\u3015 \u2192 \u6bd4\u548c(\u5c0f\u5409) (+0.5)"
+                            "\u4e0a\u5366\u3014\u9707\u3015(\u6578\u00b7\u99ac\u865f+\u6a94\u4f4d=11) \uff0f \u4e0b\u5366\u3014\u514c\u3015(\u8c61\u00b7\u6295\u7968:\u6b61\u2192\u514c\u00d72\u3001\u9a30\u2192\u9707\u00d72)",
+                            "\u52d5\u723b\uff1a\u7b2c4\u723b (\u6642\u8fb0\u5730\u652f7)",
+                            "\u672c\u5366\uff1a\u6fa4\u96f7\u96a8(17) \u2192 +3",
+                            "\u8b8a\u5366\uff1a\u6fa4\u5730\u8403(45) \u2192 +2",
+                            "\u9ad4\u7528\uff1a\u9ad4\u3014\u514c(\u4e0b\u5366)\u3015 \u2194 \u7528\u3014\u9707(\u4e0a\u5366)\u3015 \u2192 \u9ad4\u514b\u7528(\u5927\u5409) (+1)"
                         ],
-                        "totalScore": 2.3
+                        "totalScore": 3.6
                     }
                 }
             ],
@@ -171,24 +171,24 @@
                     "pos": 1,
                     "horseNumber": 9,
                     "nameCh": "\u5927\u5229\u597d\u904b",
-                    "meihuaRank": 5,
-                    "meihuaScore": 2.1,
+                    "meihuaRank": 12,
+                    "meihuaScore": -0.3,
                     "winOdds": 3.8
                 },
                 {
                     "pos": 2,
                     "horseNumber": 13,
                     "nameCh": "\u6771\u65b9\u9b45\u5f71",
-                    "meihuaRank": 11,
-                    "meihuaScore": 0.7,
+                    "meihuaRank": 8,
+                    "meihuaScore": 1.8,
                     "winOdds": 59
                 },
                 {
                     "pos": 3,
                     "horseNumber": 11,
                     "nameCh": "\u4e0a\u5e02\u9b45\u529b",
-                    "meihuaRank": 6,
-                    "meihuaScore": 1.9,
+                    "meihuaRank": 14,
+                    "meihuaScore": -2.1,
                     "winOdds": 3.5
                 }
             ],
@@ -197,6 +197,6 @@
             "top3Intersect": 0
         }
     ],
-    "generatedAt": "2026-05-09T18:58:52.298Z"
+    "generatedAt": "2026-05-09T19:42:31.722Z"
 }
 ```
