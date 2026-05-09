@@ -988,6 +988,20 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
     </div>
     <div id="todayPredictResults"></div>
 
+    <h2>📊 預測準確率回測（Phase A · 滾動視窗）</h2>
+    <div style="margin:8px 0">
+      <label style="font-size:13px;color:var(--mut)">視窗：
+        <select id="accDays" onchange="loadPredictionAccuracy()" style="padding:3px 6px">
+          <option value="7">過去 7 日</option>
+          <option value="30" selected>過去 30 日</option>
+          <option value="90">過去 90 日</option>
+        </select>
+      </label>
+      <span id="accStatus" style="margin-left:10px;font-size:12px;color:var(--mut)"></span>
+      <button onclick="triggerBackfill()" style="margin-left:10px;padding:3px 10px;font-size:12px">🔄 立即回填賽果</button>
+    </div>
+    <div id="predAccuracyResults"></div>
+
     <h2>即日賽事排位表 + 即時賠率 <span id="nrdLabel" style="font-size:13px;font-weight:400;color:var(--mut)"></span></h2>
     <div id="nrdRaces"></div>
     <div id="nrdHorses"></div>
@@ -1550,6 +1564,63 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
         return loadTodayPredictions(true);
       }
 
+    // === Phase A · prediction accuracy panel ===
+    async function loadPredictionAccuracy() {
+      var statusEl = document.getElementById('accStatus');
+      var resultsEl = document.getElementById('predAccuracyResults');
+      var days = document.getElementById('accDays').value || '30';
+      statusEl.textContent = '載入中…';
+      try {
+        var res = await fetch('/api/analyze/prediction-accuracy?days=' + days);
+        var data = await res.json();
+        if (data.error) { statusEl.textContent = '錯誤：' + data.error; return; }
+        if (!data.summary || !data.summary.length) {
+          statusEl.textContent = '尚未有完成回填的歷史預測資料';
+          resultsEl.innerHTML = '<div style="padding:12px;color:var(--mut);font-size:13px">系統會在每日 03:00 HKT 自動回填過去 7 日的賽果到 prediction_log。第一份回測報告需累積 ≥1 個賽日資料。</div>';
+          return;
+        }
+        statusEl.textContent = '視窗起 ' + data.sinceDate + ' · ' + data.summary.length + ' 個變體';
+        var html = '<table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr style="background:#222;color:#fff">'
+          + '<th style="padding:6px;text-align:left">變體</th>'
+          + '<th style="padding:6px;text-align:right">場次</th>'
+          + '<th style="padding:6px;text-align:right">總馬數</th>'
+          + '<th style="padding:6px;text-align:right">膽馬命中率</th>'
+          + '<th style="padding:6px;text-align:right">前三貼士命中率</th>'
+          + '<th style="padding:6px;text-align:right">Brier 分數</th>'
+          + '<th style="padding:6px;text-align:right">Log Loss</th>'
+          + '</tr></thead><tbody>';
+        for (var i=0;i<data.summary.length;i++) {
+          var s = data.summary[i];
+          html += '<tr style="border-bottom:1px solid #ddd">'
+            + '<td style="padding:6px"><strong>' + s.variant + '</strong></td>'
+            + '<td style="padding:6px;text-align:right">' + s.races + '</td>'
+            + '<td style="padding:6px;text-align:right">' + s.horses + '</td>'
+            + '<td style="padding:6px;text-align:right">' + (s.bankerHitRate != null ? s.bankerHitRate + '%' : '—') + '</td>'
+            + '<td style="padding:6px;text-align:right">' + (s.top3PickHitRate != null ? s.top3PickHitRate + '%' : '—') + '</td>'
+            + '<td style="padding:6px;text-align:right">' + (s.brierWin != null ? s.brierWin : '—') + '</td>'
+            + '<td style="padding:6px;text-align:right">' + (s.logLossWin != null ? s.logLossWin : '—') + '</td>'
+            + '</tr>';
+        }
+        html += '</tbody></table>';
+        html += '<div style="margin-top:6px;font-size:11px;color:var(--mut)">膽馬 = 預測排名第 1 的馬實際入第 1。前三貼士命中率 = 預測排名 1-3 的馬實際入前 3 的比率。Brier 越低越好（隨機 = 0.25），Log Loss 越低越好。</div>';
+        resultsEl.innerHTML = html;
+      } catch (e) {
+        statusEl.textContent = '錯誤：' + e.message;
+      }
+    }
+    async function triggerBackfill() {
+      var statusEl = document.getElementById('accStatus');
+      statusEl.textContent = '回填中…';
+      try {
+        var res = await fetch('/admin/api/backfill-prediction-results', { method: 'POST' });
+        var data = await res.json();
+        statusEl.textContent = '回填完成：處理 ' + (data.daysProcessed||0) + ' 日，更新 ' + (data.totalUpdated||0) + ' 筆';
+        await loadPredictionAccuracy();
+      } catch (e) {
+        statusEl.textContent = '錯誤：' + e.message;
+      }
+    }
+
     function renderTodayPredictions(data) {
       var el = document.getElementById('todayPredictResults');
       if (!el) return;
@@ -1634,6 +1705,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
   safeRender('renderMeetings', renderMeetings);
   safeRender('loadHitRateRollup', loadHitRateRollup);
         safeRender('loadTodayPredictions', () => loadTodayPredictions(false));
+        safeRender('loadPredictionAccuracy', loadPredictionAccuracy);
     safeRender('renderNextRaceDay', renderNextRaceDay);
   document.getElementById('refreshClock').textContent = '載入時間：' + new Date().toLocaleTimeString('zh-HK') + ' · 每 60 秒自動刷新';
   // Auto-reload page every 60s for fresh data — but skip while autoLoadHitChain is running
