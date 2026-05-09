@@ -100,6 +100,154 @@ export const analyzeRoutes = new Hono<{ Bindings: Env }>();
     ).bind(date, engine, venue, JSON.stringify(payload), new Date().toISOString(), computeMs).run();
   }
 
+  // === Prediction log (Phase A · 回測底盤) ==============================
+  // Stores every per-horse prediction so we can compare against actual results.
+  // variant: 'baseline' (current 8-factor) | 'qimen' (奇門遁甲 experimental) | future...
+  // Composite key (date, race_number, horse_id, engine, variant) → INSERT OR REPLACE on re-run.
+  export async function ensurePredictionLogTable(db: D1Database): Promise<void> {
+    await db.prepare(`CREATE TABLE IF NOT EXISTS prediction_log (
+      date TEXT NOT NULL,
+      race_number INTEGER NOT NULL,
+      horse_id TEXT NOT NULL,
+      engine TEXT NOT NULL DEFAULT 'v12',
+      variant TEXT NOT NULL DEFAULT 'baseline',
+      horse_number INTEGER,
+      draw INTEGER,
+      horse_elo REAL,
+      elo_source TEXT,
+      elo_confidence REAL,
+      elo_composite REAL,
+      factor_bonus REAL,
+      final_score REAL,
+      p_win REAL,
+      p_top3 REAL,
+      predicted_rank INTEGER,
+      actual_finish INTEGER,
+      actual_win_odds REAL,
+      is_hit_top1 INTEGER,
+      is_hit_top3 INTEGER,
+      is_hit_top4 INTEGER,
+      generated_at TEXT NOT NULL,
+      joined_at TEXT,
+      PRIMARY KEY (date, race_number, horse_id, engine, variant)
+    )`).run();
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_prediction_log_date ON prediction_log(date)`).run().catch(() => {});
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_prediction_log_join ON prediction_log(date, joined_at)`).run().catch(() => {});
+  }
+
+  // Write all per-horse rows for a single race-day report payload. Idempotent.
+  export async function writePredictionLog(db: D1Database, payload: any, variant: string = 'baseline'): Promise<{ rows: number }> {
+    if (!payload?.date || !Array.isArray(payload?.races)) return { rows: 0 };
+    await ensurePredictionLogTable(db);
+    const engine = payload.eloEngine ?? 'v12';
+    const generatedAt = payload.generatedAt ?? new Date().toISOString();
+    const stmts: D1PreparedStatement[] = [];
+    for (const race of payload.races) {
+      if (!race?.picks?.length || race.raceNumber == null || race.raceNumber === 0) continue;
+      for (const p of race.picks) {
+        if (!p.horseId) continue;
+        stmts.push(
+          db.prepare(`INSERT OR REPLACE INTO prediction_log
+            (date, race_number, horse_id, engine, variant, horse_number, draw,
+             horse_elo, elo_source, elo_confidence, elo_composite, factor_bonus, final_score,
+             p_win, p_top3, predicted_rank, generated_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
+            payload.date, race.raceNumber, p.horseId, engine, variant,
+            p.horseNumber ?? null, p.draw ?? null,
+            p.horseElo ?? null, p.eloSource ?? null, p.horseConfidence ?? null,
+            p.eloComposite ?? null, p.factorBonus ?? null, p.finalScore ?? null,
+            p.pWin ?? null, p.pTop3 ?? null, p.rank ?? null,
+            generatedAt
+          )
+        );
+      }
+    }
+    if (!stmts.length) return { rows: 0 };
+    // batch in chunks of 50 (D1 batch limit ~100)
+    for (let i = 0; i < stmts.length; i += 50) {
+      await db.batch(stmts.slice(i, i + 50));
+    }
+    return { rows: stmts.length };
+  }
+
+  // Join predictions with actual race_results. Idempotent — only updates rows whose actual_finish IS NULL.
+  export async function joinPredictionResults(db: D1Database, date: string): Promise<{ updated: number; races: number }> {
+    await ensurePredictionLogTable(db);
+    // Pull all results for this date
+    const { results: actuals } = await db.prepare(
+      `SELECT r.race_number, rr.horse_id, rr.finishing_position, rr.win_odds
+       FROM race_meetings m
+       JOIN races r ON r.meeting_id = m.id
+       JOIN race_results rr ON rr.race_id = r.id
+       WHERE m.date = ? AND rr.finishing_position > 0`
+    ).bind(date).all<any>().catch(() => ({ results: [] as any[] }));
+    if (!actuals?.length) return { updated: 0, races: 0 };
+    const stmts: D1PreparedStatement[] = [];
+    const seenRaces = new Set<number>();
+    for (const a of actuals) {
+      seenRaces.add(a.race_number);
+      const finish = Number(a.finishing_position);
+      const top1 = finish === 1 ? 1 : 0;
+      const top3 = finish >= 1 && finish <= 3 ? 1 : 0;
+      const top4 = finish >= 1 && finish <= 4 ? 1 : 0;
+      stmts.push(
+        db.prepare(`UPDATE prediction_log
+          SET actual_finish = ?, actual_win_odds = ?, is_hit_top1 = ?, is_hit_top3 = ?, is_hit_top4 = ?, joined_at = ?
+          WHERE date = ? AND race_number = ? AND horse_id = ? AND actual_finish IS NULL`)
+          .bind(finish, a.win_odds ?? null, top1, top3, top4, new Date().toISOString(), date, a.race_number, a.horse_id)
+      );
+    }
+    let updated = 0;
+    for (let i = 0; i < stmts.length; i += 50) {
+      const res = await db.batch(stmts.slice(i, i + 50));
+      for (const r of res) updated += (r.meta?.changes ?? 0);
+    }
+    return { updated, races: seenRaces.size };
+  }
+
+  // Rolling N-day hit-rate / Brier / log-loss summary by variant.
+  export async function summarizePredictionAccuracy(db: D1Database, days: number = 30): Promise<any> {
+    await ensurePredictionLogTable(db);
+    const sinceDate = new Date(Date.now() - days * 86400000).toISOString().substring(0, 10);
+    const { results } = await db.prepare(
+      `SELECT date, race_number, variant, horse_id, p_win, p_top3, predicted_rank,
+              actual_finish, is_hit_top1, is_hit_top3, is_hit_top4
+       FROM prediction_log
+       WHERE date >= ? AND actual_finish IS NOT NULL
+       ORDER BY date DESC, race_number ASC`
+    ).bind(sinceDate).all<any>().catch(() => ({ results: [] as any[] }));
+    const byVariant: Record<string, any> = {};
+    const seenRaces = new Set<string>();
+    for (const r of (results ?? [])) {
+      const v = r.variant ?? 'baseline';
+      if (!byVariant[v]) byVariant[v] = { variant: v, races: 0, horses: 0, top1Picks: 0, top1Hits: 0, top3Picks3: 0, top3Hits: 0, brierWin: 0, brierWinN: 0, logLossWin: 0 };
+      const b = byVariant[v];
+      const raceKey = `${r.date}|${r.race_number}|${v}`;
+      if (!seenRaces.has(raceKey)) { seenRaces.add(raceKey); b.races++; }
+      b.horses++;
+      if (r.predicted_rank === 1) { b.top1Picks++; if (r.is_hit_top1) b.top1Hits++; }
+      if (r.predicted_rank != null && r.predicted_rank <= 3) { b.top3Picks3++; if (r.is_hit_top3) b.top3Hits++; }
+      if (r.p_win != null && r.is_hit_top1 != null) {
+        const y = r.is_hit_top1 ? 1 : 0;
+        const p = Math.min(0.999, Math.max(0.001, r.p_win));
+        b.brierWin += (p - y) * (p - y);
+        b.brierWinN++;
+        b.logLossWin += -(y * Math.log(p) + (1 - y) * Math.log(1 - p));
+      }
+    }
+    const summary = Object.values(byVariant).map((b: any) => ({
+      variant: b.variant,
+      races: b.races,
+      horses: b.horses,
+      bankerHitRate: b.top1Picks ? Math.round((b.top1Hits / b.top1Picks) * 1000) / 10 : null,
+      top3PickHitRate: b.top3Picks3 ? Math.round((b.top3Hits / b.top3Picks3) * 1000) / 10 : null,
+      brierWin: b.brierWinN ? Math.round((b.brierWin / b.brierWinN) * 10000) / 10000 : null,
+      logLossWin: b.brierWinN ? Math.round((b.logLossWin / b.brierWinN) * 10000) / 10000 : null,
+    }));
+    return { sinceDate, days, summary };
+  }
+  
+
   // === New-horse ELO seed (Stage 8 data-completeness fix) ==============
   // When horse_elo_snapshots has no row (first-time runner / newly-imported),
   // derive a baseline ELO from HKJC handicap rating, or class median if none.
@@ -1624,11 +1772,15 @@ analyzeRoutes.get('/factors', (c) => {
               if (seed.source === 'rating-seed') seedRatingCount++; else seedClassCount++;
             }
             const jElo = jRead?.rating ?? null; const tElo = tRead?.rating ?? null;
+            // Phase A: down-weight horse ELO when low-confidence (seed) so jockey+trainer carry more.
+            // snapshot w/o explicit conf → 1.0; rating-seed → 0.4; class-seed → 0.2.
+            const horseConfFactor = eloSource === 'snapshot' ? (hRead?.confidence ?? 1) : (seedConfidence ?? 0);
+            const effHorseW = ELO_WEIGHTS.horse * horseConfFactor;
             const parts: number[] = [];
-            if (hElo != null) parts.push(hElo * ELO_WEIGHTS.horse);
+            if (hElo != null) parts.push(hElo * effHorseW);
             if (jElo != null) parts.push(jElo * ELO_WEIGHTS.jockey);
             if (tElo != null) parts.push(tElo * ELO_WEIGHTS.trainer);
-            const wSum = (hElo != null ? ELO_WEIGHTS.horse : 0) + (jElo != null ? ELO_WEIGHTS.jockey : 0) + (tElo != null ? ELO_WEIGHTS.trainer : 0);
+            const wSum = (hElo != null ? effHorseW : 0) + (jElo != null ? ELO_WEIGHTS.jockey : 0) + (tElo != null ? ELO_WEIGHTS.trainer : 0);
             const eloComposite = wSum > 0 ? parts.reduce((a, b) => a + b, 0) / wSum : null;
             const lastDate = recencyMap.get(horseId) ?? null;
             const daysSince = lastDate ? Math.round((new Date(targetDate!).getTime() - new Date(lastDate).getTime()) / 86400000) : null;
@@ -1645,7 +1797,7 @@ analyzeRoutes.get('/factors', (c) => {
             const base = eloComposite != null ? (eloComposite - 1500) / 200 : 0;
             const finalScore = eloComposite != null ? eloComposite + factorBonus : null;
             const computedConf = hRead?.confidence != null ? Math.round(hRead.confidence*100)/100 : (seedConfidence != null ? seedConfidence : null);
-            return { horseId, horseNumber: e.horse_number, nameCh: e.name_ch, nameEn: e.name_en, jockeyCh: e.jockey_name, trainerCh: e.trainer_name, draw: e.draw, declaredWeight: e.declared_weight, rating: e.rating, horseElo: hElo != null ? Math.round(hElo*10)/10 : null, jockeyElo: jElo != null ? Math.round(jElo*10)/10 : null, trainerElo: tElo != null ? Math.round(tElo*10)/10 : null, eloComposite: eloComposite != null ? Math.round(eloComposite*10)/10 : null, eloEngine: hRead?.engine ?? engine, eloSource, horseConfidence: computedConf, horseFrozen: hRead?.isFrozen ?? false, horseRetired: hRead?.isRetired ?? false, factorBonus: Math.round(factorBonus*10)/10, factorBreakdown, finalScore: finalScore != null ? Math.round(finalScore*10)/10 : null, daysSinceLast: daysSince, _score: base + factorBonus / 100 };
+            return { horseId, horseNumber: e.horse_number, nameCh: e.name_ch, nameEn: e.name_en, jockeyCh: e.jockey_name, trainerCh: e.trainer_name, draw: e.draw, declaredWeight: e.declared_weight, rating: e.rating, horseElo: hElo != null ? Math.round(hElo*10)/10 : null, jockeyElo: jElo != null ? Math.round(jElo*10)/10 : null, trainerElo: tElo != null ? Math.round(tElo*10)/10 : null, eloComposite: eloComposite != null ? Math.round(eloComposite*10)/10 : null, eloEngine: hRead?.engine ?? engine, eloSource, horseConfidence: computedConf, horseConfWeightFactor: Math.round(horseConfFactor*100)/100, horseFrozen: hRead?.isFrozen ?? false, horseRetired: hRead?.isRetired ?? false, factorBonus: Math.round(factorBonus*10)/10, factorBreakdown, finalScore: finalScore != null ? Math.round(finalScore*10)/10 : null, daysSinceLast: daysSince, _score: base + factorBonus / 100 };
           });
           const expScores = enriched.map((s) => Math.exp(s._score));
           const Z = expScores.reduce((a, b) => a + b, 0) || 1;
@@ -1662,6 +1814,9 @@ analyzeRoutes.get('/factors', (c) => {
           seedSummary: { ratingSeeded: seedRatingCount, classSeeded: seedClassCount, totalSeeded: seedRatingCount + seedClassCount },
           computeMs, generatedAt: new Date().toISOString(),
         };
+        // Phase A: write each prediction to prediction_log for back-test (idempotent).
+        const logResult = await writePredictionLog(db, payload, 'baseline').catch((e) => ({ rows: 0, error: String(e?.message ?? e) }));
+        payload.predictionLog = logResult;
         await writeRaceDayReportCache(db, targetDate, engine, meeting.venue, payload, computeMs).catch(() => {});
         return payload;
       }
@@ -1684,9 +1839,32 @@ analyzeRoutes.get('/factors', (c) => {
           const engine: EloEngine = c.req.query('engine') === 'v11' ? 'v11' : 'v12';
           const result = await runRaceDayReportCompute(c.env.DB, engine, { fresh: true });
           if (result?.error) return c.json({ error: result.error }, (result.status ?? 500) as any);
-          return c.json({ ok: true, date: result.date, venue: result.venue, races: result.races?.length ?? 0, computeMs: result.computeMs, seedSummary: result.seedSummary, generatedAt: result.generatedAt });
+          return c.json({ ok: true, date: result.date, venue: result.venue, races: result.races?.length ?? 0, computeMs: result.computeMs, seedSummary: result.seedSummary, predictionLog: result.predictionLog, generatedAt: result.generatedAt });
         } catch (err: any) {
           return c.json({ error: 'refresh failed', detail: err?.message ?? String(err) }, 500);
+        }
+      });
+
+      // GET /api/analyze/prediction-accuracy?days=30 — rolling back-test summary by variant
+      analyzeRoutes.get('/prediction-accuracy', async (c) => {
+        try {
+          const days = Math.max(1, Math.min(365, Number(c.req.query('days') ?? '30')));
+          const summary = await summarizePredictionAccuracy(c.env.DB, days);
+          return c.json(summary);
+        } catch (err: any) {
+          return c.json({ error: 'summary failed', detail: err?.message ?? String(err) }, 500);
+        }
+      });
+
+      // POST /api/analyze/join-prediction-results?date=YYYY-MM-DD — backfill actuals into prediction_log
+      analyzeRoutes.post('/join-prediction-results', async (c) => {
+        try {
+          const date = c.req.query('date');
+          if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return c.json({ error: 'date=YYYY-MM-DD required' }, 400);
+          const r = await joinPredictionResults(c.env.DB, date);
+          return c.json({ ok: true, date, ...r });
+        } catch (err: any) {
+          return c.json({ error: 'join failed', detail: err?.message ?? String(err) }, 500);
         }
       });
     
