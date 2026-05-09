@@ -1,66 +1,65 @@
 name: Run backtest report
 
-  on:
-    workflow_dispatch:
-      inputs:
-        days:
-          description: "Range days"
-          required: false
-          default: "30"
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "Range days"
+        required: false
+        default: "30"
 
-  permissions:
-    contents: write
+permissions:
+  contents: write
 
-  jobs:
-    run:
-      runs-on: ubuntu-latest
-      timeout-minutes: 25
-      steps:
-        - uses: actions/checkout@v4
-        - name: Generate reports
-          env:
-            BASE: "https://tianxi-backend.tianxi-entertainment.workers.dev"
-            DAYS: "${{ inputs.days }}"
-          run: |
-            set +e
-            mkdir -p reports
-            OUT="reports/meihua-pure.md"
-            : > "$OUT"
-            echo "# 純梅花(筆畫 v1) backtest @ $(date -u +%FT%TZ)" >> "$OUT"
-            echo "" >> "$OUT"
-            echo "## A. ${DAYS}日 aggregate" >> "$OUT"
-            echo '```json' >> "$OUT"
-            curl -sS --max-time 180 "$BASE/api/analyze/meihua-only-range?days=$DAYS" | python3 -m json.tool >> "$OUT" 2>&1
-            echo '```' >> "$OUT"
-            echo "" >> "$OUT"
-            echo "## B. 最近賽日 — 每場 Top3 含專業梅花解讀" >> "$OUT"
-            echo '```json' >> "$OUT"
-            curl -sS --max-time 90 "$BASE/api/analyze/meihua-only-day?reasoning=1" | python3 -m json.tool >> "$OUT" 2>&1
-            echo '```' >> "$OUT"
-            
-            OUT2="reports/ensemble.md"
-            : > "$OUT2"
-            echo "# 三向 Ensemble (ELO+奇門+梅花) backtest @ $(date -u +%FT%TZ)" >> "$OUT2"
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate reports
+        env:
+          BASE: "https://tianxi-backend.tianxi-entertainment.workers.dev"
+          DAYS: "${{ inputs.days }}"
+        run: |
+          set +e
+          mkdir -p reports
+          OUT="reports/meihua-pure.md"
+          : > "$OUT"
+          echo "# 純梅花(筆畫 v1) backtest @ $(date -u +%FT%TZ)" >> "$OUT"
+          echo "" >> "$OUT"
+          echo "## A. ${DAYS}日 aggregate" >> "$OUT"
+          echo '```json' >> "$OUT"
+          curl -sS --max-time 180 "$BASE/api/analyze/meihua-only-range?days=$DAYS" | python3 -m json.tool >> "$OUT" 2>&1
+          echo '```' >> "$OUT"
+          echo "" >> "$OUT"
+          echo "## B. 最近賽日 — 每場 Top3 含專業梅花解讀" >> "$OUT"
+          echo '```json' >> "$OUT"
+          curl -sS --max-time 90 "$BASE/api/analyze/meihua-only-day?reasoning=1" | python3 -m json.tool >> "$OUT" 2>&1
+          echo '```' >> "$OUT"
+          
+          OUT2="reports/ensemble.md"
+          : > "$OUT2"
+          echo "# 三向 Ensemble (ELO+奇門+梅花) backtest @ $(date -u +%FT%TZ)" >> "$OUT2"
+          echo "" >> "$OUT2"
+          echo "權重 sweep — 比較不同 wElo/wQimen/wMeihua 組合" >> "$OUT2"
+          echo "" >> "$OUT2"
+          for W in "1.0,0.0,0.0" "1.0,0.3,0.0" "1.0,0.0,0.5" "1.0,0.3,0.5" "1.0,0.5,0.5" "1.0,0.3,0.8" "1.0,0.5,1.0"; do
+            IFS=, read WE WQ WM <<< "$W"
+            echo "## wElo=$WE wQimen=$WQ wMeihua=$WM" >> "$OUT2"
+            echo '```json' >> "$OUT2"
+            curl -sS --max-time 180 "$BASE/api/analyze/ensemble-only-range?days=$DAYS&wElo=$WE&wQimen=$WQ&wMeihua=$WM" | python3 -c "import json,sys; d=json.load(sys.stdin); print(json.dumps({k:d.get(k) for k in ['datesEvaluated','weights','summary']}, indent=2, ensure_ascii=False))" >> "$OUT2" 2>&1
+            echo '```' >> "$OUT2"
             echo "" >> "$OUT2"
-            echo "權重 sweep — 比較不同 wElo/wQimen/wMeihua 組合" >> "$OUT2"
-            echo "" >> "$OUT2"
-            for W in "1.0,0.0,0.0" "1.0,0.3,0.0" "1.0,0.0,0.5" "1.0,0.3,0.5" "1.0,0.5,0.5" "1.0,0.3,0.8" "1.0,0.5,1.0"; do
-              IFS=, read WE WQ WM <<< "$W"
-              echo "## wElo=$WE wQimen=$WQ wMeihua=$WM" >> "$OUT2"
-              echo '```json' >> "$OUT2"
-              curl -sS --max-time 180 "$BASE/api/analyze/ensemble-only-range?days=$DAYS&wElo=$WE&wQimen=$WQ&wMeihua=$WM" | python3 -c "import json,sys; d=json.load(sys.stdin); print(json.dumps({k:d.get(k) for k in ['datesEvaluated','weights','summary']}, indent=2, ensure_ascii=False))" >> "$OUT2" 2>&1
-              echo '```' >> "$OUT2"
-              echo "" >> "$OUT2"
-            done
-            
-            cat "$OUT" >> "$GITHUB_STEP_SUMMARY"
-            echo "---" >> "$GITHUB_STEP_SUMMARY"
-            cat "$OUT2" >> "$GITHUB_STEP_SUMMARY"
-        - name: Commit
-          run: |
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add reports/meihua-pure.md reports/ensemble.md
-            git commit -m "report: meihua v1 + 3-way ensemble" || echo "no changes"
-            git push
-  
+          done
+          
+          cat "$OUT" >> "$GITHUB_STEP_SUMMARY"
+          echo "---" >> "$GITHUB_STEP_SUMMARY"
+          cat "$OUT2" >> "$GITHUB_STEP_SUMMARY"
+      - name: Commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add reports/meihua-pure.md reports/ensemble.md
+          git commit -m "report: meihua v1 + 3-way ensemble" || echo "no changes"
+          git push
