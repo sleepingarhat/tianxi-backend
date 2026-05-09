@@ -8,7 +8,7 @@ import { horsesRoutes } from './routes/horses';
 import { jockeysRoutes } from './routes/jockeys';
 import { trainersRoutes } from './routes/trainers';
 import { chatRoutes } from './routes/chat';
-import { analyzeRoutes } from './routes/analyze';
+import { analyzeRoutes , runBacktestRange } from './routes/analyze';
 import { oddsRoutes } from './routes/odds';
 import { loungeRoutes } from './routes/lounge';
 import { silksRoutes } from './routes/silks';
