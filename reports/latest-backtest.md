@@ -1,79 +1,50 @@
-# Backtest report run @ 2026-05-09T13:48:47Z
+# Backtest report run @ 2026-05-09T13:50:46Z
 
-## Subdomain API resp
-{
-  "result": {
-    "subdomain": "tianxi-entertainment"
-  },
-  "success": true,
-  "errors": [],
-  "messages": []
-}
+## Initial status
+{"ok":true,"baseline":{"days":3,"rows":385},"qimen":{"days":3,"rows":385},"joined":746}
 
-Detected subdomain: [tianxi-entertainment]
+## Kick /start-backtest-bg (days=90)
+Try POST /api/analyze/start-backtest-bg?days=90
+  HTTP=200
+{"ok":true,"started":true,"days":90,"message":"Backtest running in background. Poll /api/analyze/backtest-status for progress."}
 
-## Worker custom domains
-{
-  "result": [
-    {
-      "id": "6d9dd022f27fa257a132c20ce3abc6da43fc89bf",
-      "zone_id": "cb362ae9db1820db68a6160e6a06de95",
-      "zone_name": "tianxi.racing",
-      "hostname": "www.tianxi.racing",
-      "service": "tianxi-backend",
-      "environment": "production",
-      "cert_id": "32300533-6442-4b3d-8737-9b272e612650",
-      "previews_enabled": false,
-      "enabled": true
-    },
-    {
-      "id": "65cb0f7b3db1ac5b4bec6642e1cc2acd7b6c4649",
-      "zone_id": "cb362ae9db1820db68a6160e6a06de95",
-      "zone_name": "tianxi.racing",
-      "hostname": "tianxi.racing",
-      "service": "tianxi-backend",
-      "environment": "production",
-      "cert_id": "81bd2cd0-7ac6-403a-8090-d793ba48a148",
-      "previews_enabled": false,
-      "enabled": true
-    }
-  ],
-  "success": true,
-  "errors": null,
-  "messages": null,
-  "result_info": {
-    "page": 1,
-    "per_page": 2,
-    "count": 2,
-    "total_count": 2
-  }
-}
+## Poll status (max ~10 min)
+[t=30s] days=10  raw={"ok":true,"baseline":{"days":10,"rows":1273},"qimen":{"days":10,"rows":1273},"joined":2488}
+[t=60s] days=10  raw={"ok":true,"baseline":{"days":10,"rows":1273},"qimen":{"days":10,"rows":1273},"joined":2488}
+[t=90s] days=10  raw={"ok":true,"baseline":{"days":10,"rows":1273},"qimen":{"days":10,"rows":1273},"joined":2488}
+[t=120s] days=10  raw={"ok":true,"baseline":{"days":10,"rows":1273},"qimen":{"days":10,"rows":1273},"joined":2488}
+[t=150s] days=10  raw={"ok":true,"baseline":{"days":10,"rows":1273},"qimen":{"days":10,"rows":1273},"joined":2488}
+[t=180s] days=10  raw={"ok":true,"baseline":{"days":10,"rows":1273},"qimen":{"days":10,"rows":1273},"joined":2488}
+[t=210s] days=10  raw={"ok":true,"baseline":{"days":10,"rows":1273},"qimen":{"days":10,"rows":1273},"joined":2488}
+[t=240s] days=10  raw={"ok":true,"baseline":{"days":10,"rows":1273},"qimen":{"days":10,"rows":1273},"joined":2488}
+[t=270s] days=10  raw={"ok":true,"baseline":{"days":10,"rows":1273},"qimen":{"days":10,"rows":1273},"joined":2488}
+[t=300s] days=10  raw={"ok":true,"baseline":{"days":10,"rows":1273},"qimen":{"days":10,"rows":1273},"joined":2488}
+[t=330s] days=10  raw={"ok":true,"baseline":{"days":10,"rows":1273},"qimen":{"days":10,"rows":1273},"joined":2488}
+[t=360s] days=10  raw={"ok":true,"baseline":{"days":10,"rows":1273},"qimen":{"days":10,"rows":1273},"joined":2488}
+[t=390s] days=10  raw={"ok":true,"baseline":{"days":10,"rows":1273},"qimen":{"days":10,"rows":1273},"joined":2488}
+[t=420s] days=10  raw={"ok":true,"baseline":{"days":10,"rows":1273},"qimen":{"days":10,"rows":1273},"joined":2488}
+[t=450s] days=10  raw={"ok":true,"baseline":{"days":10,"rows":1273},"qimen":{"days":10,"rows":1273},"joined":2488}
+[t=480s] days=10  raw={"ok":true,"baseline":{"days":10,"rows":1273},"qimen":{"days":10,"rows":1273},"joined":2488}
+[t=510s] days=10  raw={"ok":true,"baseline":{"days":10,"rows":1273},"qimen":{"days":10,"rows":1273},"joined":2488}
+[t=540s] days=10  raw={"ok":true,"baseline":{"days":10,"rows":1273},"qimen":{"days":10,"rows":1273},"joined":2488}
+[t=570s] days=10  raw={"ok":true,"baseline":{"days":10,"rows":1273},"qimen":{"days":10,"rows":1273},"joined":2488}
+[t=600s] days=10  raw={"ok":true,"baseline":{"days":10,"rows":1273},"qimen":{"days":10,"rows":1273},"joined":2488}
 
+## Final /backtest-report
+HTTP=200 bytes=516
 
-## Trying base: https://tianxi-backend.tianxi-entertainment.workers.dev
-/prediction-accuracy HTTP=200
-{"sinceDate":"2026-04-09","days":30,"summary":[]}
-
-## Using BASE=https://tianxi-backend.tianxi-entertainment.workers.dev
-
---- /backtest-report attempt 1 ---
-HTTP=200 bytes=510
-
-## Report body
 # Backtest Report (90日 walk-forward)
-  Generated: 2026-05-09T13:48:48.694Z
+  Generated: 2026-05-09T14:00:54.867Z
   Reusing existing prediction_log rows
 
   ## Variant comparison
 
   | Metric | baseline-bt (純 ELO) | qimen-bt (ELO + 奇門) | Δ |
   |---|---|---|---|
-  | Rows (馬-場記錄) | 373 | 373 | — |
-  | Races (賽事數) | 30 | 30 | — |
-  | Brier score (越低越好) | 0.0737 | 0.0738 | 0.0001 |
-  | Top1 命中率 % | 6.7 | 10 | 3.3 |
-  | Top3 任一命中率 % | 70 | 70 | 0 |
-  | Top3 平均交集 (滿分3) | 1.1 | 1.1 | 0 |
+  | Rows (馬-場記錄) | 1244 | 1244 | — |
+  | Races (賽事數) | 101 | 101 | — |
+  | Brier score (越低越好) | 0.0741 | 0.0741 | 0 |
+  | Top1 命中率 % | 12.9 | 12.9 | 0 |
+  | Top3 任一命中率 % | 72.3 | 72.3 | 0 |
+  | Top3 平均交集 (滿分3) | 1.06 | 1.06 | 0 |
   
-## /backtest-status
-{"ok":true,"baseline":{"days":3,"rows":385},"qimen":{"days":3,"rows":385},"joined":746}
