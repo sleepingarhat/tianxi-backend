@@ -284,14 +284,16 @@ export const analyzeRoutes = new Hono<{ Bindings: Env }>();
     async function loadLatest(table: string, idCol: string, ids: string[], extraWhere: string = ''): Promise<Map<string, any>> {
       if (!ids.length) return new Map();
       const m = new Map<string, any>();
-      // Chunk to avoid SQL var limit
+      // Use window function — relies on SQLite 3.25+ (D1 has 3.40+)
       for (let i = 0; i < ids.length; i += 50) {
         const chunk = ids.slice(i, i + 50);
         const ph = chunk.map(() => '?').join(',');
-        const sql = `SELECT s.* FROM ${table} s
+        const sql = `SELECT * FROM (
+          SELECT s.*, ROW_NUMBER() OVER (PARTITION BY s.${idCol} ORDER BY s.as_of_date DESC) AS _rn
+          FROM ${table} s
           WHERE s.${idCol} IN (${ph}) ${extraWhere ? 'AND ' + extraWhere : ''} AND s.as_of_date < ?
-            AND NOT EXISTS (SELECT 1 FROM ${table} s2 WHERE s2.${idCol} = s.${idCol} ${extraWhere ? 'AND ' + extraWhere.replace(/s\./g, 's2.') : ''} AND s2.as_of_date < ? AND s2.as_of_date > s.as_of_date)`;
-        const { results } = await db.prepare(sql).bind(...chunk, date, date).all<any>().catch(() => ({ results: [] as any[] }));
+        ) WHERE _rn = 1`;
+        const { results } = await db.prepare(sql).bind(...chunk, date).all<any>().catch(() => ({ results: [] as any[] }));
         for (const r of (results ?? [])) m.set(r[idCol], r);
       }
       return m;
@@ -2111,6 +2113,41 @@ analyzeRoutes.get('/factors', (c) => {
           return c.json({ ok: true, ...result });
         } catch (err: any) {
           return c.json({ error: 'backtest failed', detail: err?.message ?? String(err) }, 500);
+        }
+      });
+
+      // GET/POST /api/analyze/start-backtest-bg?days=90 — kick off background backtest, return instantly
+      // 用 ctx.waitUntil 喺背景跑，瀏覽器貼一次 URL 就可以走人
+      analyzeRoutes.all('/start-backtest-bg', async (c) => {
+        try {
+          const days = Math.max(1, Math.min(365, Number(c.req.query('days') ?? '90')));
+          const engine = c.req.query('engine') === 'v11' ? 'v11' : 'v12';
+          // Mark start so status endpoint can show progress
+          c.executionCtx.waitUntil(
+            (async () => {
+              try {
+                const r = await runBacktestRange(c.env.DB, days, engine);
+                console.log('[backtest-bg] done', { days: r.days, races: r.totalRaces, baseline: r.totalBaselineRows, qimen: r.totalQimenRows, joined: r.totalJoined, ms: r.elapsedMs });
+              } catch (e: any) {
+                console.error('[backtest-bg] error', e?.message ?? e);
+              }
+            })()
+          );
+          return c.json({ ok: true, started: true, days, message: 'Backtest running in background. Poll /api/analyze/backtest-status for progress.' });
+        } catch (err: any) {
+          return c.json({ error: 'failed to start', detail: err?.message ?? String(err) }, 500);
+        }
+      });
+
+      // GET /api/analyze/backtest-status — poll progress
+      analyzeRoutes.get('/backtest-status', async (c) => {
+        try {
+          const baseline = await c.env.DB.prepare(`SELECT COUNT(DISTINCT date) as days, COUNT(*) as rows FROM prediction_log WHERE variant = 'baseline-bt'`).first<{ days: number; rows: number }>();
+          const qimen = await c.env.DB.prepare(`SELECT COUNT(DISTINCT date) as days, COUNT(*) as rows FROM prediction_log WHERE variant = 'qimen-bt'`).first<{ days: number; rows: number }>();
+          const joined = await c.env.DB.prepare(`SELECT COUNT(*) as rows FROM prediction_log WHERE variant IN ('baseline-bt','qimen-bt') AND actual_finish IS NOT NULL`).first<{ rows: number }>();
+          return c.json({ ok: true, baseline, qimen, joined: joined?.rows ?? 0 });
+        } catch (err: any) {
+          return c.json({ error: 'status failed', detail: err?.message ?? String(err) }, 500);
         }
       });
 
