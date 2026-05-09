@@ -2223,6 +2223,64 @@ analyzeRoutes.get('/factors', (c) => {
         }
       });
 
+      // GET /api/analyze/backtest-diff — diagnostic: are baseline-bt vs qimen-bt rows actually different?
+      analyzeRoutes.get('/backtest-diff', async (c) => {
+        try {
+          const db = c.env.DB;
+          // 1. Aggregate per variant
+          const agg = await db.prepare(`
+            SELECT variant,
+                   COUNT(*) AS rows,
+                   ROUND(AVG(p_win), 6) AS avg_p_win,
+                   ROUND(AVG(predicted_rank), 4) AS avg_rank,
+                   SUM(is_hit_top1) AS top1_hits,
+                   SUM(is_hit_top3) AS top3_hits,
+                   ROUND(AVG(factor_bonus), 4) AS avg_factor_bonus,
+                   SUM(CASE WHEN factor_bonus IS NOT NULL AND factor_bonus != 0 THEN 1 ELSE 0 END) AS nonzero_bonus_rows,
+                   SUM(CASE WHEN p_win IS NULL THEN 1 ELSE 0 END) AS null_pwin
+              FROM prediction_log
+             WHERE variant IN ('baseline-bt','qimen-bt')
+             GROUP BY variant
+          `).all<any>();
+
+          // 2. Sample 10 (date,race,horse) tuples — pivot to compare side by side
+          const sample = await db.prepare(`
+            SELECT b.date, b.race_number, b.horse_id, b.horse_number,
+                   b.p_win AS base_p_win, q.p_win AS qimen_p_win,
+                   b.predicted_rank AS base_rank, q.predicted_rank AS qimen_rank,
+                   b.factor_bonus AS base_bonus, q.factor_bonus AS qimen_bonus,
+                   b.actual_finish
+              FROM (SELECT * FROM prediction_log WHERE variant='baseline-bt' LIMIT 1000) b
+              JOIN (SELECT * FROM prediction_log WHERE variant='qimen-bt') q
+                ON q.date=b.date AND q.race_number=b.race_number AND q.horse_id=b.horse_id
+              ORDER BY b.date DESC, b.race_number, b.horse_number
+              LIMIT 15
+          `).all<any>();
+
+          // 3. Count rows where p_win actually differs
+          const diffCount = await db.prepare(`
+            SELECT COUNT(*) AS total,
+                   SUM(CASE WHEN ABS(b.p_win - q.p_win) > 0.0001 THEN 1 ELSE 0 END) AS diff_rows,
+                   SUM(CASE WHEN b.predicted_rank != q.predicted_rank THEN 1 ELSE 0 END) AS rank_diff_rows
+              FROM (SELECT date, race_number, horse_id, p_win, predicted_rank FROM prediction_log WHERE variant='baseline-bt') b
+              JOIN (SELECT date, race_number, horse_id, p_win, predicted_rank FROM prediction_log WHERE variant='qimen-bt') q
+                ON q.date=b.date AND q.race_number=b.race_number AND q.horse_id=b.horse_id
+          `).first<any>();
+
+          return c.json({
+            aggregate_per_variant: agg.results,
+            row_diff_summary: diffCount,
+            sample_15_rows: sample.results,
+            interpretation: {
+              note: 'If diff_rows == 0 → variants are identical → bug in writer. If diff_rows > 0 but stats match → bug in /backtest-report statsFor.',
+            },
+            generatedAt: new Date().toISOString(),
+          });
+        } catch (err: any) {
+          return c.json({ error: 'diff failed', detail: err?.message ?? String(err) }, 500);
+        }
+      });
+
       // GET /api/analyze/backtest-status — poll progress
       analyzeRoutes.get('/backtest-status', async (c) => {
         try {
