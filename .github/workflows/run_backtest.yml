@@ -9,11 +9,11 @@ permissions:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
-      - name: Trigger full 90-day backtest + fetch report
+      - name: Diff diagnostic
         env:
           BASE: "https://tianxi-backend.tianxi-entertainment.workers.dev"
         run: |
@@ -21,47 +21,21 @@ jobs:
           mkdir -p reports
           OUT="reports/latest-backtest.md"
           : > "$OUT"
-          echo "# Backtest report run @ $(date -u +%FT%TZ)" >> "$OUT"
-
-          echo "" >> "$OUT"; echo "## Initial status" >> "$OUT"
-          curl -sS --max-time 30 "$BASE/api/analyze/backtest-status" >> "$OUT" 2>&1; echo "" >> "$OUT"
-
-          echo "" >> "$OUT"; echo "## Kick /start-backtest-bg (days=90)" >> "$OUT"
-          for verb in POST GET; do
-            for path in "/api/analyze/start-backtest-bg?days=90" "/api/analyze/start-backtest-bg" "/api/analyze/run-backtest?days=90"; do
-              echo "Try $verb $path" >> "$OUT"
-              HTTP=$(curl -sS -o kick.txt -w "%{http_code}" --max-time 60 -X $verb "$BASE$path")
-              echo "  HTTP=$HTTP" >> "$OUT"
-              head -c 500 kick.txt >> "$OUT"; echo "" >> "$OUT"
-              [ "$HTTP" = "200" ] && break 2
-            done
-          done
-
-          echo "" >> "$OUT"; echo "## Poll status (max ~10 min)" >> "$OUT"
-          PREV_DAYS=0; STAGNANT=0
-          for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-            sleep 30
-            S=$(curl -sS --max-time 30 "$BASE/api/analyze/backtest-status")
-            DAYS=$(echo "$S" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get(\"baseline\",{}).get(\"days\",0))" 2>/dev/null || echo 0)
-            echo "[t=$((i*30))s] days=$DAYS  raw=$S" >> "$OUT"
-            if [ "$DAYS" -ge 80 ]; then echo "Reached >=80 days, stop polling" >> "$OUT"; break; fi
-            if [ "$DAYS" = "$PREV_DAYS" ]; then STAGNANT=$((STAGNANT+1)); else STAGNANT=0; fi
-            if [ "$STAGNANT" -ge 6 ] && [ "$DAYS" -gt 10 ]; then echo "Stagnant 3 min, stop polling" >> "$OUT"; break; fi
-            PREV_DAYS=$DAYS
-          done
-
-          echo "" >> "$OUT"; echo "## Final /backtest-report" >> "$OUT"
-          HTTP=$(curl -sS -o body.txt -w "%{http_code}" --max-time 120 "$BASE/api/analyze/backtest-report")
-          echo "HTTP=$HTTP bytes=$(wc -c < body.txt)" >> "$OUT"
+          echo "# Backtest DIFF diagnostic @ $(date -u +%FT%TZ)" >> "$OUT"
           echo "" >> "$OUT"
-          cat body.txt >> "$OUT"
-
+          echo "## /backtest-diff" >> "$OUT"
+          echo "\`\`\`json" >> "$OUT"
+          curl -sS --max-time 60 "$BASE/api/analyze/backtest-diff" | python3 -m json.tool >> "$OUT" 2>&1
+          echo "\`\`\`" >> "$OUT"
+          echo "" >> "$OUT"
+          echo "## /backtest-report (full)" >> "$OUT"
+          curl -sS --max-time 120 "$BASE/api/analyze/backtest-report" >> "$OUT" 2>&1
           cat "$OUT" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Commit report
+      - name: Commit
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add reports/latest-backtest.md
-          git commit -m "report: full 90-day backtest" || echo "no changes"
+          git commit -m "diag: backtest diff" || echo "no changes"
           git push
