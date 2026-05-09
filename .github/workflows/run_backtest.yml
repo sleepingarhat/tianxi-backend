@@ -1,0 +1,53 @@
+name: Run backtest report
+
+  on:
+    workflow_dispatch:
+
+  permissions:
+    contents: write
+
+  jobs:
+    run:
+      runs-on: ubuntu-latest
+      timeout-minutes: 20
+      steps:
+        - uses: actions/checkout@v4
+
+        - name: Trigger + fetch backtest report
+          run: |
+            set -e
+            mkdir -p reports
+            OUT="reports/latest-backtest.md"
+            echo "# Trying /backtest-report (will auto-run backtest if needed)..." | tee "$OUT"
+            # First call may run backtest (60-90s); use long timeout
+            for attempt in 1 2 3 4 5; do
+              echo "--- Attempt $attempt ---" | tee -a "$OUT"
+              HTTP=$(curl -sS -o body.txt -w "%{http_code}" --max-time 180 https://api.tianxi.racing/api/analyze/backtest-report || echo "FAIL")
+              echo "HTTP=$HTTP, body bytes=$(wc -c < body.txt)" | tee -a "$OUT"
+              if [ "$HTTP" = "200" ] && [ -s body.txt ]; then
+                echo "Got 200 — using as report"
+                cp body.txt "$OUT"
+                break
+              fi
+              cat body.txt | tee -a "$OUT"
+              sleep 30
+            done
+
+            echo "" | tee -a "$OUT"
+            echo "## Status snapshot" | tee -a "$OUT"
+            curl -sS --max-time 30 https://api.tianxi.racing/api/analyze/backtest-status 2>&1 | tee -a "$OUT" || true
+
+            echo "" | tee -a "$OUT"
+            echo "## Variant counts (live)" | tee -a "$OUT"
+            curl -sS --max-time 30 https://api.tianxi.racing/api/analyze/prediction-accuracy 2>&1 | tee -a "$OUT" || true
+
+            cat "$OUT" >> "$GITHUB_STEP_SUMMARY"
+
+        - name: Commit report
+          run: |
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add reports/latest-backtest.md
+            git commit -m "report: backtest snapshot $(date -u +%FT%TZ)" || echo "no changes"
+            git push
+  
