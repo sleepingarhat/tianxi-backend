@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       date:
-        description: "YYYY-MM-DD (blank = latest)"
+        description: "YYYY-MM-DD (blank = auto-find most recent full meeting)"
         required: false
         default: ""
 
@@ -28,14 +28,25 @@ jobs:
           : > "$OUT"
           echo "# Pure Qimen one-day backtest @ $(date -u +%FT%TZ)" >> "$OUT"
           echo "" >> "$OUT"
-          if [ -n "$DATE" ]; then URL="$BASE/api/analyze/qimen-only-day?date=$DATE"; else URL="$BASE/api/analyze/qimen-only-day"; fi
-          echo "GET $URL" >> "$OUT"; echo "" >> "$OUT"
-          curl -sS --max-time 60 "$URL" | python3 -m json.tool >> "$OUT" 2>&1
+          if [ -z "$DATE" ]; then
+            # Try last 21 days, find first one with >= 6 races having results
+            for d in $(seq 1 21); do
+              CAND=$(date -u -d "$d days ago" +%F 2>/dev/null || date -u -v-"$d"d +%F)
+              echo "Probing $CAND..." >> "$OUT"
+              RESP=$(curl -sS --max-time 60 "$BASE/api/analyze/qimen-only-day?date=$CAND")
+              N=$(echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get(\"summary\",{}).get(\"racesEvaluated\",0))" 2>/dev/null || echo 0)
+              echo "  → $N races" >> "$OUT"
+              if [ "$N" -ge 6 ]; then DATE="$CAND"; break; fi
+            done
+          fi
+          echo "" >> "$OUT"
+          echo "## Selected date: $DATE" >> "$OUT"; echo "" >> "$OUT"
+          curl -sS --max-time 60 "$BASE/api/analyze/qimen-only-day?date=$DATE" | python3 -m json.tool >> "$OUT" 2>&1
           cat "$OUT" >> "$GITHUB_STEP_SUMMARY"
       - name: Commit
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add reports/qimen-only-day.md
-          git commit -m "report: pure qimen one-day" || echo "no changes"
+          git commit -m "report: pure qimen recent day" || echo "no changes"
           git push
