@@ -2139,6 +2139,90 @@ analyzeRoutes.get('/factors', (c) => {
         }
       });
 
+      // GET /api/analyze/backtest-report — 完整文字版回測報告（user 貼回俾我寫總結）
+      analyzeRoutes.get('/backtest-report', async (c) => {
+        try {
+          const db = c.env.DB;
+          // 1. Auto-run if no bt rows exist (idempotent)
+          const exists = await db.prepare(`SELECT COUNT(*) as c FROM prediction_log WHERE variant IN ('baseline-bt','qimen-bt')`).first<{ c: number }>();
+          let runInfo: any = null;
+          if ((exists?.c ?? 0) === 0) {
+            runInfo = await runBacktestRange(db, 90, 'v12');
+          }
+
+          // 2. Compute Brier + hit rates per variant
+          async function statsFor(variant: string) {
+            // Aggregate at row level (each row = horse-race); then aggregate at race level for Top1/Top3
+            const all = await db.prepare(`
+              SELECT date, race_number, horse_number, p_win, p_top3, actual_finish, predicted_rank
+                FROM prediction_log WHERE variant = ? AND actual_finish IS NOT NULL
+            `).bind(variant).all<any>();
+            const rows = all.results ?? [];
+            if (!rows.length) return { variant, rows: 0 };
+            // Brier (per horse): (p_win - 1{actual==1})^2
+            let brier = 0;
+            for (const r of rows) {
+              const win = (r.actual_finish === 1) ? 1 : 0;
+              brier += Math.pow((r.p_win ?? 0) - win, 2);
+            }
+            brier /= rows.length;
+            // Group by (date, race_number)
+            const byRace = new Map<string, any[]>();
+            for (const r of rows) {
+              const k = r.date + '|' + r.race_number;
+              if (!byRace.has(k)) byRace.set(k, []);
+              byRace.get(k)!.push(r);
+            }
+            let races = 0, top1Hits = 0, top3AnyHits = 0, top3IntersectSum = 0;
+            for (const [, group] of byRace) {
+              if (!group.length) continue;
+              races++;
+              const sorted = [...group].sort((a, b) => (b.p_win ?? 0) - (a.p_win ?? 0));
+              const top1 = sorted[0];
+              if (top1?.actual_finish === 1) top1Hits++;
+              const top3pred = sorted.slice(0, 3).map(r => r.horse_number);
+              const top3actual = group.filter(r => r.actual_finish && r.actual_finish <= 3).map(r => r.horse_number);
+              const intersect = top3pred.filter(h => top3actual.includes(h)).length;
+              top3IntersectSum += intersect;
+              if (intersect > 0) top3AnyHits++;
+            }
+            return {
+              variant,
+              rows: rows.length,
+              races,
+              brier: Math.round(brier * 10000) / 10000,
+              top1HitRate: races ? Math.round(top1Hits / races * 1000) / 10 : null,
+              top3AnyHitRate: races ? Math.round(top3AnyHits / races * 1000) / 10 : null,
+              top3AvgIntersect: races ? Math.round(top3IntersectSum / races * 100) / 100 : null,
+              top1Hits, top3AnyHits, top3IntersectSum,
+            };
+          }
+          const baseline = await statsFor('baseline-bt');
+          const qimen = await statsFor('qimen-bt');
+
+          // 3. Format markdown report
+          const fmt = (n: any) => n == null ? 'N/A' : String(n);
+          const md = `# Backtest Report (90日 walk-forward)
+  Generated: ${new Date().toISOString()}
+  ${runInfo ? `Auto-ran backtest: ${runInfo.days} 日 / ${runInfo.totalRaces} 場 / ${runInfo.totalHorses} 馬 (${Math.round(runInfo.elapsedMs/1000)}s)` : 'Reusing existing prediction_log rows'}
+
+  ## Variant comparison
+
+  | Metric | baseline-bt (純 ELO) | qimen-bt (ELO + 奇門) | Δ |
+  |---|---|---|---|
+  | Rows (馬-場記錄) | ${fmt(baseline.rows)} | ${fmt(qimen.rows)} | — |
+  | Races (賽事數) | ${fmt(baseline.races)} | ${fmt(qimen.races)} | — |
+  | Brier score (越低越好) | ${fmt(baseline.brier)} | ${fmt(qimen.brier)} | ${baseline.brier!=null && qimen.brier!=null ? Math.round((qimen.brier-baseline.brier)*10000)/10000 : 'N/A'} |
+  | Top1 命中率 % | ${fmt(baseline.top1HitRate)} | ${fmt(qimen.top1HitRate)} | ${baseline.top1HitRate!=null && qimen.top1HitRate!=null ? Math.round((qimen.top1HitRate-baseline.top1HitRate)*10)/10 : 'N/A'} |
+  | Top3 任一命中率 % | ${fmt(baseline.top3AnyHitRate)} | ${fmt(qimen.top3AnyHitRate)} | ${baseline.top3AnyHitRate!=null && qimen.top3AnyHitRate!=null ? Math.round((qimen.top3AnyHitRate-baseline.top3AnyHitRate)*10)/10 : 'N/A'} |
+  | Top3 平均交集 (滿分3) | ${fmt(baseline.top3AvgIntersect)} | ${fmt(qimen.top3AvgIntersect)} | ${baseline.top3AvgIntersect!=null && qimen.top3AvgIntersect!=null ? Math.round((qimen.top3AvgIntersect-baseline.top3AvgIntersect)*100)/100 : 'N/A'} |
+  `;
+          return c.text(md, 200, { 'Content-Type': 'text/plain; charset=utf-8' });
+        } catch (err: any) {
+          return c.json({ error: 'report failed', detail: err?.message ?? String(err) }, 500);
+        }
+      });
+
       // GET /api/analyze/backtest-status — poll progress
       analyzeRoutes.get('/backtest-status', async (c) => {
         try {
