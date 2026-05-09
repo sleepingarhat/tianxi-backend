@@ -3,10 +3,10 @@ name: Run backtest report
 on:
   workflow_dispatch:
     inputs:
-      date:
-        description: "YYYY-MM-DD (blank = auto-find most recent full meeting)"
+      days:
+        description: "Range days for pure-qimen agg (default 30)"
         required: false
-        default: ""
+        default: "30"
 
 permissions:
   contents: write
@@ -14,39 +14,34 @@ permissions:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - name: Pure-qimen day report
+      - name: Pure-qimen range + reasoning
         env:
           BASE: "https://tianxi-backend.tianxi-entertainment.workers.dev"
-          DATE: "${{ inputs.date }}"
+          DAYS: "${{ inputs.days }}"
         run: |
           set +e
           mkdir -p reports
-          OUT="reports/qimen-only-day.md"
+          OUT="reports/qimen-pure.md"
           : > "$OUT"
-          echo "# Pure Qimen one-day backtest @ $(date -u +%FT%TZ)" >> "$OUT"
+          echo "# 純奇門 backtest @ $(date -u +%FT%TZ)" >> "$OUT"
           echo "" >> "$OUT"
-          if [ -z "$DATE" ]; then
-            # Try last 21 days, find first one with >= 6 races having results
-            for d in $(seq 1 21); do
-              CAND=$(date -u -d "$d days ago" +%F 2>/dev/null || date -u -v-"$d"d +%F)
-              echo "Probing $CAND..." >> "$OUT"
-              RESP=$(curl -sS --max-time 60 "$BASE/api/analyze/qimen-only-day?date=$CAND")
-              N=$(echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get(\"summary\",{}).get(\"racesEvaluated\",0))" 2>/dev/null || echo 0)
-              echo "  → $N races" >> "$OUT"
-              if [ "$N" -ge 6 ]; then DATE="$CAND"; break; fi
-            done
-          fi
+          echo "## A. 30日 aggregate (純奇門 vs ELO baseline)" >> "$OUT"
+          echo "\`\`\`json" >> "$OUT"
+          curl -sS --max-time 180 "$BASE/api/analyze/qimen-only-range?days=$DAYS" | python3 -m json.tool >> "$OUT" 2>&1
+          echo "\`\`\`" >> "$OUT"
           echo "" >> "$OUT"
-          echo "## Selected date: $DATE" >> "$OUT"; echo "" >> "$OUT"
-          curl -sS --max-time 60 "$BASE/api/analyze/qimen-only-day?date=$DATE" | python3 -m json.tool >> "$OUT" 2>&1
+          echo "## B. 最近賽日 — 每場 Top3 含專業奇門解讀" >> "$OUT"
+          echo "\`\`\`json" >> "$OUT"
+          curl -sS --max-time 90 "$BASE/api/analyze/qimen-only-day?reasoning=1" | python3 -m json.tool >> "$OUT" 2>&1
+          echo "\`\`\`" >> "$OUT"
           cat "$OUT" >> "$GITHUB_STEP_SUMMARY"
       - name: Commit
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add reports/qimen-only-day.md
-          git commit -m "report: pure qimen recent day" || echo "no changes"
+          git add reports/qimen-pure.md
+          git commit -m "report: pure qimen 30d + reasoning" || echo "no changes"
           git push
