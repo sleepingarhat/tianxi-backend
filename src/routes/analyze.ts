@@ -388,26 +388,75 @@ export const analyzeRoutes = new Hono<{ Bindings: Env }>();
       });
       qimenPicks.sort((a: any, b: any) => b.pWin - a.pWin);
       qimenPicks.forEach((p: any, i: number) => { p.rank = i + 1; });
-      qimenPayload.races.push({ raceNumber: race.race_number, picks: qimenPicks });
-    }
+        qimenPayload.races.push({ raceNumber: race.race_number, picks: qimenPicks });
+      }
 
-    // 5. Write to prediction_log
-    const baseLog = await writePredictionLog(db, baselinePayload, 'baseline-bt').catch(() => ({ rows: 0 }));
-    const qimenLog = await writePredictionLog(db, qimenPayload, 'qimen-bt').catch(() => ({ rows: 0 }));
+      // === R5 lane (ELO + draw + weight, real walk-forward) ====================
+      // Production R5 (2026-05-10) keeps only fDraw.bonus + fWeight.bonus.
+      // batchDrawBias / batchWeightDelta both filter strictly rm.date < asOf,
+      // so this is leakage-free. See reports/decision-log.md.
+      const r5Payload: any = { date, eloEngine: engine, generatedAt: new Date().toISOString(), races: [] };
+      let r5Log: { rows: number } = { rows: 0 };
+      try {
+        const distByRace = new Map((races as any[]).map((r: any) => [r.id, r.distance]));
+        const enrichedEntries = (entries as any[]).map((e: any) => ({ ...e, distance: distByRace.get(e.race_id) }));
+        const r5HorseIds = horseIds as string[];
+        const [drawMap, wtMap] = await Promise.all([
+          batchDrawBias(db, enrichedEntries, meeting.venue, date),
+          batchWeightDelta(db, r5HorseIds, enrichedEntries, date),
+        ]);
+        for (const race of races) {
+          const baseRace = baselinePayload.races.find((br: any) => br.raceNumber === race.race_number);
+          if (!baseRace) continue;
+          const bucket = distBucket(race.distance);
+          const r5Picks = baseRace.picks.map((bp: any) => {
+            const drawKey = `${bp.draw}:${meeting.venue}:${bucket}`;
+            const drawF = drawMap.get(drawKey) ?? { bonus: 0, conf: 0 };
+            const wtF = wtMap.get(bp.horseId) ?? { bonus: 0, conf: 0 };
+            const factorBonus = (drawF.bonus ?? 0) + (wtF.bonus ?? 0);
+            const eloComposite = bp.eloComposite;
+            const finalScore = eloComposite != null ? eloComposite + factorBonus : null;
+            const _score = (eloComposite != null ? (eloComposite - 1500) / 200 : 0) + factorBonus / 100;
+            return {
+              ...bp,
+              factorBonus: Math.round(factorBonus * 10) / 10,
+              finalScore: finalScore != null ? Math.round(finalScore * 10) / 10 : null,
+              _score,
+            };
+          });
+          const expS = r5Picks.map((p: any) => Math.exp(p._score));
+          const Z = expS.reduce((a: number, b: number) => a + b, 0) || 1;
+          r5Picks.forEach((p: any, i: number) => {
+            p.pWin = Math.round((expS[i] / Z) * 1000) / 1000;
+            p.pTop3 = Math.round(Math.min(p.pWin * 3, 0.99) * 1000) / 1000;
+          });
+          r5Picks.sort((a: any, b: any) => b.pWin - a.pWin);
+          r5Picks.forEach((p: any, i: number) => { p.rank = i + 1; });
+          r5Payload.races.push({ raceNumber: race.race_number, picks: r5Picks });
+        }
+      } catch (e) {
+        // Non-fatal: keep baseline + qimen even if R5 lane fails
+      }
+
+      // 5. Write to prediction_log
+      const baseLog = await writePredictionLog(db, baselinePayload, 'baseline-bt').catch(() => ({ rows: 0 }));
+      const qimenLog = await writePredictionLog(db, qimenPayload, 'qimen-bt').catch(() => ({ rows: 0 }));
+      r5Log = await writePredictionLog(db, r5Payload, 'r5-bt').catch(() => ({ rows: 0 }));
 
     // 6. Auto-join (results already exist for past races)
     const joinResult = await joinPredictionResults(db, date).catch(() => ({ updated: 0 }));
 
     return {
-      races: races.length,
-      horses: entries.length,
-      baselineRows: baseLog.rows ?? 0,
-      qimenRows: qimenLog.rows ?? 0,
-      joined: joinResult.updated ?? 0,
-    };
-  }
+        races: races.length,
+        horses: entries.length,
+        baselineRows: baseLog.rows ?? 0,
+        qimenRows: qimenLog.rows ?? 0,
+        r5Rows: r5Log.rows ?? 0,
+        joined: joinResult.updated ?? 0,
+      };
+    }
 
-  // Run backtest over a date range. Returns per-day summary.
+    // Run backtest over a date range. Returns per-day summary.
   export async function runBacktestRange(db: D1Database, daysBack: number = 90, engine: string = 'v12'): Promise<{ days: number; perDay: any[]; totalRaces: number; totalHorses: number; totalBaselineRows: number; totalQimenRows: number; totalJoined: number; elapsedMs: number }> {
     const t0 = Date.now();
     const today = new Date().toISOString().substring(0, 10);
@@ -2109,8 +2158,45 @@ analyzeRoutes.get('/factors', (c) => {
         }
       });
 
-      // POST /api/analyze/run-backtest?days=90 — full walk-forward backtest over date range
-      analyzeRoutes.post('/run-backtest', async (c) => {
+        // GET /api/analyze/r5-comparison?days=30 — side-by-side baseline-bt vs r5-bt
+        // with 95% binomial CI and a coarse decision flag.
+        analyzeRoutes.get('/r5-comparison', async (c) => {
+          try {
+            const days = Math.max(1, Math.min(365, Number(c.req.query('days') ?? '30')));
+            const summary = await summarizePredictionAccuracy(c.env.DB, days);
+            const baseline = (summary.summary as any[]).find(s => s.variant === 'baseline-bt') ?? null;
+            const r5 = (summary.summary as any[]).find(s => s.variant === 'r5-bt') ?? null;
+            const ppDelta = (x: number | null, y: number | null) => (x != null && y != null) ? Math.round((x - y) * 10) / 10 : null;
+            const ci95 = (n: number, p: number) => n > 0 ? Math.round(1960 * Math.sqrt(p * (1 - p) / n)) / 10 : null;
+            const bankerDelta = baseline && r5 ? ppDelta(r5.bankerHitRate, baseline.bankerHitRate) : null;
+            let decision = 'INSUFFICIENT_SAMPLE';
+            if (r5 && baseline && r5.races >= 30 && bankerDelta != null) {
+              decision = bankerDelta >= 2.0 ? 'KEEP_R5' : bankerDelta <= -1.0 ? 'REVERT_TO_BASELINE' : 'INCONCLUSIVE';
+            }
+            return c.json({
+              sinceDate: summary.sinceDate,
+              days,
+              baseline,
+              r5,
+              delta: baseline && r5 ? {
+                bankerHitPp: bankerDelta,
+                top3PickHitPp: ppDelta(r5.top3PickHitRate, baseline.top3PickHitRate),
+                brierWinDelta: (r5.brierWin != null && baseline.brierWin != null) ? Math.round((r5.brierWin - baseline.brierWin) * 10000) / 10000 : null,
+              } : null,
+              ci95Pp: r5 ? {
+                banker: ci95(r5.races, (r5.bankerHitRate ?? 0) / 100),
+                top3Pick: ci95(r5.races * 3, (r5.top3PickHitRate ?? 0) / 100),
+              } : null,
+              decision,
+              note: 'baseline-bt = pure ELO; r5-bt = ELO + draw + weight. KEEP_R5 = ≥+2pp banker hit on ≥30 races.',
+            });
+          } catch (err: any) {
+            return c.json({ error: 'r5-comparison failed', detail: err?.message ?? String(err) }, 500);
+          }
+        });
+
+        // POST /api/analyze/run-backtest?days=90 — full walk-forward backtest over date range
+        analyzeRoutes.post('/run-backtest', async (c) => {
         try {
           const days = Math.max(1, Math.min(365, Number(c.req.query('days') ?? '90')));
           const engine = c.req.query('engine') === 'v11' ? 'v11' : 'v12';
