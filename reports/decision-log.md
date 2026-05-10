@@ -149,3 +149,61 @@
     3. 本地跑 `import-csv → push-delta → push-to-d1.sh`
   - 建議：增設 GitHub Actions cron 自動 ingest 賽後當晚 (sched: race day 23:00 HKT)
   
+
+  ## 2026-05-10 · R5 88 賽日 ablation (12 個月 / 853 場) — production 簡化至 ELO + draw + weight
+
+  ### Sample expansion vs R3 (8 賽日 / 72 場)
+
+  | | R3 (8d) | **R5 (88d)** | scale-up |
+  |---|---:|---:|---:|
+  | 場數 | 72 | **853** | 11.8× |
+  | 跨度 | 1 個月 | **12 個月** (2025-05-10 → 2026-05-09) | 12× |
+
+  每場 ablation：保留 picks-by-date 嘅 factorBreakdown + hit-rate 嘅 actualTop3/Top4，本地 rerank `finalScore = eloComposite + Σ(enabled factor bonuses × conf)`。
+
+  ### Top configs (sorted by Top1)
+
+  | Config | Top1 | T3任1 | T3any | QP | Trio | T4 avg | T4≥2 | **T4≥3** |
+  |---|---:|---:|---:|---:|---:|---:|---:|---:|
+  | ELO + draw + recency | **24.9** | 54.2 | 87.6 | 41.1 | 5.3 | 2.09 | 76.3 | 31.4 |
+  | **ELO + draw + weight** ⭐ | **24.5** | 54.3 | 88.0 | 40.7 | **6.1** | **2.13** | **77.8** | **34.5** |
+  | ELO + draw | 24.4 | 54.5 | 88.2 | **42.2** | 5.5 | 2.12 | 77.3 | 33.8 |
+  | ELO + draw + injury | 24.3 | 54.7 | **88.3** | **42.4** | 5.4 | 2.13 | **78.3** | 33.6 |
+  | ELO + recency + weight + draw | 24.2 | 53.7 | 87.6 | 39.3 | 5.6 | 2.10 | 76.2 | 32.8 |
+  | pure ELO | 23.0 | 52.6 | 88.3 | 41.4 | 5.4 | 2.10 | 76.6 | 32.4 |
+  | **R3 baseline (all 8) — 即 R4 production** | **20.6** | 50.3 | 86.6 | 39.4 | 5.7 | 2.04 | 74.0 | 29.4 |
+  | 8 minus draw | 20.4 | 49.4 | 86.2 | 37.4 | 5.9 | 2.03 | 72.9 | 29.7 |
+
+  ### 顛覆 R3 結論嘅 4 大發現
+
+  1. **`draw` 係最強因子** — R3 8 賽日小樣本完全冇睇出。加 draw 一個 +1.4pp Top1，加埋全 8 個反而 -2.4pp。
+  2. **8 因子 baseline 過擬合**：Top1 20.6% **遠低過** pure ELO 23.0% (-2.4pp)。R4 production 喺 12 個月真實 sample 下其實**輸畀純 ELO**。
+  3. **`recency` / `jtCombo` 邊際效用近零**或負面。R3 sample 太細誤判 recency 為「最強」。
+  4. **`weight` 對 Trio / T4 partial 仍有貢獻** (+0.6pp Trio, +0.7pp T4≥3 over ELO+draw)。
+
+  ### 穩定性測試 (88 日切兩半 @ 2025-12-07)
+
+  | Config | 舊半 (n=422) Top1/Trio/T4≥3 | 新半 (n=431) Top1/Trio/T4≥3 | Δ Top1 |
+  |---|---|---|---:|
+  | ELO+draw | 27.0% / 5.0% / 34.8% | 21.8% / 6.0% / 32.7% | -5.2pp |
+  | **ELO+draw+recency** | 26.8% / 5.5% / 32.9% | 23.0% / 5.1% / 29.9% | **-3.8pp** |
+  | baseline 8 | 24.2% / 6.2% / 30.1% | 17.2% / 5.3% / 28.8% | -7.0pp (最差) |
+  | pure ELO | 24.9% / 5.0% / 32.7% | 21.1% / 5.8% / 32.0% | -3.8pp |
+
+  ### 決定 (production)
+
+  - **採用 `ELO + draw + weight`** 為新 production composite。
+  - 目標：贏大錢 → T4≥3 (First4 partial) **34.5%** (vs 舊 baseline 29.4% → **+5.1pp**) 同 Trio **6.1%** (vs 5.7% → +0.4pp) 最大化高賠率彩池命中率。
+  - Top1 **24.5%** (vs 舊 20.6% → +3.9pp)，WIN bet 亦同步提升。
+  - `recency / distance / going / condition / injury / jtCombo` 保留喺 `factorBreakdown` 作 telemetry，但 **唔加入 finalScore**。
+  - 實作改動：`src/routes/analyze.ts` 嘅 `computeComposite` factorBonus 由 8 因子求和改為 `fDraw.bonus + fWeight.bonus`。
+
+  ### Walk-forward caveat
+
+  呢次 sample 用 `/picks-by-date` (用今日 ELO snapshot)，**有 same-day leakage 風險** ~2.8pp。實際生產 Top1 預期 **22%–24%** 區間。
+
+  ### Next
+
+  - Deploy 後觀察 5/13 (下個賽日) 實戰；2-3 個賽日後對比 R4 vs R5。
+  - 5/9 R2-R11 賽果 backfill 仍 pending (上游 `capy_race_daily` scraper bug — 11 場全部寫成 race_no=1)。
+  
