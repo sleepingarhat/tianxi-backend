@@ -207,3 +207,52 @@
   - Deploy 後觀察 5/13 (下個賽日) 實戰；2-3 個賽日後對比 R4 vs R5。
   - 5/9 R2-R11 賽果 backfill 仍 pending (上游 `capy_race_daily` scraper bug — 11 場全部寫成 race_no=1)。
   
+
+  ---
+
+  ## R5 後續：Code Review (2026-05-10) — 風險澄清同已知問題
+
+  部署 R5 之後做咗系統 code review (architect)，發現幾項要記低：
+
+  ### ✅ 已驗證冇問題
+  - **3 個 production patch site 都齊** (L1213 `computeComposite`, L1840 / L1987 `computePicksFromEntries` 兩條 path)，`finalScore = eloComposite + (fDraw.bonus + fWeight.bonus)`
+  - **All 8 batch helpers 都用 strict `rm.date < asOf` 過濾** — `batchDrawBias`/`batchWeightDelta`/`batchLastRaceDate`/`batchDistanceFit`/`batchGoingFit`/`batchConditionFit`/`batchInjuryFlag`/`batchJtComboFit` 全部冇時間 leakage
+  - **Live verification**: `/picks-by-date` 12/12 + `/top-picks` 1/1 sampled picks 嘅 `factorBonus = fDraw.bonus + fWeight.bonus` 完全一致
+
+  ### ⚠️ 已知問題（未修，留待跟進）
+
+  **HIGH — `/run-backtest` 唔 validate R5 公式**
+  - `runBacktestForDate` 嘅 `baseline-bt` lane 寫嘅係 `finalScore = eloComposite, factorBonus = 0`（純 ELO），即係呢個 walk-forward backtester 量度緊嘅唔係 R5 production formula
+  - R5 嘅 +3.9pp Top1 / +5.1pp T4≥3 證據純粹來自我本機 88-day in-memory rerank（即 same-day 賽果重 score）
+  - 即使 ELO ratings 係 as-of-date 同所有 batch helpers 都 `< asOf`，rerank 嘅 `drawBias`/`weightDelta` 都係 strictly historical，但 prediction_log 入面 R5 lane 並未有獨立 walk-forward 證據
+  - **Action**: 建議下一步喺 `runBacktestForDate` 加 `r5` variant，跑 30–60d real walk-forward 確認
+
+  **MEDIUM — Sample-size CI 重疊**
+  - 853 races, p=0.245，95% CI ±2.9pp。R5 vs pure ELO 嘅 Top1 +1.5pp 喺 noise band 入面（+5.1pp T4≥3 較 meaningful 但都 ±3pp CI）
+  - **Action**: 觀察 5/13 起 30 forward race-days，若未能重現 ≥+2pp Top1 vs pure ELO，考慮 revert 到 pure ELO
+
+  **MEDIUM — API 命名混淆**
+  - `factorBreakdown` 仍出 8 個 factor (telemetry)，但 `factorBonus` 只 sum 其中 2 個。下游 (admin UI、prediction_log rolling stats) 容易誤解
+  - **Action**: 加 `scoringFormula: 'r5-elo+draw+weight'` field；或 split `factorBreakdown` → `scoring: {draw,weight}` + `telemetry: {…6個}`
+
+  **MEDIUM — `race_day_report_cache` 無 formula version**
+  - Cache 表 keyed by `(date, engine)`，無 TTL / formula 版本。若 R5 deploy 之前已 cache，會serve 舊 8-factor payload 直到下次 cron (HKT 06/11/18:00) 重 build
+  - **Action**: 加 `formula_version` column，或單次 `DELETE FROM race_day_report_cache` 即時清；現時 5/10 無賽，下次 5/13 cron 已自然 turnover，無逼切性
+
+  **MEDIUM — Draw / weight 同 venue / distance 相關**
+  - `fDraw` 已 bucketed by `(venue, distance)`，可能同 ELO 入面已蘊含嘅 venue/distance 信號 double-count
+  - Split-half stability test 顯示 `ELO+draw` 由舊半年到新半年 Top1 跌 5.2pp，較 `ELO+draw+recency` (3.8pp) 不穩
+  - **Action**: 計 `fDraw.bonus` × `fWeight.bonus` × `eloComposite` × `is_hit_top1` correlation matrix
+
+  **LOW — `_score` 公式 path 不一致 (pre-existing)**
+  - `computeComposite` (L1218): `_score = base + winRate*1.2 + factorBonus/100`
+  - `computePicksFromEntries` (L1843, L1991): `_score = base + factorBonus/100` (無 winRate term)
+  - R5 縮細 factorBonus 後，`top-picks` 入面 `winRate*1.2` 嘅相對權重會放大
+
+  **LOW — `prediction_log` baseline variant 混合公式版本**
+  - 同一 `variant='baseline'` 下，pre-R5 同 post-R5 rows formula 不同。Rolling 30-day baseline accuracy 跨 deploy 日會誤導
+  - **Action**: 報表加 `WHERE date >= '2026-05-10'` filter；或新 variant `'baseline-r5'`
+
+  ### 結論
+  R5 production code 正確同已 live。主要遺留風險：缺少 R5 lane 嘅 real walk-forward 驗證，加上 sample-size CI 重疊。建議 5/13 起跟蹤 forward 30 race-days，同時喺 backtester 加 R5 lane。
+  
