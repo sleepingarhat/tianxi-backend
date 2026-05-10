@@ -1207,8 +1207,10 @@ async function computeComposite(
       injury: fInjury,
       jtCombo: fJT,
     };
-    const factorBonus = recency + fDist.bonus + fGoing.bonus + fDraw.bonus
-                      + fWeight.bonus + fCond.bonus + fInjury.bonus + fJT.bonus;
+    // R5 ablation (88d / 853 races, 2026-05-10): production keeps only draw + weight.
+      // Other factors retained in factorBreakdown for telemetry but excluded from finalScore.
+      // Reference: reports/decision-log.md "2026-05-10 · R5 88-day ablation".
+      const factorBonus = fDraw.bonus + fWeight.bonus;
 
     const base = eloComposite != null ? (eloComposite - 1500) / 200 : 0;
     // winRate computed from pre-race wins/starts only (no same-day leakage).
