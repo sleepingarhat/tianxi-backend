@@ -2195,6 +2195,98 @@ analyzeRoutes.get('/factors', (c) => {
           }
         });
 
+          // GET /api/analyze/roi?days=60 — actual ROI backtest using captured win odds
+          // Strategies (all bet a flat $1 stake on rank-1 of each variant unless noted):
+          //   A. ALWAYS:        always bet rank-1
+          //   B. SP_3_8:        only bet when actual SP odds in [3, 8] (skip heavy faves + longshots)
+          //   C. EV_GT_5:       only bet when (pWin × SP_odds) > 1.05  (positive expected value by model)
+          // Returns per-variant × per-strategy: bets, hits, hitRate, avgPayout, totalPnL, roiPct
+          analyzeRoutes.get('/roi', async (c) => {
+            try {
+              const days = Math.max(1, Math.min(365, Number(c.req.query('days') ?? '60')));
+              const sinceDate = new Date(Date.now() - days * 86400000).toISOString().substring(0, 10);
+              const { results } = await c.env.DB.prepare(
+                `SELECT variant, date, race_number, p_win, predicted_rank,
+                        actual_finish, actual_win_odds, is_hit_top1
+                   FROM prediction_log
+                   WHERE date >= ? AND actual_finish IS NOT NULL
+                     AND predicted_rank = 1`
+              ).bind(sinceDate).all<any>().catch(() => ({ results: [] as any[] }));
+
+              const strategies = ['ALWAYS', 'SP_3_8', 'EV_GT_5'] as const;
+              const acc: Record<string, Record<string, { bets: number; hits: number; payoutSum: number }>> = {};
+
+              for (const r of (results ?? [])) {
+                const v = r.variant ?? 'baseline';
+                const odds = r.actual_win_odds == null ? null : Number(r.actual_win_odds);
+                const pWin = r.p_win == null ? null : Number(r.p_win);
+                const isHit = r.is_hit_top1 ? 1 : 0;
+                if (odds == null || odds <= 1) continue;
+
+                const inRange = odds >= 3 && odds <= 8;
+                const evPositive = pWin != null && (pWin * odds) > 1.05;
+
+                const filters: Record<string, boolean> = {
+                  ALWAYS: true,
+                  SP_3_8: inRange,
+                  EV_GT_5: evPositive,
+                };
+                if (!acc[v]) acc[v] = {};
+                for (const s of strategies) {
+                  if (!filters[s]) continue;
+                  if (!acc[v][s]) acc[v][s] = { bets: 0, hits: 0, payoutSum: 0 };
+                  acc[v][s].bets++;
+                  if (isHit) {
+                    acc[v][s].hits++;
+                    acc[v][s].payoutSum += odds; // flat $1 stake → return = odds (incl. stake)
+                  }
+                }
+              }
+
+              const summary: any[] = [];
+              for (const [variant, byStrat] of Object.entries(acc)) {
+                for (const s of strategies) {
+                  const row = byStrat[s];
+                  if (!row || row.bets === 0) {
+                    summary.push({ variant, strategy: s, bets: 0, hits: 0, hitRatePct: null, avgWinPayout: null, totalPnL: null, roiPct: null });
+                    continue;
+                  }
+                  const hitRate = row.hits / row.bets;
+                  const totalReturn = row.payoutSum;            // sum of odds when won (stake $1 each)
+                  const totalStake = row.bets;                  // 1 per bet
+                  const pnl = totalReturn - totalStake;
+                  const roiPct = (pnl / totalStake) * 100;
+                  const avgWinPayout = row.hits ? row.payoutSum / row.hits : null;
+                  summary.push({
+                    variant,
+                    strategy: s,
+                    bets: row.bets,
+                    hits: row.hits,
+                    hitRatePct: Math.round(hitRate * 1000) / 10,
+                    avgWinPayout: avgWinPayout != null ? Math.round(avgWinPayout * 100) / 100 : null,
+                    totalPnL: Math.round(pnl * 100) / 100,
+                    roiPct: Math.round(roiPct * 100) / 100,
+                  });
+                }
+              }
+              summary.sort((x, y) => x.variant.localeCompare(y.variant) || strategies.indexOf(x.strategy as any) - strategies.indexOf(y.strategy as any));
+
+              return c.json({
+                sinceDate,
+                days,
+                note: 'Flat $1 stake on rank-1 pick. ROI%=(totalReturn-totalStake)/totalStake. avgWinPayout includes stake (HK SP convention).',
+                strategies: {
+                  ALWAYS: 'Bet on every rank-1 pick',
+                  SP_3_8: 'Only bet when SP odds in [3, 8]',
+                  EV_GT_5: 'Only bet when (pWin × SP_odds) > 1.05',
+                },
+                summary,
+              });
+            } catch (e: any) {
+              return c.json({ error: String(e?.message ?? e) }, 500);
+            }
+          });
+
         // POST /api/analyze/run-backtest?days=90 — full walk-forward backtest over date range
         analyzeRoutes.post('/run-backtest', async (c) => {
         try {
