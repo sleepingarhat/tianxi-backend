@@ -982,13 +982,13 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
 
     <h2>即日賽事全因子預測</h2>
     <div class="actions-row">
-      <button class="tp-run" id="btnTodayPredict" onclick="loadTodayPredictions(false)">▶ 載入即日賽事預測報告（ELO v1.2 + 8 因子）</button>
+      <button class="tp-run" id="btnTodayPredict" onclick="loadTodayPredictions(false)">▶ 載入即日賽事預測報告（R5 · ELO + 檔位 + 負磅）</button>
         <button class="tp-run" id="btnTodayPredictForce" onclick="forceRebuildTodayPredictions()" style="background:#444;margin-left:6px">⟳ 強制重新運算</button>
       <span id="todayPredictStatus" style="font-size:12px;color:var(--mut)"></span>
     </div>
     <div id="todayPredictResults"></div>
 
-    <h2>📊 預測準確率回測（Phase A · 滾動視窗）</h2>
+    <h2>📊 預測準確率回測（R5 生產引擎 · 滾動視窗）</h2>
     <div style="margin:8px 0">
       <label style="font-size:13px;color:var(--mut)">視窗：
         <select id="accDays" onchange="loadPredictionAccuracy()" style="padding:3px 6px">
@@ -1579,7 +1579,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
           resultsEl.innerHTML = '<div style="padding:12px;color:var(--mut);font-size:13px">系統會在每日 03:00 HKT 自動回填過去 7 日的賽果到 prediction_log。第一份回測報告需累積 ≥1 個賽日資料。</div>';
           return;
         }
-        statusEl.textContent = '視窗起 ' + data.sinceDate + ' · ' + data.summary.length + ' 個變體';
+        statusEl.textContent = '視窗起 ' + data.sinceDate + ' · R5 生產引擎';
         var html = '<table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr style="background:#222;color:#fff">'
           + '<th style="padding:6px;text-align:left">變體</th>'
           + '<th style="padding:6px;text-align:right">場次</th>'
