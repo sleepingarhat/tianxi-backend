@@ -1589,18 +1589,23 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
           + '<th style="padding:6px;text-align:right">Brier 分數</th>'
           + '<th style="padding:6px;text-align:right">Log Loss</th>'
           + '</tr></thead><tbody>';
-        for (var i=0;i<data.summary.length;i++) {
-          var s = data.summary[i];
-          html += '<tr style="border-bottom:1px solid #ddd">'
-            + '<td style="padding:6px"><strong>' + s.variant + '</strong></td>'
-            + '<td style="padding:6px;text-align:right">' + s.races + '</td>'
-            + '<td style="padding:6px;text-align:right">' + s.horses + '</td>'
-            + '<td style="padding:6px;text-align:right">' + (s.bankerHitRate != null ? s.bankerHitRate + '%' : '—') + '</td>'
-            + '<td style="padding:6px;text-align:right">' + (s.top3PickHitRate != null ? s.top3PickHitRate + '%' : '—') + '</td>'
-            + '<td style="padding:6px;text-align:right">' + (s.brierWin != null ? s.brierWin : '—') + '</td>'
-            + '<td style="padding:6px;text-align:right">' + (s.logLossWin != null ? s.logLossWin : '—') + '</td>'
-            + '</tr>';
-        }
+        var prodRows = data.summary.filter(function(s){ return s.variant === 'r5-bt'; });
+          if (!prodRows.length) {
+            resultsEl.innerHTML = '<div style="padding:12px;color:var(--mut);font-size:13px">R5 (生產引擎) 尚未有 walk-forward 樣本，需待 /run-backtest 跑入 prediction_log。</div>';
+            return;
+          }
+          for (var i=0;i<prodRows.length;i++) {
+            var s = prodRows[i];
+            html += '<tr style="border-bottom:1px solid #ddd">'
+              + '<td style="padding:6px"><strong>R5 (ELO + 檔位 + 負磅)</strong></td>'
+              + '<td style="padding:6px;text-align:right">' + s.races + '</td>'
+              + '<td style="padding:6px;text-align:right">' + s.horses + '</td>'
+              + '<td style="padding:6px;text-align:right">' + (s.bankerHitRate != null ? s.bankerHitRate + '%' : '—') + '</td>'
+              + '<td style="padding:6px;text-align:right">' + (s.top3PickHitRate != null ? s.top3PickHitRate + '%' : '—') + '</td>'
+              + '<td style="padding:6px;text-align:right">' + (s.brierWin != null ? s.brierWin : '—') + '</td>'
+              + '<td style="padding:6px;text-align:right">' + (s.logLossWin != null ? s.logLossWin : '—') + '</td>'
+              + '</tr>';
+          }
         html += '</tbody></table>';
         html += '<div style="margin-top:6px;font-size:11px;color:var(--mut)">膽馬 = 預測排名第 1 的馬實際入第 1。前三貼士命中率 = 預測排名 1-3 的馬實際入前 3 的比率。Brier 越低越好（隨機 = 0.25），Log Loss 越低越好。</div>';
         resultsEl.innerHTML = html;
