@@ -1002,6 +1002,30 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
     </div>
     <div id="predAccuracyResults"></div>
 
+    <h2>💰 ROI 回測（實際派彩 · 平注 $1）<span style="font-size:11px;font-weight:400;color:var(--mut);margin-left:6px">證實：SP ∈ [3,8] 60 日 +19% ROI</span></h2>
+    <div style="margin:8px 0">
+      <label style="font-size:13px;color:var(--mut)">視窗：
+        <select id="roiDays" onchange="loadRoi()" style="padding:3px 6px">
+          <option value="30">過去 30 日</option>
+          <option value="60" selected>過去 60 日</option>
+          <option value="90">過去 90 日</option>
+        </select>
+      </label>
+      <span id="roiStatus" style="margin-left:10px;font-size:12px;color:var(--mut)"></span>
+    </div>
+    <div id="roiResults"></div>
+
+    <h2>🎯 今日價值貼士（SP ∈ [3,8] 過濾）<span style="font-size:11px;font-weight:400;color:var(--mut);margin-left:6px">用即時 WIN 賠率過濾 R5 排第 1 馬</span></h2>
+    <div style="margin:8px 0">
+      <label style="font-size:13px;color:var(--mut)">odds 範圍：
+        <input id="vpMin" type="number" step="0.5" value="3" min="1.01" style="width:55px;padding:3px 6px"> –
+        <input id="vpMax" type="number" step="0.5" value="8" min="1.01" style="width:55px;padding:3px 6px">
+      </label>
+      <button onclick="loadValuePicks()" style="margin-left:10px;padding:3px 10px;font-size:12px">🔍 計算今日價值貼士</button>
+      <span id="vpStatus" style="margin-left:10px;font-size:12px;color:var(--mut)"></span>
+    </div>
+    <div id="vpResults"></div>
+
     <h2>即日賽事排位表 + 即時賠率 <span id="nrdLabel" style="font-size:13px;font-weight:400;color:var(--mut)"></span></h2>
     <div id="nrdRaces"></div>
     <div id="nrdHorses"></div>
@@ -1565,6 +1589,101 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
       }
 
     // === Phase A · prediction accuracy panel ===
+    async function loadRoi() {
+      var statusEl = document.getElementById('roiStatus');
+      var resultsEl = document.getElementById('roiResults');
+      var days = document.getElementById('roiDays').value || '60';
+      statusEl.textContent = '載入中…'; resultsEl.innerHTML = '';
+      try {
+        var res = await fetch('/api/analyze/roi?days=' + days);
+        var data = await res.json();
+        if (data.error) { statusEl.textContent = '錯誤：' + data.error; return; }
+        if (!data.summary || !data.summary.length) { statusEl.textContent = '尚無已結算資料'; return; }
+        statusEl.textContent = '視窗起 ' + data.sinceDate + ' · 平注 $1 · 派彩含本金';
+        var rows = data.summary.filter(function(r){ return r.variant !== 'qimen-bt'; });
+        var stratLabel = { ALWAYS:'永遠膽 #1', SP_3_8:'SP ∈ [3,8]', EV_GT_5:'pWin×odds > 1.05' };
+        var html = '<table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr style="background:#222;color:#fff">'
+          + '<th style="padding:6px;text-align:left">變體</th>'
+          + '<th style="padding:6px;text-align:left">策略</th>'
+          + '<th style="padding:6px;text-align:right">下注</th>'
+          + '<th style="padding:6px;text-align:right">命中</th>'
+          + '<th style="padding:6px;text-align:right">命中率</th>'
+          + '<th style="padding:6px;text-align:right">平均派彩</th>'
+          + '<th style="padding:6px;text-align:right">總 P&amp;L</th>'
+          + '<th style="padding:6px;text-align:right">ROI%</th>'
+          + '</tr></thead><tbody>';
+        for (var i=0;i<rows.length;i++) {
+          var r = rows[i];
+          var roi = r.roiPct;
+          var roiColor = roi == null ? 'var(--mut)' : (roi >= 0 ? '#0a0' : '#c00');
+          var roiTxt = roi == null ? '—' : (roi >= 0 ? '+' : '') + roi + '%';
+          var pnl = r.totalPnL;
+          var pnlTxt = pnl == null ? '—' : (pnl >= 0 ? '+$' : '$') + pnl;
+          var label = (r.variant === 'r5-bt' ? 'R5' : 'baseline');
+          html += '<tr style="border-bottom:1px solid #ddd">'
+            + '<td style="padding:6px"><strong>' + label + '</strong></td>'
+            + '<td style="padding:6px;color:var(--mut);font-size:12px">' + (stratLabel[r.strategy] || r.strategy) + '</td>'
+            + '<td style="padding:6px;text-align:right">' + (r.bets || 0) + '</td>'
+            + '<td style="padding:6px;text-align:right">' + (r.hits || 0) + '</td>'
+            + '<td style="padding:6px;text-align:right">' + (r.hitRatePct != null ? r.hitRatePct + "%" : "—") + '</td>'
+            + '<td style="padding:6px;text-align:right">' + (r.avgWinPayout != null ? "$" + r.avgWinPayout : "—") + '</td>'
+            + '<td style="padding:6px;text-align:right">' + pnlTxt + '</td>'
+            + '<td style="padding:6px;text-align:right;color:' + roiColor + ';font-weight:600">' + roiTxt + '</td>'
+            + '</tr>';
+        }
+        html += '</tbody></table>';
+        html += '<div style="margin-top:6px;font-size:11px;color:var(--mut)">平均派彩含本金（HK SP 慣例）。ROI = (總派彩 − 總投注) / 總投注。EV_GT_5 喺現時未校正 pWin 上 0% 命中（已證偽）。樣本太細時 CI 闊。</div>';
+        resultsEl.innerHTML = html;
+      } catch (e) { statusEl.textContent = '錯誤：' + e.message; }
+    }
+
+    async function loadValuePicks() {
+      var statusEl = document.getElementById('vpStatus');
+      var resultsEl = document.getElementById('vpResults');
+      var minV = document.getElementById('vpMin').value || '3';
+      var maxV = document.getElementById('vpMax').value || '8';
+      statusEl.textContent = '計算中…'; resultsEl.innerHTML = '';
+      try {
+        var res = await fetch('/api/analyze/value-picks?min=' + minV + '&max=' + maxV);
+        var data = await res.json();
+        if (data.error) { statusEl.textContent = '錯誤：' + data.error; return; }
+        statusEl.textContent = data.date + ' · ' + data.venue + ' · 排位 ' + data.races + ' 場 · ' + data.oddsAvailable + '/' + data.oddsTotal + ' 場有 odds';
+        if (!data.valuePicks || !data.valuePicks.length) {
+          resultsEl.innerHTML = '<div style="padding:12px;color:var(--mut);font-size:13px">無 R5 排第 1 馬落入 odds [' + minV + ', ' + maxV + ']。可能：(a) 仍未到開閘前 odds 穩定區間；(b) 今日 R5 全部偏熱門 / 冷門。</div>';
+          return;
+        }
+        var html = '<table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr style="background:#222;color:#fff">'
+          + '<th style="padding:6px;text-align:left">場次</th>'
+          + '<th style="padding:6px;text-align:left">馬號·名</th>'
+          + '<th style="padding:6px;text-align:left">騎師 / 練馬師</th>'
+          + '<th style="padding:6px;text-align:right">檔</th>'
+          + '<th style="padding:6px;text-align:right">R5 pWin</th>'
+          + '<th style="padding:6px;text-align:right">市場 odds</th>'
+          + '<th style="padding:6px;text-align:right">市場 implied p</th>'
+          + '<th style="padding:6px;text-align:right">R5 edge</th>'
+          + '</tr></thead><tbody>';
+        for (var i=0;i<data.valuePicks.length;i++) {
+          var p = data.valuePicks[i];
+          var edge = p.modelEdgePp;
+          var edgeColor = edge == null ? 'var(--mut)' : (edge >= 0 ? '#0a0' : '#c00');
+          var edgeTxt = edge == null ? "—" : (edge >= 0 ? "+" : "") + edge + "pp";
+          html += '<tr style="border-bottom:1px solid #ddd">'
+            + '<td style="padding:6px"><strong>R' + p.raceNumber + '</strong><div style="font-size:11px;color:var(--mut)">' + (p.distance || "—") + 'm · ' + (p.going || "—") + '</div></td>'
+            + '<td style="padding:6px"><strong>' + p.horseNumber + ' ' + (p.nameCh || p.nameEn || "—") + '</strong></td>'
+            + '<td style="padding:6px;font-size:12px">' + (p.jockey || "—") + '<div style="color:var(--mut)">' + (p.trainer || "—") + '</div></td>'
+            + '<td style="padding:6px;text-align:right">' + (p.draw || "—") + '</td>'
+            + '<td style="padding:6px;text-align:right">' + (p.pWin != null ? (p.pWin*100).toFixed(1) + "%" : "—") + '</td>'
+            + '<td style="padding:6px;text-align:right;font-weight:600">$' + p.liveOdds + '</td>'
+            + '<td style="padding:6px;text-align:right">' + (p.impliedP != null ? (p.impliedP*100).toFixed(1) + "%" : "—") + '</td>'
+            + '<td style="padding:6px;text-align:right;color:' + edgeColor + ';font-weight:600">' + edgeTxt + '</td>'
+            + '</tr>';
+        }
+        html += '</tbody></table>';
+        html += '<div style="margin-top:6px;font-size:11px;color:var(--mut)">⚠ 警告：呢個過濾喺 baseline 60 日 +19% ROI，但 R5 變體只 −0.15%（draw+weight bonus 推 picks 偏熱門）。即係呢個 panel 用 R5 揀 + SP_3_8 過濾，係過渡方案，未真正 +EV。R5 edge = pWin − 市場 implied p。</div>';
+        resultsEl.innerHTML = html;
+      } catch (e) { statusEl.textContent = '錯誤：' + e.message; }
+    }
+
     async function loadPredictionAccuracy() {
       var statusEl = document.getElementById('accStatus');
       var resultsEl = document.getElementById('predAccuracyResults');
