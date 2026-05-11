@@ -2287,6 +2287,70 @@ analyzeRoutes.get('/factors', (c) => {
             }
           });
 
+        // GET /api/analyze/value-picks?date=YYYY-MM-DD&min=3&max=8
+        // For each race, returns the R5 rank-1 pick if its latest WIN odds fall in [min, max].
+        // Default [3, 8] follows SP_3_8 strategy proven +19% ROI on baseline 60d backtest.
+        analyzeRoutes.get('/value-picks', async (c) => {
+          try {
+            const dateParam = c.req.query('date') ?? null;
+            const minOdds = Math.max(1.01, Number(c.req.query('min') ?? '3'));
+            const maxOdds = Math.max(minOdds, Number(c.req.query('max') ?? '8'));
+            const engine: EloEngine = c.req.query('engine') === 'v11' ? 'v11' : 'v12';
+            const report = await runRaceDayReportCompute(c.env.DB, engine, { fresh: false });
+            if (report?.error) return c.json({ error: report.error }, (report.status ?? 500) as any);
+            const date = dateParam ?? report.date;
+            const venue = report.venue;
+            if (!date || !venue) return c.json({ error: 'no race day available' }, 404);
+            const { results: oddsRows } = await c.env.DB.prepare(
+              `SELECT race_number, horse_no, odds, snapshot_at FROM (
+                 SELECT race_number, combination AS horse_no, odds, snapshot_at,
+                        ROW_NUMBER() OVER (PARTITION BY race_number, combination ORDER BY snapshot_at DESC) AS rn
+                   FROM odds_snapshots
+                   WHERE race_date = ? AND venue = ? AND pool_type = 'WIN'
+               ) WHERE rn = 1`
+            ).bind(date, venue).all<any>().catch(() => ({ results: [] as any[] }));
+            const oddsMap = new Map<string, { odds: number | null; snapshotAt: string | null }>();
+            for (const r of (oddsRows ?? [])) {
+              oddsMap.set(`${r.race_number}:${r.horse_no}`, {
+                odds: r.odds == null ? null : Number(r.odds),
+                snapshotAt: r.snapshot_at ?? null,
+              });
+            }
+            const picks: any[] = [];
+            let oddsAvailable = 0;
+            let oddsTotal = 0;
+            for (const race of (report.races ?? [])) {
+              const top = (race.picks ?? []).find((p: any) => p.rank === 1);
+              if (!top) continue;
+              const o = oddsMap.get(`${race.raceNumber}:${top.horseNumber}`);
+              oddsTotal++;
+              if (o?.odds != null) oddsAvailable++;
+              const inRange = o?.odds != null && o.odds >= minOdds && o.odds <= maxOdds;
+              if (inRange) {
+                picks.push({
+                  raceNumber: race.raceNumber, raceTitle: race.title,
+                  distance: race.distance, going: race.going,
+                  horseNumber: top.horseNumber, nameCh: top.nameCh, nameEn: top.nameEn,
+                  jockey: top.jockeyCh, trainer: top.trainerCh, draw: top.draw,
+                  pWin: top.pWin, pTop3: top.pTop3,
+                  eloComposite: top.eloComposite, finalScore: top.finalScore,
+                  liveOdds: o!.odds, oddsSnapshotAt: o!.snapshotAt,
+                  impliedP: o!.odds ? Math.round((1 / o!.odds) * 1000) / 1000 : null,
+                  modelEdgePp: (top.pWin != null && o!.odds) ? Math.round((top.pWin - 1 / o!.odds) * 1000) / 10 : null,
+                });
+              }
+            }
+            return c.json({
+              date, venue, oddsRange: { min: minOdds, max: maxOdds },
+              note: 'Filter follows SP_3_8 strategy (+19% ROI on baseline 60d). Live odds = latest WIN snapshot. Production SP may differ.',
+              races: report.races?.length ?? 0, oddsAvailable, oddsTotal,
+              valuePicks: picks, generatedAt: new Date().toISOString(),
+            });
+          } catch (err: any) {
+            return c.json({ error: 'value-picks failed', detail: err?.message ?? String(err) }, 500);
+          }
+        });
+
         // POST /api/analyze/run-backtest?days=90 — full walk-forward backtest over date range
         analyzeRoutes.post('/run-backtest', async (c) => {
         try {
