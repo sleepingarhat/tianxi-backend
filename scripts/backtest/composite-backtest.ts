@@ -37,6 +37,7 @@
  * SQL already used in scripts/test-composite.ts.
  */
 import Database from 'better-sqlite3';
+import { distanceBucket } from '../ingest/lib/parsers.js';
 import { writeFileSync } from 'node:fs';
 
 // ── CLI parsing ─────────────────────────────────────────────────────────
@@ -64,8 +65,17 @@ const ENGINE = (arg('engine', 'v12') === 'v11' ? 'v11' : 'v12') as 'v11' | 'v12'
 const W_HORSE = argNum('w-horse', 0.7);
 const W_JOCKEY = argNum('w-jockey', 0.2);
 const W_TRAINER = argNum('w-trainer', 0.1);
-const FACTORS = new Set((arg('factors', 'recency,distance,going,draw,weight,combo') || '')
-  .split(',').map(s => s.trim()).filter(Boolean));
+const FACTORS_RAW = arg('factors', 'recency,distance,going,draw,weight,combo');
+const FACTORS = new Set(
+  FACTORS_RAW === 'none' || FACTORS_RAW === '' ? [] :
+  FACTORS_RAW.split(',').map(s => s.trim()).filter(Boolean)
+);
+// Multi-axis ELO mode (2026-05-12). Values:
+//   overall  → current behaviour (single-axis 'overall' rating per horse)
+//   axis     → use per-(surface, distance_bucket) rating; fall back to overall if cold-start
+//   hybrid   → 0.6 × axis + 0.4 × overall (smoothed cold-start)
+const HORSE_ELO_MODE = (arg('horse-elo-mode', 'overall') as 'overall' | 'axis' | 'hybrid');
+if (!['overall','axis','hybrid'].includes(HORSE_ELO_MODE)) throw new Error('--horse-elo-mode must be overall|axis|hybrid');
 const OUT = arg('out', '');
 const LEDGER = arg('ledger', '');
 const VERBOSE = argBool('verbose');
@@ -131,6 +141,33 @@ function eloStmt(entity: 'horse' | 'jockey' | 'trainer', engine: 'v11' | 'v12'):
   eloStmtCache.set(k, s);
   return s;
 }
+// 2026-05-12: axis-keyed horse rating (multi-axis ELO from compute_v11).
+// Query takes BOTH possible surfaces for the bucket and returns the most-recent.
+const horseAxisStmt = db.prepare(
+  `SELECT rating, axis_key FROM horse_elo_snapshots
+     WHERE horse_id = ?
+       AND axis_key IN (?, ?)
+       AND as_of_date < ?
+     ORDER BY as_of_date DESC LIMIT 1`
+);
+function readHorseAxisElo(horseId: string, asOf: string, bucket: string | null): { rating: number; axis: string } | null {
+  if (!bucket) return null;
+  try {
+    const row = horseAxisStmt.get(horseId, `turf_${bucket}`, `awt_${bucket}`, asOf) as { rating: number; axis_key: string } | undefined;
+    if (row?.rating != null) return { rating: row.rating, axis: row.axis_key };
+  } catch { /* table missing axis rows */ }
+  return null;
+}
+function readHorseEloByMode(horseId: string | null, asOf: string, distance: number | null): number | null {
+  if (!horseId) return null;
+  const overall = readElo('horse', horseId, asOf);
+  if (HORSE_ELO_MODE === 'overall') return overall;
+  const axis = readHorseAxisElo(horseId, asOf, distanceBucket(distance));
+  if (HORSE_ELO_MODE === 'axis') return axis ? axis.rating : overall;
+  if (axis && overall != null) return 0.6 * axis.rating + 0.4 * overall;
+  return axis ? axis.rating : overall;
+}
+
 function readElo(entity: 'horse' | 'jockey' | 'trainer', id: string | null, asOf: string): number | null {
   if (!id) return null;
   try {
@@ -289,6 +326,7 @@ const races = db.prepare(`
 console.error(`[backtest] date range ${FROM}..${TO} → ${races.length} races`);
 console.error(`[backtest] engine=${ENGINE} weights=H${W_HORSE}/J${W_JOCKEY}/T${W_TRAINER}`);
 console.error(`[backtest] factors enabled: ${Array.from(FACTORS).join(',') || '(none — pure ELO)'}`);
+console.error(`[backtest] horse-elo-mode=${HORSE_ELO_MODE}`);
 
 const qRunners = db.prepare(`
   SELECT race_id, horse_id, jockey_id, trainer_id, finishing_position,
@@ -329,7 +367,7 @@ for (const meta of races) {
   runnerCount += runners.length;
 
   const scored: ScoredRunner[] = runners.map(r => {
-    const eloH = readElo('horse', r.horse_id, meta.date);
+    const eloH = readHorseEloByMode(r.horse_id, meta.date, meta.distance);
     const eloJ = readElo('jockey', r.jockey_id, meta.date);
     const eloT = readElo('trainer', r.trainer_id, meta.date);
     const eloParts = [
