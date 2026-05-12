@@ -1,14 +1,14 @@
-# Multi-axis ELO comparison @ 2026-05-12T15:54:36Z
+# Multi-axis ELO comparison @ 2026-05-12T16:08:25Z
 
-Window: `2024-01-01` → `2026-04-30` · ELO compute: v11 (multi-axis + 180d decay)
+Window: `2024-06-01` → `2024-06-30` · ELO compute: v11 (multi-axis + 180d decay)
 
 | variant | top1 hit | top3 hit | podium IoU | spearman | brier top1 | races |
 |---|---:|---:|---:|---:|---:|---:|
-| A_overall_8factor | 0 | 0 | — | None | — | 2034 |
-| B_overall_pure | 0 | 0 | — | None | — | 2034 |
-| C_axis_8factor | 0 | 0 | — | None | — | 2034 |
-| D_axis_pure | 0 | 0 | — | None | — | 2034 |
-| E_hybrid_8factor | 0 | 0 | — | None | — | 2034 |
+| A_overall_8factor | 0 | 0 | — | None | — | 70 |
+| B_overall_pure | 0 | 0 | — | None | — | 70 |
+| C_axis_8factor | 0 | 0 | — | None | — | 70 |
+| D_axis_pure | 0 | 0 | — | None | — | 70 |
+| E_hybrid_8factor | 0 | 0 | — | None | — | 70 |
 
 ## Detail JSONs (top 80 lines each)
 
@@ -17,8 +17,8 @@ Window: `2024-01-01` → `2026-04-30` · ELO compute: v11 (multi-axis + 180d dec
 {
     "config": {
         "dbPath": "bulk-local.db",
-        "from": "2024-01-01",
-        "to": "2026-04-30",
+        "from": "2024-06-01",
+        "to": "2024-06-30",
         "engine": "v12",
         "weights": {
             "horse": 0.7,
@@ -34,9 +34,9 @@ Window: `2024-01-01` → `2026-04-30` · ELO compute: v11 (multi-axis + 180d dec
             "combo"
         ]
     },
-    "raceCount": 2034,
+    "raceCount": 70,
     "validRaces": 0,
-    "runnerCount": 24877,
+    "runnerCount": 834,
     "metrics": {
         "top1HitRate": 0,
         "top3HitRate": 0,
@@ -54,8 +54,8 @@ Window: `2024-01-01` → `2026-04-30` · ELO compute: v11 (multi-axis + 180d dec
 {
     "config": {
         "dbPath": "bulk-local.db",
-        "from": "2024-01-01",
-        "to": "2026-04-30",
+        "from": "2024-06-01",
+        "to": "2024-06-30",
         "engine": "v12",
         "weights": {
             "horse": 0.7,
@@ -64,9 +64,9 @@ Window: `2024-01-01` → `2026-04-30` · ELO compute: v11 (multi-axis + 180d dec
         },
         "factors": []
     },
-    "raceCount": 2034,
+    "raceCount": 70,
     "validRaces": 0,
-    "runnerCount": 24877,
+    "runnerCount": 834,
     "metrics": {
         "top1HitRate": 0,
         "top3HitRate": 0,
@@ -84,8 +84,8 @@ Window: `2024-01-01` → `2026-04-30` · ELO compute: v11 (multi-axis + 180d dec
 {
     "config": {
         "dbPath": "bulk-local.db",
-        "from": "2024-01-01",
-        "to": "2026-04-30",
+        "from": "2024-06-01",
+        "to": "2024-06-30",
         "engine": "v12",
         "weights": {
             "horse": 0.7,
@@ -101,9 +101,9 @@ Window: `2024-01-01` → `2026-04-30` · ELO compute: v11 (multi-axis + 180d dec
             "combo"
         ]
     },
-    "raceCount": 2034,
+    "raceCount": 70,
     "validRaces": 0,
-    "runnerCount": 24877,
+    "runnerCount": 834,
     "metrics": {
         "top1HitRate": 0,
         "top3HitRate": 0,
@@ -121,8 +121,8 @@ Window: `2024-01-01` → `2026-04-30` · ELO compute: v11 (multi-axis + 180d dec
 {
     "config": {
         "dbPath": "bulk-local.db",
-        "from": "2024-01-01",
-        "to": "2026-04-30",
+        "from": "2024-06-01",
+        "to": "2024-06-30",
         "engine": "v12",
         "weights": {
             "horse": 0.7,
@@ -131,9 +131,9 @@ Window: `2024-01-01` → `2026-04-30` · ELO compute: v11 (multi-axis + 180d dec
         },
         "factors": []
     },
-    "raceCount": 2034,
+    "raceCount": 70,
     "validRaces": 0,
-    "runnerCount": 24877,
+    "runnerCount": 834,
     "metrics": {
         "top1HitRate": 0,
         "top3HitRate": 0,
@@ -151,8 +151,8 @@ Window: `2024-01-01` → `2026-04-30` · ELO compute: v11 (multi-axis + 180d dec
 {
     "config": {
         "dbPath": "bulk-local.db",
-        "from": "2024-01-01",
-        "to": "2026-04-30",
+        "from": "2024-06-01",
+        "to": "2024-06-30",
         "engine": "v12",
         "weights": {
             "horse": 0.7,
@@ -168,9 +168,9 @@ Window: `2024-01-01` → `2026-04-30` · ELO compute: v11 (multi-axis + 180d dec
             "combo"
         ]
     },
-    "raceCount": 2034,
+    "raceCount": 70,
     "validRaces": 0,
-    "runnerCount": 24877,
+    "runnerCount": 834,
     "metrics": {
         "top1HitRate": 0,
         "top3HitRate": 0,
