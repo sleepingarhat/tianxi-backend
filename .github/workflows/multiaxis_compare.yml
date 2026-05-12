@@ -85,8 +85,8 @@ jobs:
         run: |
           sudo apt-get -qq install -y sqlite3 >/dev/null 2>&1 || true
           sqlite3 bulk-local.db "
-            CREATE INDEX IF NOT EXISTS idx_jes_axis ON jockey_elo_snapshots(jockey_id, axis_key, as_of_date DESC);
-            CREATE INDEX IF NOT EXISTS idx_tes_axis ON trainer_elo_snapshots(trainer_id, axis_key, as_of_date DESC);
+            CREATE INDEX IF NOT EXISTS idx_jes_jockey_date ON jockey_elo_snapshots(jockey_id, as_of_date DESC);
+            CREATE INDEX IF NOT EXISTS idx_tes_trainer_date ON trainer_elo_snapshots(trainer_id, as_of_date DESC);
             CREATE INDEX IF NOT EXISTS idx_rr_horse_date ON race_results(horse_id);
             ANALYZE;
           "
