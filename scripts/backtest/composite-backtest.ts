@@ -328,12 +328,27 @@ try {
   const pj = db.prepare("SELECT COUNT(*) AS n FROM jockey_elo_snapshots").get() as {n:number};
   const pt = db.prepare("SELECT COUNT(*) AS n FROM trainer_elo_snapshots").get() as {n:number};
   console.error(`[preflight] snapshot rows: horse_overall=${ph.n} jockey=${pj.n} trainer=${pt.n}`);
-  const sample = db.prepare(`SELECT rr.horse_id, rr.jockey_id, rr.trainer_id, j.name_en AS jn, t.name_en AS tn, rm.date FROM race_results rr JOIN races r ON r.id=rr.race_id JOIN race_meetings rm ON rm.id=r.meeting_id LEFT JOIN jockeys j ON j.id=rr.jockey_id LEFT JOIN trainers t ON t.id=rr.trainer_id WHERE rm.date BETWEEN ? AND ? AND rr.finishing_position BETWEEN 1 AND 98 LIMIT 1`).get(FROM, TO) as any;
-  if (sample) {
-    const eH = readElo('horse', sample.horse_id, sample.date);
-    const eJ = readElo('jockey', sample.jn, sample.date);
-    const eT = readElo('trainer', sample.tn, sample.date);
-    console.error(`[preflight] sample h=${sample.horse_id} jn=${sample.jn} tn=${sample.tn} d=${sample.date} → eH=${eH} eJ=${eJ} eT=${eT}`);
+  // Show id-format samples from both sides — check for join-key mismatch
+  const horseIdsRR = db.prepare(`SELECT DISTINCT horse_id FROM race_results LIMIT 5`).all() as {horse_id:string}[];
+  const horseIdsHES = db.prepare(`SELECT DISTINCT horse_id FROM horse_elo_snapshots LIMIT 5`).all() as {horse_id:string}[];
+  console.error('[preflight] race_results.horse_id samples:', horseIdsRR.map(x=>x.horse_id).join(','));
+  console.error('[preflight] horse_elo_snapshots.horse_id samples:', horseIdsHES.map(x=>x.horse_id).join(','));
+  // Hit-rate sample over 20 runners in window
+  const samples = db.prepare(`SELECT rr.horse_id, rr.jockey_id, rr.trainer_id, j.name_en AS jn, t.name_en AS tn, rm.date FROM race_results rr JOIN races r ON r.id=rr.race_id JOIN race_meetings rm ON rm.id=r.meeting_id LEFT JOIN jockeys j ON j.id=rr.jockey_id LEFT JOIN trainers t ON t.id=rr.trainer_id WHERE rm.date BETWEEN ? AND ? AND rr.finishing_position BETWEEN 1 AND 98 ORDER BY rm.date DESC LIMIT 20`).all(FROM, TO) as any[];
+  let hH=0, hJ=0, hT=0;
+  for (const s of samples) {
+    if (readElo('horse', s.horse_id, s.date) != null) hH++;
+    if (readElo('jockey', s.jn, s.date) != null) hJ++;
+    if (readElo('trainer', s.tn, s.date) != null) hT++;
+  }
+  console.error(`[preflight] hit-rate (n=${samples.length}): horse=${hH} jockey=${hJ} trainer=${hT}`);
+  // Direct check: take a horse_id from race_results, count its snapshot rows
+  if (horseIdsRR[0]) {
+    const hid = horseIdsRR[0].horse_id;
+    const cnt = db.prepare(`SELECT COUNT(*) AS n FROM horse_elo_snapshots WHERE horse_id=?`).get(hid) as {n:number};
+    const cntOverall = db.prepare(`SELECT COUNT(*) AS n FROM horse_elo_snapshots WHERE horse_id=? AND axis_key='overall'`).get(hid) as {n:number};
+    const oneRow = db.prepare(`SELECT id, axis_key, as_of_date, rating FROM horse_elo_snapshots WHERE horse_id=? ORDER BY as_of_date DESC LIMIT 1`).get(hid) as any;
+    console.error(`[preflight] for horse_id=${hid}: total snaps=${cnt.n}, overall=${cntOverall.n}, latest=${JSON.stringify(oneRow)}`);
   }
 } catch (e) {
   console.error('[preflight] failed:', (e as Error).message);
