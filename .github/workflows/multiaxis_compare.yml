@@ -1,0 +1,150 @@
+name: Multi-axis ELO comparison (Stage MA)
+
+# Builds bulk-local.db, runs compute_v11.ts (multi-axis ELO with 180d decay),
+# then runs composite-backtest 5× across (mode, factors) combos for an
+# apples-to-apples comparison vs the 'overall + 8-factor' baseline.
+
+on:
+  workflow_dispatch:
+    inputs:
+      from:
+        description: 'Eval window start (YYYY-MM-DD)'
+        required: false
+        default: '2024-09-01'
+      to:
+        description: 'Eval window end (YYYY-MM-DD)'
+        required: false
+        default: '2026-04-30'
+      force_rebuild_db:
+        description: 'Ignore cache and rebuild bulk-local.db from scratch'
+        required: false
+        default: 'false'
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: tianxi-backend
+      - uses: actions/checkout@v4
+        with:
+          repository: sleepingarhat/tianxi-database
+          path: hkjc-data
+          sparse-checkout: |
+            data
+            horses/form_records
+            last_sync.json
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: tianxi-backend/package-lock.json
+      - name: Install backend deps
+        working-directory: tianxi-backend
+        run: npm ci
+      - name: Compute cache key
+        id: sig
+        run: |
+          DATA_SHA=$(cd hkjc-data && git rev-parse HEAD)
+          SCRIPTS_HASH=$(find tianxi-backend/scripts/ingest tianxi-backend/scripts/elo tianxi-backend/scripts/import-csv.ts tianxi-backend/src/db/schema.sql -type f 2>/dev/null | sort | xargs sha256sum | sha256sum | head -c12)
+          KEY="multiaxis-db-${DATA_SHA:0:12}-${SCRIPTS_HASH}"
+          echo "key=$KEY" >> $GITHUB_OUTPUT
+      - name: Restore bulk-local.db cache
+        id: db-cache
+        if: inputs.force_rebuild_db != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: tianxi-backend/bulk-local.db
+          key: ${{ steps.sig.outputs.key }}
+      - name: Build bulk-local.db (import results CSVs)
+        if: steps.db-cache.outputs.cache-hit != 'true'
+        working-directory: tianxi-backend
+        run: |
+          npx tsx scripts/import-csv.ts --data-dir ../hkjc-data/data --db ./bulk-local.db
+          ls -lh bulk-local.db
+      - name: Ingest horse form records
+        if: steps.db-cache.outputs.cache-hit != 'true'
+        working-directory: tianxi-backend
+        run: |
+          npx tsx scripts/ingest/index.ts form --data-dir=../hkjc-data --db=./bulk-local.db
+          ls -lh bulk-local.db
+      - name: Compute MULTI-AXIS ELO (compute_v11.ts)
+        working-directory: tianxi-backend
+        run: |
+          npx tsx scripts/elo/compute_v11.ts --db=./bulk-local.db --reset
+          sudo apt-get -qq install -y sqlite3 >/dev/null 2>&1 || true
+          echo '=== axis_key inventory ==='
+          sqlite3 bulk-local.db "SELECT axis_key, COUNT(*) AS rows, COUNT(DISTINCT horse_id) AS horses FROM horse_elo_snapshots GROUP BY axis_key ORDER BY rows DESC;"
+      - name: Save bulk-local.db cache
+        if: always() && steps.db-cache.outputs.cache-hit != 'true' && hashFiles('tianxi-backend/bulk-local.db') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: tianxi-backend/bulk-local.db
+          key: ${{ steps.sig.outputs.key }}
+      - name: Backtest A — overall + 8-factor (current baseline)
+        working-directory: tianxi-backend
+        run: npx tsx scripts/backtest/composite-backtest.ts --db=bulk-local.db --from='${{ inputs.from }}' --to='${{ inputs.to }}' --horse-elo-mode=overall --factors=recency,distance,going,draw,weight,combo --out=/tmp/A_overall_8factor.json
+      - name: Backtest B — overall pure (no factors)
+        working-directory: tianxi-backend
+        run: npx tsx scripts/backtest/composite-backtest.ts --db=bulk-local.db --from='${{ inputs.from }}' --to='${{ inputs.to }}' --horse-elo-mode=overall --factors=none --out=/tmp/B_overall_pure.json
+      - name: Backtest C — multi-axis + 8-factor
+        working-directory: tianxi-backend
+        run: npx tsx scripts/backtest/composite-backtest.ts --db=bulk-local.db --from='${{ inputs.from }}' --to='${{ inputs.to }}' --horse-elo-mode=axis --factors=recency,distance,going,draw,weight,combo --out=/tmp/C_axis_8factor.json
+      - name: Backtest D — multi-axis pure (no factors)
+        working-directory: tianxi-backend
+        run: npx tsx scripts/backtest/composite-backtest.ts --db=bulk-local.db --from='${{ inputs.from }}' --to='${{ inputs.to }}' --horse-elo-mode=axis --factors=none --out=/tmp/D_axis_pure.json
+      - name: Backtest E — hybrid + 8-factor
+        working-directory: tianxi-backend
+        run: npx tsx scripts/backtest/composite-backtest.ts --db=bulk-local.db --from='${{ inputs.from }}' --to='${{ inputs.to }}' --horse-elo-mode=hybrid --factors=recency,distance,going,draw,weight,combo --out=/tmp/E_hybrid_8factor.json
+      - name: Build comparison report
+        run: |
+          mkdir -p tianxi-backend/reports
+          OUT=tianxi-backend/reports/multiaxis-compare.md
+          {
+            echo "# Multi-axis ELO comparison @ $(date -u +%FT%TZ)"
+            echo ""
+            echo "Window: \`${{ inputs.from }}\` → \`${{ inputs.to }}\` · ELO compute: v11 (multi-axis + 180d decay)"
+            echo ""
+            echo "| variant | top1 hit | top3 hit | podium IoU | spearman | brier top1 | races |"
+            echo "|---|---:|---:|---:|---:|---:|---:|"
+            for tag in A_overall_8factor B_overall_pure C_axis_8factor D_axis_pure E_hybrid_8factor; do
+              python3 -c "import json; d=json.load(open('/tmp/${tag}.json')); m=d.get('metrics',{}); print(f'| ${tag} | {m.get(\"top1HitRate\",\"—\")} | {m.get(\"top3HitRate\",\"—\")} | {m.get(\"podiumIOU\",\"—\")} | {m.get(\"meanSpearman\",\"—\")} | {m.get(\"brierTop1\",\"—\")} | {d.get(\"raceCount\",\"—\")} |')"
+            done
+            echo ""
+            echo "## Detail JSONs (top 80 lines each)"
+            for tag in A_overall_8factor B_overall_pure C_axis_8factor D_axis_pure E_hybrid_8factor; do
+              echo ""
+              echo "### ${tag}"
+              echo '```json'
+              python3 -m json.tool /tmp/${tag}.json | head -80
+              echo '```'
+            done
+          } > "$OUT"
+          cat "$OUT" >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: multiaxis-compare-results
+          path: |
+            tianxi-backend/reports/multiaxis-compare.md
+            /tmp/A_overall_8factor.json
+            /tmp/B_overall_pure.json
+            /tmp/C_axis_8factor.json
+            /tmp/D_axis_pure.json
+            /tmp/E_hybrid_8factor.json
+          retention-days: 14
+      - name: Commit report
+        if: always()
+        working-directory: tianxi-backend
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add reports/multiaxis-compare.md 2>/dev/null || true
+          git commit -m "report: multi-axis ELO comparison ${{ inputs.from }}..${{ inputs.to }}" || echo "no changes"
+          git push || true
