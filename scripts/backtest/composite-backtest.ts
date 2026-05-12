@@ -164,8 +164,12 @@ function readHorseEloByMode(horseId: string | null, asOf: string, distance: numb
 
 function readElo(entity: 'horse' | 'jockey' | 'trainer', id: string | null, asOf: string): number | null {
   if (!id) return null;
+  // 2026-05-12 fix: race_results.horse_id has 'horse_' prefix (e.g. 'horse_A001')
+  // but compute_v11 strips it when writing horse_elo_snapshots (stored as 'A001').
+  // Normalize before lookup so the join key matches.
+  const lookupId = entity === 'horse' && id.startsWith('horse_') ? id.slice(6) : id;
   try {
-    const row = eloStmt(entity, ENGINE).get(id, asOf) as { rating: number } | undefined;
+    const row = eloStmt(entity, ENGINE).get(lookupId, asOf) as { rating: number } | undefined;
     return row?.rating ?? null;
   } catch (e) {
     if (!(globalThis as any).__readEloErrLogged) {
