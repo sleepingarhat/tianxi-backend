@@ -119,15 +119,18 @@ db.pragma('synchronous = OFF');
 // (qELO dead block removed 2026-05-12 — was throwing SqliteError: no such table __TBL__ at module load; readElo via eloStmtCache below is the live path)
 // Reusable per-entity prepared statements keyed by (entity, engine).
 const eloStmtCache = new Map<string, Database.Statement>();
-function eloStmt(entity: 'horse' | 'jockey' | 'trainer', engine: 'v11' | 'v12'): Database.Statement {
-  const k = `${entity}|${engine}`;
+function eloStmt(entity: 'horse' | 'jockey' | 'trainer', _engine: 'v11' | 'v12'): Database.Statement {
+  // 2026-05-12 fix: drop axis_key for jockey/trainer (column doesn't exist on those
+  // tables) and drop v12/v11 id-prefix split (compute_v11 wipes & rewrites all
+  // snapshots, no prefix used). Previous code threw at prepare() and was silently
+  // caught → eloJ/eloT always null → eloComposite null → 0 valid races.
+  const k = entity;
   let s = eloStmtCache.get(k);
   if (s) return s;
-  const table = `${entity}_elo_snapshots`;
-  const col = `${entity}_id`;
-  const sql = engine === 'v12'
-    ? `SELECT rating FROM ${table} WHERE ${col}=? AND axis_key='overall' AND as_of_date<? AND id LIKE 'v12:%' ORDER BY as_of_date DESC LIMIT 1`
-    : `SELECT rating FROM ${table} WHERE ${col}=? AND axis_key='overall' AND as_of_date<? AND id NOT LIKE 'v12:%' ORDER BY as_of_date DESC LIMIT 1`;
+  const table = entity + '_elo_snapshots';
+  const col = entity + '_id';
+  const axisFilter = entity === 'horse' ? "AND axis_key='overall'" : '';
+  const sql = `SELECT rating FROM ${table} WHERE ${col}=? ${axisFilter} AND as_of_date<? ORDER BY as_of_date DESC LIMIT 1`;
   s = db.prepare(sql);
   eloStmtCache.set(k, s);
   return s;
@@ -163,13 +166,12 @@ function readElo(entity: 'horse' | 'jockey' | 'trainer', id: string | null, asOf
   if (!id) return null;
   try {
     const row = eloStmt(entity, ENGINE).get(id, asOf) as { rating: number } | undefined;
-    if (row?.rating != null) return row.rating;
-    if (ENGINE === 'v12') {
-      const fb = eloStmt(entity, 'v11').get(id, asOf) as { rating: number } | undefined;
-      return fb?.rating ?? null;
+    return row?.rating ?? null;
+  } catch (e) {
+    if (!(globalThis as any).__readEloErrLogged) {
+      console.error('[readElo] failed for entity=' + entity + ':', (e as Error).message);
+      (globalThis as any).__readEloErrLogged = true;
     }
-    return null;
-  } catch {
     return null;
   }
 }
@@ -318,6 +320,24 @@ console.error(`[backtest] date range ${FROM}..${TO} → ${races.length} races`);
 console.error(`[backtest] engine=${ENGINE} weights=H${W_HORSE}/J${W_JOCKEY}/T${W_TRAINER}`);
 console.error(`[backtest] factors enabled: ${Array.from(FACTORS).join(',') || '(none — pure ELO)'}`);
 console.error(`[backtest] horse-elo-mode=${HORSE_ELO_MODE}`);
+
+// 2026-05-12 preflight: log snapshot row counts + a sample readElo call so any
+// future regression is visible at the top of the run instead of after 30min.
+try {
+  const ph = db.prepare("SELECT COUNT(*) AS n FROM horse_elo_snapshots WHERE axis_key='overall'").get() as {n:number};
+  const pj = db.prepare("SELECT COUNT(*) AS n FROM jockey_elo_snapshots").get() as {n:number};
+  const pt = db.prepare("SELECT COUNT(*) AS n FROM trainer_elo_snapshots").get() as {n:number};
+  console.error(`[preflight] snapshot rows: horse_overall=${ph.n} jockey=${pj.n} trainer=${pt.n}`);
+  const sample = db.prepare(`SELECT rr.horse_id, rr.jockey_id, rr.trainer_id, j.name_en AS jn, t.name_en AS tn, rm.date FROM race_results rr JOIN races r ON r.id=rr.race_id JOIN race_meetings rm ON rm.id=r.meeting_id LEFT JOIN jockeys j ON j.id=rr.jockey_id LEFT JOIN trainers t ON t.id=rr.trainer_id WHERE rm.date BETWEEN ? AND ? AND rr.finishing_position BETWEEN 1 AND 98 LIMIT 1`).get(FROM, TO) as any;
+  if (sample) {
+    const eH = readElo('horse', sample.horse_id, sample.date);
+    const eJ = readElo('jockey', sample.jn, sample.date);
+    const eT = readElo('trainer', sample.tn, sample.date);
+    console.error(`[preflight] sample h=${sample.horse_id} jn=${sample.jn} tn=${sample.tn} d=${sample.date} → eH=${eH} eJ=${eJ} eT=${eT}`);
+  }
+} catch (e) {
+  console.error('[preflight] failed:', (e as Error).message);
+}
 
 const qRunners = db.prepare(`
   SELECT rr.race_id, rr.horse_id, rr.jockey_id, rr.trainer_id,
