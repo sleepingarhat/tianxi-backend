@@ -23,7 +23,7 @@ on:
 jobs:
   compare:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 240
     permissions:
       contents: write
     steps:
@@ -80,7 +80,19 @@ jobs:
           sudo apt-get -qq install -y sqlite3 >/dev/null 2>&1 || true
           echo '=== axis_key inventory ==='
           sqlite3 bulk-local.db "SELECT axis_key, COUNT(*) AS rows, COUNT(DISTINCT horse_id) AS horses FROM horse_elo_snapshots GROUP BY axis_key ORDER BY rows DESC;"
-      - name: Save bulk-local.db cache
+      - name: Ensure backtest indexes (composite jockey/trainer axis indexes)
+          working-directory: tianxi-backend
+          run: |
+            sudo apt-get -qq install -y sqlite3 >/dev/null 2>&1 || true
+            sqlite3 bulk-local.db "
+              CREATE INDEX IF NOT EXISTS idx_jes_axis ON jockey_elo_snapshots(jockey_id, axis_key, as_of_date DESC);
+              CREATE INDEX IF NOT EXISTS idx_tes_axis ON trainer_elo_snapshots(trainer_id, axis_key, as_of_date DESC);
+              CREATE INDEX IF NOT EXISTS idx_rr_horse_date ON race_results(horse_id);
+              ANALYZE;
+            "
+            echo '=== indexes on *_elo_snapshots ==='
+            sqlite3 bulk-local.db "SELECT name, tbl_name FROM sqlite_master WHERE type='index' AND tbl_name LIKE '%_elo_snapshots' ORDER BY tbl_name, name;"
+        - name: Save bulk-local.db cache
         if: always() && steps.db-cache.outputs.cache-hit != 'true' && hashFiles('tianxi-backend/bulk-local.db') != ''
         uses: actions/cache/save@v4
         with:
