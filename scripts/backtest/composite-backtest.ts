@@ -146,8 +146,10 @@ const horseAxisStmt = db.prepare(
 );
 function readHorseAxisElo(horseId: string, asOf: string, bucket: string | null): { rating: number; axis: string } | null {
   if (!bucket) return null;
+  // 2026-05-12 fix: strip 'horse_' prefix to match horse_elo_snapshots.horse_id format
+  const lookupId = horseId.startsWith('horse_') ? horseId.slice(6) : horseId;
   try {
-    const row = horseAxisStmt.get(horseId, `turf_${bucket}`, `awt_${bucket}`, asOf) as { rating: number; axis_key: string } | undefined;
+    const row = horseAxisStmt.get(lookupId, `turf_${bucket}`, `awt_${bucket}`, asOf) as { rating: number; axis_key: string } | undefined;
     if (row?.rating != null) return { rating: row.rating, axis: row.axis_key };
   } catch { /* table missing axis rows */ }
   return null;
@@ -345,7 +347,11 @@ try {
     if (readElo('jockey', s.jn, s.date) != null) hJ++;
     if (readElo('trainer', s.tn, s.date) != null) hT++;
   }
-  console.error(`[preflight] hit-rate (n=${samples.length}): horse=${hH} jockey=${hJ} trainer=${hT}`);
+  let hHaxis=0;
+  for (const s of samples) {
+    if (readHorseAxisElo(s.horse_id, s.date, '1200_1400') != null) hHaxis++;
+  }
+  console.error(`[preflight] hit-rate (n=${samples.length}): horse=${hH} jockey=${hJ} trainer=${hT} horseAxis(b1200-1400)=${hHaxis}`);
   // Direct check: take a horse_id from race_results, count its snapshot rows
   if (horseIdsRR[0]) {
     const hid = horseIdsRR[0].horse_id;
