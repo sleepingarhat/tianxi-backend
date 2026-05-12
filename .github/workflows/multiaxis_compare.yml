@@ -92,7 +92,7 @@ jobs:
           "
           echo '=== indexes on *_elo_snapshots ==='
           sqlite3 bulk-local.db "SELECT name, tbl_name FROM sqlite_master WHERE type='index' AND tbl_name LIKE '%_elo_snapshots' ORDER BY tbl_name, name;"
-        - name: Save bulk-local.db cache
+      - name: Save bulk-local.db cache
         if: always() && steps.db-cache.outputs.cache-hit != 'true' && hashFiles('tianxi-backend/bulk-local.db') != ''
         uses: actions/cache/save@v4
         with:
