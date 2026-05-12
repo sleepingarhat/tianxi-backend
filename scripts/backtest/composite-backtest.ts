@@ -93,6 +93,8 @@ interface RunnerRow {
   horse_id: string;
   jockey_id: string | null;
   trainer_id: string | null;
+  jockey_name: string | null;
+  trainer_name: string | null;
   finishing_position: number;
   draw: number | null;
   actual_weight: number | null;
@@ -318,8 +320,8 @@ console.error(`[backtest] factors enabled: ${Array.from(FACTORS).join(',') || '(
 console.error(`[backtest] horse-elo-mode=${HORSE_ELO_MODE}`);
 
 const qRunners = db.prepare(`
-  SELECT race_id, horse_id, jockey_id, trainer_id, finishing_position,
-         draw, actual_weight, win_odds
+  SELECT race_id, horse_id, jockey_id, trainer_id, jockey_name, trainer_name,
+         finishing_position, draw, actual_weight, win_odds
     FROM race_results
    WHERE race_id = ?
      AND finishing_position BETWEEN 1 AND 98`);
@@ -357,15 +359,19 @@ for (const meta of races) {
 
   const scored: ScoredRunner[] = runners.map(r => {
     const eloH = readHorseEloByMode(r.horse_id, meta.date, meta.distance);
-    const eloJ = readElo('jockey', r.jockey_id, meta.date);
-    const eloT = readElo('trainer', r.trainer_id, meta.date);
-    const eloParts = [
-      eloH != null ? eloH * W_HORSE : null,
-      eloJ != null ? eloJ * W_JOCKEY : null,
-      eloT != null ? eloT * W_TRAINER : null,
-    ];
-    const eloComposite = eloParts.some(p => p == null) ? null :
-      (eloParts as number[]).reduce((a, b) => a + b, 0);
+    // 2026-05-12 fix: compute_v11 stores jockey/trainer snapshots keyed by NAME (not id);
+    // looking them up by id returned null → all races unscorable. Use *_name + rescale.
+    const eloJ = readElo('jockey', r.jockey_name, meta.date);
+    const eloT = readElo('trainer', r.trainer_name, meta.date);
+    let eloComposite: number | null = null;
+    if (eloH != null) {
+      let num = eloH * W_HORSE;
+      let den = W_HORSE;
+      if (eloJ != null) { num += eloJ * W_JOCKEY; den += W_JOCKEY; }
+      if (eloT != null) { num += eloT * W_TRAINER; den += W_TRAINER; }
+      eloComposite = num / den;
+    }
+    const eloParts = [eloH, eloJ, eloT];
     const { total: factorBonus } = computeFactorBonus(r, meta);
     const finalScore = eloComposite != null ? eloComposite + factorBonus : null;
     return {
