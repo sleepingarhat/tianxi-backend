@@ -1,4 +1,268 @@
-// (qELO dead block removed 2026-05-12 — was throwing SqliteError: no such table __TBL__)
+#!/usr/bin/env tsx
+/**
+ * Composite-score backtest harness (Priority 4 · 2026-05-01).
+ *
+ * Replays the `0.7/0.2/0.1 ELO + factor-bonus` ranking over historical
+ * race_results and measures how often the predicted rank matches the
+ * actual finishing order. Mirrors the scoring logic in
+ * `src/routes/analyze.ts` but runs against bulk-local.db directly so
+ * a single pass over a full season completes in <60s.
+ *
+ * Usage:
+ *   tsx scripts/backtest/composite-backtest.ts \
+ *       --db bulk-local.db \
+ *       --from 2025-09-01 --to 2026-04-15 \
+ *       --engine v12 \
+ *       --w-horse 0.7 --w-jockey 0.2 --w-trainer 0.1 \
+ *       --factors recency,distance,going,draw,weight,combo \
+ *       --out /tmp/backtest.json \
+ *       --ledger /tmp/backtest-ledger.csv
+ *
+ * Output JSON shape:
+ *   {
+ *     config: {...},
+ *     raceCount, runnerCount,
+ *     metrics: {
+ *       top1HitRate,          // predicted#1 == actual#1
+ *       top3HitRate,          // predicted#1 finished in actual top-3
+ *       podiumIOU,             // |intersect(pred top3, actual top3)| / 3
+ *       meanSpearman,         // rank correlation across runners
+ *       brierTop1,            // Brier score of pred#1 win prob
+ *       marketTop1HitRate,    // HKJC-favourite baseline (if odds available)
+ *       byMonth: [...],
+ *     }
+ *   }
+ *
+ * Does NOT edit any flagged files. Factor queries replicate the exact
+ * SQL already used in scripts/test-composite.ts.
+ */
+import Database from 'better-sqlite3';
+import { distanceBucket } from '../ingest/lib/parsers.js';
+import { writeFileSync } from 'node:fs';
+
+// ── CLI parsing ─────────────────────────────────────────────────────────
+function arg(name: string, fallback?: string): string {
+  const hit = process.argv.find(a => a.startsWith(`--${name}=`));
+  if (hit) return hit.slice(name.length + 3);
+  const ix = process.argv.indexOf(`--${name}`);
+  if (ix >= 0 && ix + 1 < process.argv.length) return process.argv[ix + 1];
+  return fallback ?? '';
+}
+function argNum(name: string, fallback: number): number {
+  const v = arg(name);
+  if (!v) return fallback;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
+function argBool(name: string): boolean {
+  return process.argv.includes(`--${name}`);
+}
+
+const DB_PATH = arg('db', 'bulk-local.db');
+const FROM = arg('from', '2025-09-01');
+const TO = arg('to', '2026-04-15');
+const ENGINE = (arg('engine', 'v12') === 'v11' ? 'v11' : 'v12') as 'v11' | 'v12';
+const W_HORSE = argNum('w-horse', 0.7);
+const W_JOCKEY = argNum('w-jockey', 0.2);
+const W_TRAINER = argNum('w-trainer', 0.1);
+const FACTORS_RAW = arg('factors', 'recency,distance,going,draw,weight,combo');
+const FACTORS = new Set(
+  FACTORS_RAW === 'none' || FACTORS_RAW === '' ? [] :
+  FACTORS_RAW.split(',').map(s => s.trim()).filter(Boolean)
+);
+// Multi-axis ELO mode (2026-05-12). Values:
+//   overall  → current behaviour (single-axis 'overall' rating per horse)
+//   axis     → use per-(surface, distance_bucket) rating; fall back to overall if cold-start
+//   hybrid   → 0.6 × axis + 0.4 × overall (smoothed cold-start)
+const HORSE_ELO_MODE = (arg('horse-elo-mode', 'overall') as 'overall' | 'axis' | 'hybrid');
+if (!['overall','axis','hybrid'].includes(HORSE_ELO_MODE)) throw new Error('--horse-elo-mode must be overall|axis|hybrid');
+const OUT = arg('out', '');
+const LEDGER = arg('ledger', '');
+const VERBOSE = argBool('verbose');
+
+// ── Types ───────────────────────────────────────────────────────────────
+interface RaceMeta {
+  id: string;
+  date: string;
+  venue: string;
+  distance: number;
+  going: string | null;
+}
+interface RunnerRow {
+  race_id: string;
+  horse_id: string;
+  jockey_id: string | null;
+  trainer_id: string | null;
+  finishing_position: number;
+  draw: number | null;
+  actual_weight: number | null;
+  win_odds: number | null;
+}
+interface ScoredRunner extends RunnerRow {
+  eloH: number | null;
+  eloJ: number | null;
+  eloT: number | null;
+  eloComposite: number | null;
+  factorBonus: number;
+  finalScore: number | null;
+  predictedRank: number;
+  pWin: number;
+}
+
+// ── DB wrapper + prepared-query cache ───────────────────────────────────
+const db = new Database(DB_PATH, { readonly: true });
+db.pragma('journal_mode = OFF');
+db.pragma('synchronous = OFF');
+
+// (qELO dead block removed 2026-05-12 — was throwing SqliteError: no such table __TBL__ at module load; readElo via eloStmtCache below is the live path)
+// Reusable per-entity prepared statements keyed by (entity, engine).
+const eloStmtCache = new Map<string, Database.Statement>();
+function eloStmt(entity: 'horse' | 'jockey' | 'trainer', engine: 'v11' | 'v12'): Database.Statement {
+  const k = `${entity}|${engine}`;
+  let s = eloStmtCache.get(k);
+  if (s) return s;
+  const table = `${entity}_elo_snapshots`;
+  const col = `${entity}_id`;
+  const sql = engine === 'v12'
+    ? `SELECT rating FROM ${table} WHERE ${col}=? AND axis_key='overall' AND as_of_date<? AND id LIKE 'v12:%' ORDER BY as_of_date DESC LIMIT 1`
+    : `SELECT rating FROM ${table} WHERE ${col}=? AND axis_key='overall' AND as_of_date<? AND id NOT LIKE 'v12:%' ORDER BY as_of_date DESC LIMIT 1`;
+  s = db.prepare(sql);
+  eloStmtCache.set(k, s);
+  return s;
+}
+// 2026-05-12: axis-keyed horse rating (multi-axis ELO from compute_v11).
+// Query takes BOTH possible surfaces for the bucket and returns the most-recent.
+const horseAxisStmt = db.prepare(
+  `SELECT rating, axis_key FROM horse_elo_snapshots
+     WHERE horse_id = ?
+       AND axis_key IN (?, ?)
+       AND as_of_date < ?
+     ORDER BY as_of_date DESC LIMIT 1`
+);
+function readHorseAxisElo(horseId: string, asOf: string, bucket: string | null): { rating: number; axis: string } | null {
+  if (!bucket) return null;
+  try {
+    const row = horseAxisStmt.get(horseId, `turf_${bucket}`, `awt_${bucket}`, asOf) as { rating: number; axis_key: string } | undefined;
+    if (row?.rating != null) return { rating: row.rating, axis: row.axis_key };
+  } catch { /* table missing axis rows */ }
+  return null;
+}
+function readHorseEloByMode(horseId: string | null, asOf: string, distance: number | null): number | null {
+  if (!horseId) return null;
+  const overall = readElo('horse', horseId, asOf);
+  if (HORSE_ELO_MODE === 'overall') return overall;
+  const axis = readHorseAxisElo(horseId, asOf, distanceBucket(distance));
+  if (HORSE_ELO_MODE === 'axis') return axis ? axis.rating : overall;
+  if (axis && overall != null) return 0.6 * axis.rating + 0.4 * overall;
+  return axis ? axis.rating : overall;
+}
+
+function readElo(entity: 'horse' | 'jockey' | 'trainer', id: string | null, asOf: string): number | null {
+  if (!id) return null;
+  try {
+    const row = eloStmt(entity, ENGINE).get(id, asOf) as { rating: number } | undefined;
+    if (row?.rating != null) return row.rating;
+    if (ENGINE === 'v12') {
+      const fb = eloStmt(entity, 'v11').get(id, asOf) as { rating: number } | undefined;
+      return fb?.rating ?? null;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// ── Factor helpers (mirror analyze.ts semantics) ────────────────────────
+const qDistFit = db.prepare(`
+  SELECT COUNT(*) AS starts,
+         SUM(CASE WHEN rr.finishing_position BETWEEN 1 AND 3 THEN 1 ELSE 0 END) AS top3
+    FROM race_results rr
+    JOIN races r ON r.id = rr.race_id
+    JOIN race_meetings rm ON rm.id = r.meeting_id
+   WHERE rr.horse_id = ?
+     AND rm.date < ?
+     AND r.distance BETWEEN ? AND ?
+     AND rr.finishing_position > 0 AND rr.finishing_position < 99`);
+const qGoingFit = db.prepare(`
+  SELECT COUNT(*) AS starts,
+         SUM(CASE WHEN rr.finishing_position BETWEEN 1 AND 3 THEN 1 ELSE 0 END) AS top3
+    FROM race_results rr
+    JOIN races r ON r.id = rr.race_id
+    JOIN race_meetings rm ON rm.id = r.meeting_id
+   WHERE rr.horse_id = ?
+     AND rm.date < ?
+     AND r.going = ?
+     AND rr.finishing_position > 0 AND rr.finishing_position < 99`);
+const qDrawBias = db.prepare(`
+  SELECT COUNT(*) AS starts,
+         SUM(CASE WHEN rr.finishing_position BETWEEN 1 AND 3 THEN 1 ELSE 0 END) AS top3
+    FROM race_results rr
+    JOIN races r ON r.id = rr.race_id
+    JOIN race_meetings rm ON rm.id = r.meeting_id
+   WHERE rm.venue = ?
+     AND rm.date < ?
+     AND r.distance BETWEEN ? AND ?
+     AND rr.draw = ?
+     AND rr.finishing_position > 0 AND rr.finishing_position < 99`);
+const qWeightDelta = db.prepare(`
+  SELECT AVG(rr.actual_weight) AS avg_w
+    FROM (
+      SELECT rr.actual_weight
+        FROM race_results rr
+        JOIN races r ON r.id = rr.race_id
+        JOIN race_meetings rm ON rm.id = r.meeting_id
+       WHERE rr.horse_id = ?
+         AND rm.date < ?
+         AND rr.actual_weight IS NOT NULL
+       ORDER BY rm.date DESC LIMIT 5
+    ) rr`);
+const qLastRaceDate = db.prepare(`
+  SELECT MAX(rm.date) AS last_date
+    FROM race_results rr
+    JOIN races r ON r.id = rr.race_id
+    JOIN race_meetings rm ON rm.id = r.meeting_id
+   WHERE rr.horse_id = ? AND rm.date < ?`);
+const qCombo = db.prepare(`
+  SELECT COUNT(*) AS starts,
+         SUM(CASE WHEN rr.finishing_position BETWEEN 1 AND 3 THEN 1 ELSE 0 END) AS top3
+    FROM race_results rr
+    JOIN races r ON r.id = rr.race_id
+    JOIN race_meetings rm ON rm.id = r.meeting_id
+   WHERE rr.jockey_id = ?
+     AND rr.trainer_id = ?
+     AND rm.date < ?
+     AND rr.finishing_position > 0 AND rr.finishing_position < 99`);
+
+function daysBetween(a: string, b: string): number {
+  const ma = Date.parse(a + 'T00:00:00Z');
+  const mb = Date.parse(b + 'T00:00:00Z');
+  return Math.round((mb - ma) / 86_400_000);
+}
+function recencyBonus(daysSinceLast: number | null): number {
+  if (daysSinceLast == null) return 0;
+  if (daysSinceLast < 7) return -10;
+  if (daysSinceLast <= 28) return 10;
+  if (daysSinceLast <= 60) return 0;
+  if (daysSinceLast <= 120) return -5;
+  return -15;
+}
+function rateBonus(starts: number, top3: number, scale = 15): number {
+  // Bayesian-ish shrink: prior 0.30 top3 rate with n=5 pseudo-starts.
+  if (!starts) return 0;
+  const rate = (top3 + 0.30 * 5) / (starts + 5);
+  return (rate - 0.30) * scale;
+}
+function weightBonus(curr: number | null, avg: number | null): number {
+  if (curr == null || avg == null) return 0;
+  const delta = curr - avg;
+  return -delta * 0.5; // every +1kg above avg → -0.5 score
+}
+
+function computeFactorBonus(
+  runner: RunnerRow,
+  meta: RaceMeta,
+): { total: number; parts: Record<string, number> } {
+  const parts: Record<string, number> = {};
   // Recency
   if (FACTORS.has('recency')) {
     const lr = qLastRaceDate.get(runner.horse_id, meta.date) as { last_date: string | null } | undefined;
