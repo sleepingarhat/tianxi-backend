@@ -256,3 +256,56 @@
   ### 結論
   R5 production code 正確同已 live。主要遺留風險：缺少 R5 lane 嘅 real walk-forward 驗證，加上 sample-size CI 重疊。建議 5/13 起跟蹤 forward 30 race-days，同時喺 backtester 加 R5 lane。
   
+
+  ---
+
+  ## 2026-05-12 — Multi-axis ELO 5-variant backtest
+
+  **TL;DR：** Multi-axis horse ELO（per surface × distance bucket）相比 R5 baseline overall ELO **冇 outperform**。**唔 productionize**，繼續用 R5 (overall ELO + draw + weight)。
+
+  ### Setup
+
+  - Workflow: `.github/workflows/multiaxis_compare.yml`
+  - Window: 2024-01-01..2026-04-30 (2034 races) + 1-month diag (2024-06)
+  - 5 variants:
+
+  | variant | 公式 |
+  |---|---|
+  | A overall + 8factor | 現行 R5 baseline |
+  | B overall pure | 純 ELO (overall) |
+  | C axis + 8factor | per-bucket ELO + factors |
+  | D axis pure | per-bucket ELO 純分 |
+  | E hybrid + 8factor | 0.6·axis + 0.4·overall + factors |
+
+  ### Backtest harness 修復鏈（4 commits）
+
+  1. **`composite-backtest.ts` jockey/trainer 用 ID 查 ELO** → 應該用 `name_en`（compute_v11 寫嘅 key）。改 LEFT JOIN `jockeys`/`trainers` 攞 `name_en`
+  2. **`axis_key='overall'` 寫死喺所有 entity** → jockey/trainer 表冇 axis_key column → `db.prepare()` throw → silent catch → eloJ/eloT 永遠 null。改成 horse-only filter
+  3. **`id LIKE 'v12:%'` filter 假設錯誤** → compute_v11 寫嘅 id 冇 v12: prefix → 0 hit。完全移除 v12/v11 prefix dance（compute_v11 wipe-and-rewrite all snapshots，冇 engine isolation 需要）
+  4. **`race_results.horse_id = "horse_A001"` 但 `horse_elo_snapshots.horse_id = "A001"`** → compute_v11 strip prefix。喺 `readElo` + `readHorseAxisElo` 兩處 normalize lookup ID
+
+  ### 1-month diag 結果（n=70 races, 2024-06）
+
+  | variant | top1 hit | top3 hit | spearman |
+  |---|---:|---:|---:|
+  | A overall + 8factor | **14.3%** | **51.4%** | **0.259** |
+  | B overall pure | 8.6% | 44.3% | 0.235 |
+  | C axis + 8factor | 12.9% | 45.7% | 0.238 |
+  | D axis pure | 10.0% | 42.9% | 0.222 |
+  | E hybrid + 8factor | 12.9% | 45.7% | 0.257 |
+
+  ### 結論
+
+  - ✅ **8-factor 一定贏 pure**（A>B, C>D, E≈C）— factors 有 signal
+  - ❌ **Multi-axis 反而輸 overall**（A 14.3% vs C/E 12.9%）— per-bucket 樣本太散，未收斂
+  - ❌ **Hybrid 唔贏 axis** — 雙倍冷啟動 penalty 但無收益
+  - 📊 **Sample size 細**（n=70 noise band ±5pp），但已 hint multi-axis 唔係 promising direction
+
+  **Decision: REJECT multi-axis productionization.** R5 (overall ELO + draw + weight) 維持為生產公式。
+
+  ### 留低嘅資產
+
+  - `scripts/backtest/composite-backtest.ts` 修咗 4 個 join-key/schema bug，加咗 startup preflight diagnostic（snapshot row counts + sample readElo hit-rate）
+  - `scripts/elo/compute_v11.ts` 仍寫 multi-axis snapshots（5 axis_key），生產 `readElo()` 只查 `axis_key='overall'`。schema 預留供將來重 test
+  - `reports/multiaxis-compare.md` 1-month diag 結果留底
+  
