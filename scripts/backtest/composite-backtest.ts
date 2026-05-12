@@ -320,11 +320,14 @@ console.error(`[backtest] factors enabled: ${Array.from(FACTORS).join(',') || '(
 console.error(`[backtest] horse-elo-mode=${HORSE_ELO_MODE}`);
 
 const qRunners = db.prepare(`
-  SELECT race_id, horse_id, jockey_id, trainer_id, jockey_name, trainer_name,
-         finishing_position, draw, actual_weight, win_odds
-    FROM race_results
-   WHERE race_id = ?
-     AND finishing_position BETWEEN 1 AND 98`);
+  SELECT rr.race_id, rr.horse_id, rr.jockey_id, rr.trainer_id,
+         j.name_en AS jockey_name, t.name_en AS trainer_name,
+         rr.finishing_position, rr.draw, rr.actual_weight, rr.win_odds
+    FROM race_results rr
+    LEFT JOIN jockeys j ON j.id = rr.jockey_id
+    LEFT JOIN trainers t ON t.id = rr.trainer_id
+   WHERE rr.race_id = ?
+     AND rr.finishing_position BETWEEN 1 AND 98`);
 
 type RaceLedgerRow = {
   date: string; venue: string; raceId: string; distance: number; going: string | null;
