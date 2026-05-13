@@ -102,93 +102,99 @@ meetingsRoutes.get('/next', async (c) => {
 
 // GET /api/meetings/:date — 指定日期賽事詳情（含所有場次）
 meetingsRoutes.get('/:date', async (c) => {
-  const date = c.req.param('date');
+    const date = c.req.param('date');
 
-  const meeting = await c.env.DB.prepare(
-    'SELECT * FROM race_meetings WHERE date = ?'
-  ).bind(date).first<RaceMeetingRow>();
+    // Fix (2026-05-13): race_meetings has duplicate rows per date (legacy
+    // ingestion bug). Naive .first() picks an arbitrary row whose id may not
+    // match the new races. Pick the row with the highest race_count to
+    // self-heal against duplicates.
+    const { results: bestMeeting } = await c.env.DB.prepare(
+      `SELECT rm.*, COUNT(r.id) AS _race_count
+         FROM race_meetings rm
+         LEFT JOIN races r ON r.meeting_id = rm.id
+        WHERE rm.date = ?
+        GROUP BY rm.id
+        ORDER BY _race_count DESC, rm.id DESC
+        LIMIT 1`
+    ).bind(date).all<RaceMeetingRow & { _race_count: number }>();
+    const meeting = bestMeeting?.[0];
 
-  if (!meeting) {
-    return c.json({ error: '找不到該日期的賽事' }, 404);
-  }
+    if (!meeting) {
+      return c.json({ error: '找不到該日期的賽事' }, 404);
+    }
 
-  // Fix (2026-05-13): query races by date join, not meeting.id, because
-    // race_meetings can have duplicate rows per date (legacy ingestion left
-    // stale rows whose id no longer matches new races.meeting_id), causing
-    // /api/meetings/:date to return only the subset of races linked to the
-    // first race_meetings row picked by .first().
     const { results: races } = await c.env.DB.prepare(
-      'SELECT r.* FROM races r JOIN race_meetings rm ON r.meeting_id = rm.id WHERE rm.date = ? ORDER BY r.race_number'
-    ).bind(date).all();
+      'SELECT * FROM races WHERE meeting_id = ? ORDER BY race_number'
+    ).bind(meeting.id).all();
 
-  // 每場賽事附帶出賽馬匹
-  const racesWithHorses = await Promise.all(
-    (races ?? []).map(async (race: any) => {
-      const { results: entries } = await c.env.DB.prepare(`
-        SELECT
-          rr.*,
-          h.name_en, h.name_ch, h.code, h.sire, h.dam, h.dam_sire,
-          h.current_rating, h.age, h.sex,
-          j.name_en AS jockey_en, j.name_ch AS jockey_ch,
-          t.name_en AS trainer_en, t.name_ch AS trainer_ch
-        FROM race_results rr
-        JOIN horses h ON h.id = rr.horse_id
-        LEFT JOIN jockeys j ON j.id = rr.jockey_id
-        LEFT JOIN trainers t ON t.id = rr.trainer_id
-        WHERE rr.race_id = ?
-        ORDER BY rr.finishing_position ASC
-      `).bind(race.id).all();
+    // 每場賽事附帶出賽馬匹
+    const racesWithHorses = await Promise.all(
+      (races ?? []).map(async (race: any) => {
+        const { results: entries } = await c.env.DB.prepare(`
+          SELECT
+            rr.*,
+            h.name_en, h.name_ch, h.code, h.sire, h.dam, h.dam_sire,
+            h.current_rating, h.age, h.sex,
+            j.name_en AS jockey_en, j.name_ch AS jockey_ch,
+            t.name_en AS trainer_en, t.name_ch AS trainer_ch
+          FROM race_results rr
+          JOIN horses h ON h.id = rr.horse_id
+          LEFT JOIN jockeys j ON j.id = rr.jockey_id
+          LEFT JOIN trainers t ON t.id = rr.trainer_id
+          WHERE rr.race_id = ?
+          ORDER BY rr.finishing_position ASC
+        `).bind(race.id).all();
 
-      return {
-        id: race.id,
-        raceNumber: race.race_number,
-        title: race.title,
-        class: race.class,
-        distance: race.distance,
-        going: race.going,
-        track: race.track,
-        course: race.course,
-        prize: race.prize,
-        startTime: race.start_time,
-        videoUrl: race.video_url,
-        horses: (entries ?? []).map((e: any) => ({
-          id: e.horse_id,
-          horseNumber: e.horse_number,
-          name: e.name_en,
-          nameCh: e.name_ch,
-          code: e.code,
-          draw: e.draw,
-          jockey: e.jockey_en,
-          jockeyCh: e.jockey_ch,
-          trainer: e.trainer_en,
-          trainerCh: e.trainer_ch,
-          finishingPosition: e.finishing_position,
-          finishTime: e.finish_time,
-          winOdds: e.win_odds,
-          runningPosition: e.running_position,
-          lbw: e.lbw,
-          gear: e.gear,
-          weight: e.actual_weight,
-          rating: e.current_rating,
-          sire: e.sire,
-          dam: e.dam,
-          damSire: e.dam_sire,
-        })),
-      };
-    })
-  );
+        return {
+          id: race.id,
+          raceNumber: race.race_number,
+          title: race.title,
+          class: race.class,
+          distance: race.distance,
+          going: race.going,
+          track: race.track,
+          course: race.course,
+          prize: race.prize,
+          startTime: race.start_time,
+          videoUrl: race.video_url,
+          horses: (entries ?? []).map((e: any) => ({
+            id: e.horse_id,
+            horseNumber: e.horse_number,
+            name: e.name_en,
+            nameCh: e.name_ch,
+            code: e.code,
+            draw: e.draw,
+            jockey: e.jockey_en,
+            jockeyCh: e.jockey_ch,
+            trainer: e.trainer_en,
+            trainerCh: e.trainer_ch,
+            finishingPosition: e.finishing_position,
+            finishTime: e.finish_time,
+            winOdds: e.win_odds,
+            runningPosition: e.running_position,
+            lbw: e.lbw,
+            gear: e.gear,
+            weight: e.actual_weight,
+            rating: e.current_rating,
+            sire: e.sire,
+            dam: e.dam,
+            damSire: e.dam_sire,
+          })),
+        };
+      })
+    );
 
-  return c.json({
-    id: meeting.id,
-    date: meeting.date,
-    venue: meeting.venue,
-    venueName: meeting.venue === 'ST' ? '沙田' : meeting.venue === 'HV' ? '跑馬地' : meeting.venue,
-    trackCondition: meeting.track_condition,
-    weather: meeting.weather,
-    totalRaces: meeting.total_races,
-    races: racesWithHorses,
+    return c.json({
+      id: meeting.id,
+      date: meeting.date,
+      venue: meeting.venue,
+      venueName: meeting.venue === 'ST' ? '沙田' : meeting.venue === 'HV' ? '跑馬地' : meeting.venue,
+      trackCondition: meeting.track_condition,
+      weather: meeting.weather,
+      totalRaces: racesWithHorses.length || meeting.total_races,
+      races: racesWithHorses,
+    });
   });
-});
 
 // GET /api/meetings/next — 下一個賽馬日
 meetingsRoutes.get('/next/upcoming', async (c) => {
