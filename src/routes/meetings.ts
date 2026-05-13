@@ -83,7 +83,7 @@ meetingsRoutes.get('/next', async (c) => {
     venueName: meeting.venue === 'ST' ? '沙田' : meeting.venue === 'HV' ? '跑馬地' : meeting.venue,
     trackCondition: meeting.track_condition,
     weather: meeting.weather,
-    totalRaces: meeting.total_races,
+    totalRaces: racesWithHorses.length || meeting.total_races,
     fallback,
     races: (races ?? []).map((r) => ({
       id: r.id,
@@ -112,9 +112,14 @@ meetingsRoutes.get('/:date', async (c) => {
     return c.json({ error: '找不到該日期的賽事' }, 404);
   }
 
-  const { results: races } = await c.env.DB.prepare(
-    'SELECT * FROM races WHERE meeting_id = ? ORDER BY race_number'
-  ).bind(meeting.id).all();
+  // Fix (2026-05-13): query races by date join, not meeting.id, because
+    // race_meetings can have duplicate rows per date (legacy ingestion left
+    // stale rows whose id no longer matches new races.meeting_id), causing
+    // /api/meetings/:date to return only the subset of races linked to the
+    // first race_meetings row picked by .first().
+    const { results: races } = await c.env.DB.prepare(
+      'SELECT r.* FROM races r JOIN race_meetings rm ON r.meeting_id = rm.id WHERE rm.date = ? ORDER BY r.race_number'
+    ).bind(date).all();
 
   // 每場賽事附帶出賽馬匹
   const racesWithHorses = await Promise.all(
