@@ -637,17 +637,19 @@ adminRoutes.get('/api/seed-missing-jockey-elo', async (c) => {
       if (raceList.length === 0) return c.json({ ok: true, since, racesProcessed: 0, writtenSnapshots: 0 });
 
       const raceIds = raceList.map((r) => r.race_id);
-      const inList = raceIds.map(() => '?').join(',');
-      const { results: entries } = await db.prepare(`
-        SELECT race_id, horse_id, jockey_id, trainer_id, finishing_position
-          FROM race_results
-         WHERE race_id IN (${inList}) AND finishing_position IS NOT NULL
-      `).bind(...raceIds).all<{
-        race_id: string; horse_id: string;
-        jockey_id: string|null; trainer_id: string|null;
-        finishing_position: number;
-      }>();
-      const entryList = entries ?? [];
+      // D1 has ~100 bound-param limit per statement; chunk the IN list.
+      type EntryRow = { race_id: string; horse_id: string; jockey_id: string|null; trainer_id: string|null; finishing_position: number };
+      const entryList: EntryRow[] = [];
+      for (let i = 0; i < raceIds.length; i += 80) {
+        const chunk = raceIds.slice(i, i + 80);
+        const ph = chunk.map(() => '?').join(',');
+        const { results } = await db.prepare(`
+          SELECT race_id, horse_id, jockey_id, trainer_id, finishing_position
+            FROM race_results
+           WHERE race_id IN (${ph}) AND finishing_position IS NOT NULL
+        `).bind(...chunk).all<EntryRow>();
+        for (const r of (results ?? [])) entryList.push(r);
+      }
 
       const horseIds = [...new Set(entryList.map((e) => e.horse_id))];
       const jockeyIds = [...new Set(entryList.map((e) => e.jockey_id).filter(Boolean))] as string[];
