@@ -255,7 +255,7 @@ export const analyzeRoutes = new Hono<{ Bindings: Env }>();
   export async function runBacktestForDate(db: D1Database, date: string, engine: string = 'v12'): Promise<{ races: number; horses: number; baselineRows: number; qimenRows: number; joined: number; skipped?: string }> {
     await ensurePredictionLogTable(db);
     // 1. Load races + meeting
-    const meeting = await db.prepare(`SELECT * FROM race_meetings WHERE date = ? LIMIT 1`).bind(date).first<any>().catch(() => null);
+    const meeting = await db.prepare(`SELECT m.* FROM race_meetings m WHERE m.date = ? ORDER BY (SELECT COUNT(*) FROM races r WHERE r.meeting_id = m.id) DESC, m.id LIMIT 1`).bind(date).first<any>().catch(() => null);
     if (!meeting) return { races: 0, horses: 0, baselineRows: 0, qimenRows: 0, joined: 0, skipped: 'no meeting' };
     const { results: races } = await db.prepare(`SELECT id, race_number, distance, going, track FROM races WHERE meeting_id = ? AND race_number > 0 ORDER BY race_number`).bind(meeting.id).all<any>();
     if (!races?.length) return { races: 0, horses: 0, baselineRows: 0, qimenRows: 0, joined: 0, skipped: 'no races' };
@@ -551,7 +551,7 @@ export async function computeHitRateStats(db: any, date: string, engine: EloEngi
   | { error: string; status: number }
   | { meeting: any; races: any[]; summary: any }
 > {
-  const meeting = await db.prepare(`SELECT * FROM race_meetings WHERE date = ? LIMIT 1`).bind(date).first<any>().catch(() => null);
+  const meeting = await db.prepare(`SELECT m.* FROM race_meetings m WHERE m.date = ? ORDER BY (SELECT COUNT(*) FROM races r WHERE r.meeting_id = m.id) DESC, m.id LIMIT 1`).bind(date).first<any>().catch(() => null);
   if (!meeting) return { error: `${date} 賽馬日記錄不存在`, status: 404 };
   const { results: entries } = await db.prepare(
     `SELECT r.race_number, rr.horse_number, rr.horse_id, rr.draw, rr.actual_weight,
@@ -1923,7 +1923,7 @@ analyzeRoutes.get('/factors', (c) => {
         }
         const t0 = Date.now();
 
-        const meeting = await db.prepare(`SELECT * FROM race_meetings WHERE date = ? LIMIT 1`).bind(targetDate).first<any>().catch(() => null);
+        const meeting = await db.prepare(`SELECT m.* FROM race_meetings m WHERE m.date = ? ORDER BY (SELECT COUNT(*) FROM races r WHERE r.meeting_id = m.id) DESC, m.id LIMIT 1`).bind(targetDate).first<any>().catch(() => null);
         if (!meeting) return { error: `${targetDate} 賽馬日記錄不存在`, status: 404 };
         const loadEntries = async (withVenue: boolean) => {
           const q = withVenue
@@ -2569,7 +2569,7 @@ analyzeRoutes.get('/factors', (c) => {
             if (!latest?.date) return c.json({ error: 'no race day with results found' }, 404);
             date = latest.date;
           }
-          const meeting = await db.prepare(`SELECT * FROM race_meetings WHERE date = ? LIMIT 1`).bind(date).first<any>();
+          const meeting = await db.prepare(`SELECT m.* FROM race_meetings m WHERE m.date = ? ORDER BY (SELECT COUNT(*) FROM races r WHERE r.meeting_id = m.id) DESC, m.id LIMIT 1`).bind(date).first<any>();
           if (!meeting) return c.json({ error: 'no meeting on date', date }, 404);
           const { results: races } = await db.prepare(`SELECT id, race_number, distance, going FROM races WHERE meeting_id = ? AND race_number > 0 ORDER BY race_number`).bind(meeting.id).all<any>();
           if (!races?.length) return c.json({ error: 'no races', date }, 404);
@@ -2663,7 +2663,7 @@ analyzeRoutes.get('/factors', (c) => {
           const perDay: any[] = [];
           // Compare: pure qimen vs ELO baseline (using prediction_log baseline-bt rows if available)
           for (const date of allDates) {
-            const meeting = await db.prepare(`SELECT * FROM race_meetings WHERE date = ? LIMIT 1`).bind(date).first<any>();
+            const meeting = await db.prepare(`SELECT m.* FROM race_meetings m WHERE m.date = ? ORDER BY (SELECT COUNT(*) FROM races r WHERE r.meeting_id = m.id) DESC, m.id LIMIT 1`).bind(date).first<any>();
             if (!meeting) continue;
             const { results: races } = await db.prepare(`SELECT id, race_number FROM races WHERE meeting_id = ? AND race_number > 0`).bind(meeting.id).all<any>();
             if (!races?.length) continue;
@@ -2792,7 +2792,7 @@ analyzeRoutes.get('/factors', (c) => {
           const date = c.req.query('date');
           if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return c.json({ error: '請提供 YYYY-MM-DD 格式日期' }, 400);
           const engine: EloEngine = c.req.query('engine') === 'v11' ? 'v11' : 'v12';
-          const meeting = await db.prepare(`SELECT * FROM race_meetings WHERE date = ? LIMIT 1`).bind(date).first<any>().catch(() => null);
+          const meeting = await db.prepare(`SELECT m.* FROM race_meetings m WHERE m.date = ? ORDER BY (SELECT COUNT(*) FROM races r WHERE r.meeting_id = m.id) DESC, m.id LIMIT 1`).bind(date).first<any>().catch(() => null);
           if (!meeting) return c.json({ error: `${date} 賽馬日記錄不存在` }, 404);
           // Try entries_upcoming first (works for upcoming dates)
           const { results: euRows } = await db.prepare(
@@ -2989,7 +2989,7 @@ analyzeRoutes.get('/factors', (c) => {
             if (!latest?.date) return c.json({ error: 'no race day with results' }, 404);
             date = latest.date;
           }
-          const meeting = await db.prepare(`SELECT * FROM race_meetings WHERE date = ? LIMIT 1`).bind(date).first<any>();
+          const meeting = await db.prepare(`SELECT m.* FROM race_meetings m WHERE m.date = ? ORDER BY (SELECT COUNT(*) FROM races r WHERE r.meeting_id = m.id) DESC, m.id LIMIT 1`).bind(date).first<any>();
           if (!meeting) return c.json({ error: 'no meeting on date', date }, 404);
           const { results: races } = await db.prepare(`SELECT id, race_number, distance, going FROM races WHERE meeting_id = ? AND race_number > 0 ORDER BY race_number`).bind(meeting.id).all<any>();
           if (!races?.length) return c.json({ error: 'no races', date }, 404);
@@ -3080,7 +3080,7 @@ analyzeRoutes.get('/factors', (c) => {
           const perDay: any[] = [];
 
           for (const date of allDates) {
-            const meeting = await db.prepare(`SELECT * FROM race_meetings WHERE date = ? LIMIT 1`).bind(date).first<any>();
+            const meeting = await db.prepare(`SELECT m.* FROM race_meetings m WHERE m.date = ? ORDER BY (SELECT COUNT(*) FROM races r WHERE r.meeting_id = m.id) DESC, m.id LIMIT 1`).bind(date).first<any>();
             if (!meeting) continue;
             const { results: races } = await db.prepare(`SELECT id, race_number FROM races WHERE meeting_id = ? AND race_number > 0`).bind(meeting.id).all<any>();
             if (!races?.length) continue;
@@ -3173,7 +3173,7 @@ analyzeRoutes.get('/factors', (c) => {
             const perDay: any[] = [];
 
             for (const date of allDates) {
-              const meeting = await db.prepare(`SELECT * FROM race_meetings WHERE date = ? LIMIT 1`).bind(date).first<any>();
+              const meeting = await db.prepare(`SELECT m.* FROM race_meetings m WHERE m.date = ? ORDER BY (SELECT COUNT(*) FROM races r WHERE r.meeting_id = m.id) DESC, m.id LIMIT 1`).bind(date).first<any>();
               if (!meeting) continue;
               const { results: races } = await db.prepare(`SELECT id, race_number FROM races WHERE meeting_id = ? AND race_number > 0`).bind(meeting.id).all<any>();
               if (!races?.length) continue;
