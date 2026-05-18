@@ -584,7 +584,193 @@ adminRoutes.get('/api/seed-missing-jockey-elo', async (c) => {
     trainers: { total: tTotal, withoutSnapshot: tMissing },
   });
 });
-// ── /api/sql-read — read-only SELECT for diagnostics ────────────────────
+// ── /api/elo-backfill-from-results — bypass broken v12 pipeline ─────────
+  // Computes ELO snapshots directly from D1's race_results table using the
+  // proven v1 pairwise multi-runner engine (engine.ts in tianxi-database).
+  // Useful when the workflow's bulk-local.db ingest is broken (e.g. capy
+  // scrape didn't produce form CSVs since 5/9, so v12 had nothing to compute).
+  //
+  // POST  /admin/api/elo-backfill-from-results?since=YYYY-MM-DD&k=40
+  // Reads each race since 'since', for each horse/jockey/trainer:
+  //   1. Look up their latest known rating (or 1500 default)
+  //   2. Apply pairwise multi-runner deltas (K/(N-1) * (actual - expected))
+  //   3. INSERT OR REPLACE a new snapshot with as_of_date = race_date
+  function expectedScore(rA: number, rB: number): number {
+    return 1 / (1 + Math.pow(10, (rB - rA) / 400));
+  }
+  function computeRaceDeltas(
+    runners: Array<{ id: string; finish: number; rating: number }>,
+    k: number,
+  ): Map<string, number> {
+    const deltas = new Map<string, number>();
+    const valid = runners.filter((r) => r.finish !== 999 && r.finish > 0);
+    for (const r of runners) deltas.set(r.id, 0);
+    if (valid.length < 2) return deltas;
+    const scale = k / (valid.length - 1);
+    for (let i = 0; i < valid.length; i++) {
+      for (let j = i + 1; j < valid.length; j++) {
+        const a = valid[i], b = valid[j];
+        let sA: number, sB: number;
+        if (a.finish < b.finish) { sA = 1; sB = 0; }
+        else if (a.finish > b.finish) { sA = 0; sB = 1; }
+        else { sA = 0.5; sB = 0.5; }
+        const eA = expectedScore(a.rating, b.rating);
+        deltas.set(a.id, (deltas.get(a.id) ?? 0) + scale * (sA - eA));
+        deltas.set(b.id, (deltas.get(b.id) ?? 0) + scale * (sB - (1 - eA)));
+      }
+    }
+    return deltas;
+  }
+
+  adminRoutes.post('/api/elo-backfill-from-results', async (c) => {
+    const since = c.req.query('since') || new Date(Date.now() - 30*86400_000).toISOString().slice(0,10);
+    const k = parseFloat(c.req.query('k') || '40');
+    const db = c.env.DB;
+    try {
+      // Load races ordered chronologically. Group race_results by race.
+      const { results: races } = await db.prepare(`
+        SELECT r.id AS race_id, rm.date AS race_date
+          FROM races r JOIN race_meetings rm ON rm.id = r.meeting_id
+         WHERE rm.date >= ?
+         ORDER BY rm.date ASC, r.race_number ASC
+      `).bind(since).all<{ race_id: string; race_date: string }>();
+      const raceList = races ?? [];
+
+      // In-memory rating cache (seeded from latest D1 snapshot per entity)
+      const horseR = new Map<string, number>();
+      const jockeyR = new Map<string, number>();
+      const trainerR = new Map<string, number>();
+      const horseGames = new Map<string, number>();
+      const jockeyGames = new Map<string, number>();
+      const trainerGames = new Map<string, number>();
+
+      async function getRating(
+        table: string, idCol: string, id: string,
+        cache: Map<string, number>, gamesCache: Map<string, number>,
+        asOfDate: string,
+      ): Promise<number> {
+        if (cache.has(id)) return cache.get(id)!;
+        const row = await db.prepare(
+          `SELECT rating, games_played FROM ${table}
+            WHERE ${idCol} = ? AND as_of_date < ?
+            ORDER BY as_of_date DESC LIMIT 1`
+        ).bind(id, asOfDate).first<{ rating: number; games_played: number }>();
+        const r = row?.rating ?? 1500;
+        cache.set(id, r);
+        gamesCache.set(id, row?.games_played ?? 0);
+        return r;
+      }
+
+      let processedRaces = 0;
+      let writtenSnaps = 0;
+      const sampleErrors: string[] = [];
+
+      for (const race of raceList) {
+        const { results: entries } = await db.prepare(`
+          SELECT horse_id, jockey_id, trainer_id, finishing_position
+            FROM race_results
+           WHERE race_id = ? AND finishing_position IS NOT NULL
+        `).bind(race.race_id).all<{
+          horse_id: string; jockey_id: string|null; trainer_id: string|null; finishing_position: number;
+        }>();
+        const rows = entries ?? [];
+        if (rows.length < 2) continue;
+
+        // Horse layer
+        const horseRunners = await Promise.all(rows.map(async (r) => ({
+          id: r.horse_id, finish: r.finishing_position,
+          rating: await getRating('horse_elo_snapshots', 'horse_id', r.horse_id, horseR, horseGames, race.race_date),
+        })));
+        const hDeltas = computeRaceDeltas(horseRunners, k);
+        for (const [id, d] of hDeltas) {
+          const newR = (horseR.get(id) ?? 1500) + d;
+          horseR.set(id, newR);
+          horseGames.set(id, (horseGames.get(id) ?? 0) + 1);
+          try {
+            await db.prepare(`
+              INSERT OR REPLACE INTO horse_elo_snapshots
+                (id, horse_id, axis_key, surface, distance_bucket, as_of_race_id, as_of_date, rating, games_played, computed_at)
+              VALUES (?, ?, 'overall', NULL, NULL, ?, ?, ?, ?, datetime('now'))
+            `).bind(
+              `${id}|overall|${race.race_id}`, id, race.race_id, race.race_date, newR, horseGames.get(id),
+            ).run();
+            writtenSnaps++;
+          } catch (e: any) {
+            if (sampleErrors.length < 3) sampleErrors.push(`horse ${id}: ${e?.message}`);
+          }
+        }
+
+        // Jockey layer
+        const jWithName = rows.filter((r) => r.jockey_id);
+        if (jWithName.length >= 2) {
+          const jR = await Promise.all(jWithName.map(async (r) => ({
+            id: r.jockey_id!, finish: r.finishing_position,
+            rating: await getRating('jockey_elo_snapshots', 'jockey_id', r.jockey_id!, jockeyR, jockeyGames, race.race_date),
+          })));
+          const jD = computeRaceDeltas(jR, k);
+          for (const [id, d] of jD) {
+            const newR = (jockeyR.get(id) ?? 1500) + d;
+            jockeyR.set(id, newR);
+            jockeyGames.set(id, (jockeyGames.get(id) ?? 0) + 1);
+            try {
+              await db.prepare(`
+                INSERT OR REPLACE INTO jockey_elo_snapshots
+                  (id, jockey_id, as_of_race_id, as_of_date, rating, games_played, computed_at)
+                VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+              `).bind(`${id}|${race.race_id}`, id, race.race_id, race.race_date, newR, jockeyGames.get(id)).run();
+              writtenSnaps++;
+            } catch (e: any) {
+              if (sampleErrors.length < 3) sampleErrors.push(`jockey ${id}: ${e?.message}`);
+            }
+          }
+        }
+
+        // Trainer layer
+        const tWithName = rows.filter((r) => r.trainer_id);
+        if (tWithName.length >= 2) {
+          const tR = await Promise.all(tWithName.map(async (r) => ({
+            id: r.trainer_id!, finish: r.finishing_position,
+            rating: await getRating('trainer_elo_snapshots', 'trainer_id', r.trainer_id!, trainerR, trainerGames, race.race_date),
+          })));
+          const tD = computeRaceDeltas(tR, k);
+          for (const [id, d] of tD) {
+            const newR = (trainerR.get(id) ?? 1500) + d;
+            trainerR.set(id, newR);
+            trainerGames.set(id, (trainerGames.get(id) ?? 0) + 1);
+            try {
+              await db.prepare(`
+                INSERT OR REPLACE INTO trainer_elo_snapshots
+                  (id, trainer_id, as_of_race_id, as_of_date, rating, games_played, computed_at)
+                VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+              `).bind(`${id}|${race.race_id}`, id, race.race_id, race.race_date, newR, trainerGames.get(id)).run();
+              writtenSnaps++;
+            } catch (e: any) {
+              if (sampleErrors.length < 3) sampleErrors.push(`trainer ${id}: ${e?.message}`);
+            }
+          }
+        }
+
+        processedRaces++;
+      }
+
+      return c.json({
+        ok: true,
+        since,
+        k,
+        racesScanned: raceList.length,
+        racesProcessed: processedRaces,
+        writtenSnapshots: writtenSnaps,
+        uniqueHorses: horseR.size,
+        uniqueJockeys: jockeyR.size,
+        uniqueTrainers: trainerR.size,
+        sampleErrors,
+      });
+    } catch (err: any) {
+      return c.json({ error: 'backfill_failed', message: String(err?.message ?? err) }, 500);
+    }
+  });
+
+  // ── /api/sql-read — read-only SELECT for diagnostics ────────────────────
   // Body: { sql: 'SELECT ...' }  (single SELECT, no semicolons in middle)
   // Returns: { rows: [...], rowCount }
   adminRoutes.post('/api/sql-read', async (c) => {
