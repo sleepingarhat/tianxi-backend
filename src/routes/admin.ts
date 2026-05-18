@@ -627,148 +627,170 @@ adminRoutes.get('/api/seed-missing-jockey-elo', async (c) => {
     const k = parseFloat(c.req.query('k') || '40');
     const db = c.env.DB;
     try {
-      // Load races ordered chronologically. Group race_results by race.
       const { results: races } = await db.prepare(`
-        SELECT r.id AS race_id, rm.date AS race_date
+        SELECT r.id AS race_id, rm.date AS race_date, r.race_number
           FROM races r JOIN race_meetings rm ON rm.id = r.meeting_id
          WHERE rm.date >= ?
          ORDER BY rm.date ASC, r.race_number ASC
-      `).bind(since).all<{ race_id: string; race_date: string }>();
+      `).bind(since).all<{ race_id: string; race_date: string; race_number: number }>();
       const raceList = races ?? [];
+      if (raceList.length === 0) return c.json({ ok: true, since, racesProcessed: 0, writtenSnapshots: 0 });
 
-      // In-memory rating cache (seeded from latest D1 snapshot per entity)
-      const horseR = new Map<string, number>();
-      const jockeyR = new Map<string, number>();
-      const trainerR = new Map<string, number>();
-      const horseGames = new Map<string, number>();
-      const jockeyGames = new Map<string, number>();
-      const trainerGames = new Map<string, number>();
+      const raceIds = raceList.map((r) => r.race_id);
+      const inList = raceIds.map(() => '?').join(',');
+      const { results: entries } = await db.prepare(`
+        SELECT race_id, horse_id, jockey_id, trainer_id, finishing_position
+          FROM race_results
+         WHERE race_id IN (${inList}) AND finishing_position IS NOT NULL
+      `).bind(...raceIds).all<{
+        race_id: string; horse_id: string;
+        jockey_id: string|null; trainer_id: string|null;
+        finishing_position: number;
+      }>();
+      const entryList = entries ?? [];
 
-      async function getRating(
-        table: string, idCol: string, id: string,
-        cache: Map<string, number>, gamesCache: Map<string, number>,
-        asOfDate: string,
-      ): Promise<number> {
-        if (cache.has(id)) return cache.get(id)!;
-        const row = await db.prepare(
-          `SELECT rating, games_played FROM ${table}
-            WHERE ${idCol} = ? AND as_of_date < ?
-            ORDER BY as_of_date DESC LIMIT 1`
-        ).bind(id, asOfDate).first<{ rating: number; games_played: number }>();
-        const r = row?.rating ?? 1500;
-        cache.set(id, r);
-        gamesCache.set(id, row?.games_played ?? 0);
-        return r;
+      const horseIds = [...new Set(entryList.map((e) => e.horse_id))];
+      const jockeyIds = [...new Set(entryList.map((e) => e.jockey_id).filter(Boolean))] as string[];
+      const trainerIds = [...new Set(entryList.map((e) => e.trainer_id).filter(Boolean))] as string[];
+
+      async function loadLatest(table: string, idCol: string, ids: string[]): Promise<Map<string, { rating: number; games: number }>> {
+        const map = new Map<string, { rating: number; games: number }>();
+        if (ids.length === 0) return map;
+        for (let i = 0; i < ids.length; i += 90) {
+          const chunk = ids.slice(i, i + 90);
+          const ph = chunk.map(() => '?').join(',');
+          const { results } = await db.prepare(`
+            SELECT ${idCol} AS eid, rating, games_played
+              FROM ${table}
+             WHERE ${idCol} IN (${ph}) AND as_of_date < ?
+               AND (${idCol}, as_of_date) IN (
+                 SELECT ${idCol}, MAX(as_of_date)
+                   FROM ${table}
+                  WHERE ${idCol} IN (${ph}) AND as_of_date < ?
+                  GROUP BY ${idCol}
+               )
+          `).bind(...chunk, since, ...chunk, since).all<{ eid: string; rating: number; games_played: number }>();
+          for (const r of (results ?? [])) map.set(r.eid, { rating: r.rating, games: r.games_played });
+        }
+        return map;
       }
 
+      const [horseSeed, jockeySeed, trainerSeed] = await Promise.all([
+        loadLatest('horse_elo_snapshots', 'horse_id', horseIds),
+        loadLatest('jockey_elo_snapshots', 'jockey_id', jockeyIds),
+        loadLatest('trainer_elo_snapshots', 'trainer_id', trainerIds),
+      ]);
+
+      const horseR = new Map<string, number>(); const horseG = new Map<string, number>();
+      const jockeyR = new Map<string, number>(); const jockeyG = new Map<string, number>();
+      const trainerR = new Map<string, number>(); const trainerG = new Map<string, number>();
+      function getR(map: Map<string, number>, seedMap: Map<string, {rating:number;games:number}>, gMap: Map<string, number>, id: string): number {
+        if (map.has(id)) return map.get(id)!;
+        const seed = seedMap.get(id);
+        map.set(id, seed?.rating ?? 1500);
+        gMap.set(id, seed?.games ?? 0);
+        return map.get(id)!;
+      }
+
+      const entriesByRace = new Map<string, typeof entryList>();
+      for (const e of entryList) {
+        const arr = entriesByRace.get(e.race_id) ?? [];
+        arr.push(e);
+        entriesByRace.set(e.race_id, arr);
+      }
+
+      const horseStmts: any[] = [];
+      const jockeyStmts: any[] = [];
+      const trainerStmts: any[] = [];
       let processedRaces = 0;
-      let writtenSnaps = 0;
-      const sampleErrors: string[] = [];
 
       for (const race of raceList) {
-        const { results: entries } = await db.prepare(`
-          SELECT horse_id, jockey_id, trainer_id, finishing_position
-            FROM race_results
-           WHERE race_id = ? AND finishing_position IS NOT NULL
-        `).bind(race.race_id).all<{
-          horse_id: string; jockey_id: string|null; trainer_id: string|null; finishing_position: number;
-        }>();
-        const rows = entries ?? [];
+        const rows = entriesByRace.get(race.race_id) ?? [];
         if (rows.length < 2) continue;
 
-        // Horse layer
-        const horseRunners = await Promise.all(rows.map(async (r) => ({
+        const hRunners = rows.map((r) => ({
           id: r.horse_id, finish: r.finishing_position,
-          rating: await getRating('horse_elo_snapshots', 'horse_id', r.horse_id, horseR, horseGames, race.race_date),
-        })));
-        const hDeltas = computeRaceDeltas(horseRunners, k);
-        for (const [id, d] of hDeltas) {
+          rating: getR(horseR, horseSeed, horseG, r.horse_id),
+        }));
+        const hD = computeRaceDeltas(hRunners, k);
+        for (const [id, d] of hD) {
           const newR = (horseR.get(id) ?? 1500) + d;
           horseR.set(id, newR);
-          horseGames.set(id, (horseGames.get(id) ?? 0) + 1);
-          try {
-            await db.prepare(`
-              INSERT OR REPLACE INTO horse_elo_snapshots
-                (id, horse_id, axis_key, surface, distance_bucket, as_of_race_id, as_of_date, rating, games_played, computed_at)
-              VALUES (?, ?, 'overall', NULL, NULL, ?, ?, ?, ?, datetime('now'))
-            `).bind(
-              `${id}|overall|${race.race_id}`, id, race.race_id, race.race_date, newR, horseGames.get(id),
-            ).run();
-            writtenSnaps++;
-          } catch (e: any) {
-            if (sampleErrors.length < 3) sampleErrors.push(`horse ${id}: ${e?.message}`);
-          }
+          horseG.set(id, (horseG.get(id) ?? 0) + 1);
+          horseStmts.push(db.prepare(`
+            INSERT OR REPLACE INTO horse_elo_snapshots
+              (id, horse_id, axis_key, surface, distance_bucket, as_of_race_id, as_of_date, rating, games_played, computed_at)
+            VALUES (?, ?, 'overall', NULL, NULL, ?, ?, ?, ?, datetime('now'))
+          `).bind(`${id}|overall|${race.race_id}`, id, race.race_id, race.race_date, newR, horseG.get(id)));
         }
 
-        // Jockey layer
-        const jWithName = rows.filter((r) => r.jockey_id);
-        if (jWithName.length >= 2) {
-          const jR = await Promise.all(jWithName.map(async (r) => ({
+        const jRows = rows.filter((r) => r.jockey_id);
+        if (jRows.length >= 2) {
+          const jR = jRows.map((r) => ({
             id: r.jockey_id!, finish: r.finishing_position,
-            rating: await getRating('jockey_elo_snapshots', 'jockey_id', r.jockey_id!, jockeyR, jockeyGames, race.race_date),
-          })));
+            rating: getR(jockeyR, jockeySeed, jockeyG, r.jockey_id!),
+          }));
           const jD = computeRaceDeltas(jR, k);
           for (const [id, d] of jD) {
             const newR = (jockeyR.get(id) ?? 1500) + d;
             jockeyR.set(id, newR);
-            jockeyGames.set(id, (jockeyGames.get(id) ?? 0) + 1);
-            try {
-              await db.prepare(`
-                INSERT OR REPLACE INTO jockey_elo_snapshots
-                  (id, jockey_id, as_of_race_id, as_of_date, rating, games_played, computed_at)
-                VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
-              `).bind(`${id}|${race.race_id}`, id, race.race_id, race.race_date, newR, jockeyGames.get(id)).run();
-              writtenSnaps++;
-            } catch (e: any) {
-              if (sampleErrors.length < 3) sampleErrors.push(`jockey ${id}: ${e?.message}`);
-            }
+            jockeyG.set(id, (jockeyG.get(id) ?? 0) + 1);
+            jockeyStmts.push(db.prepare(`
+              INSERT OR REPLACE INTO jockey_elo_snapshots
+                (id, jockey_id, as_of_race_id, as_of_date, rating, games_played, computed_at)
+              VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+            `).bind(`${id}|${race.race_id}`, id, race.race_id, race.race_date, newR, jockeyG.get(id)));
           }
         }
 
-        // Trainer layer
-        const tWithName = rows.filter((r) => r.trainer_id);
-        if (tWithName.length >= 2) {
-          const tR = await Promise.all(tWithName.map(async (r) => ({
+        const tRows = rows.filter((r) => r.trainer_id);
+        if (tRows.length >= 2) {
+          const tR = tRows.map((r) => ({
             id: r.trainer_id!, finish: r.finishing_position,
-            rating: await getRating('trainer_elo_snapshots', 'trainer_id', r.trainer_id!, trainerR, trainerGames, race.race_date),
-          })));
+            rating: getR(trainerR, trainerSeed, trainerG, r.trainer_id!),
+          }));
           const tD = computeRaceDeltas(tR, k);
           for (const [id, d] of tD) {
             const newR = (trainerR.get(id) ?? 1500) + d;
             trainerR.set(id, newR);
-            trainerGames.set(id, (trainerGames.get(id) ?? 0) + 1);
-            try {
-              await db.prepare(`
-                INSERT OR REPLACE INTO trainer_elo_snapshots
-                  (id, trainer_id, as_of_race_id, as_of_date, rating, games_played, computed_at)
-                VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
-              `).bind(`${id}|${race.race_id}`, id, race.race_id, race.race_date, newR, trainerGames.get(id)).run();
-              writtenSnaps++;
-            } catch (e: any) {
-              if (sampleErrors.length < 3) sampleErrors.push(`trainer ${id}: ${e?.message}`);
-            }
+            trainerG.set(id, (trainerG.get(id) ?? 0) + 1);
+            trainerStmts.push(db.prepare(`
+              INSERT OR REPLACE INTO trainer_elo_snapshots
+                (id, trainer_id, as_of_race_id, as_of_date, rating, games_played, computed_at)
+              VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+            `).bind(`${id}|${race.race_id}`, id, race.race_id, race.race_date, newR, trainerG.get(id)));
           }
         }
-
         processedRaces++;
       }
 
+      let written = 0;
+      async function flush(stmts: any[]): Promise<void> {
+        for (let i = 0; i < stmts.length; i += 80) {
+          const slice = stmts.slice(i, i + 80);
+          await db.batch(slice);
+          written += slice.length;
+        }
+      }
+      await flush(horseStmts);
+      await flush(jockeyStmts);
+      await flush(trainerStmts);
+
       return c.json({
-        ok: true,
-        since,
-        k,
+        ok: true, since, k,
         racesScanned: raceList.length,
         racesProcessed: processedRaces,
-        writtenSnapshots: writtenSnaps,
+        writtenSnapshots: written,
         uniqueHorses: horseR.size,
         uniqueJockeys: jockeyR.size,
         uniqueTrainers: trainerR.size,
-        sampleErrors,
       });
     } catch (err: any) {
       return c.json({ error: 'backfill_failed', message: String(err?.message ?? err) }, 500);
     }
   });
+
+
 
   // ── /api/sql-read — read-only SELECT for diagnostics ────────────────────
   // Body: { sql: 'SELECT ...' }  (single SELECT, no semicolons in middle)
