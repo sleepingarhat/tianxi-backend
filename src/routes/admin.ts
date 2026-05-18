@@ -658,8 +658,8 @@ adminRoutes.get('/api/seed-missing-jockey-elo', async (c) => {
       async function loadLatest(table: string, idCol: string, ids: string[]): Promise<Map<string, { rating: number; games: number }>> {
         const map = new Map<string, { rating: number; games: number }>();
         if (ids.length === 0) return map;
-        for (let i = 0; i < ids.length; i += 90) {
-          const chunk = ids.slice(i, i + 90);
+        for (let i = 0; i < ids.length; i += 40) {
+          const chunk = ids.slice(i, i + 40);
           const ph = chunk.map(() => '?').join(',');
           const { results } = await db.prepare(`
             SELECT ${idCol} AS eid, rating, games_played
