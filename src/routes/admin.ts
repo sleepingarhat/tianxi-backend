@@ -2108,7 +2108,6 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
   safeRender('renderStatus', renderStatus);
   safeRender('renderRuns', renderRuns);
   safeRender('renderMeetings', renderMeetings);
-  safeRender('loadHitRateRollup', loadHitRateRollup);
         safeRender('loadTodayPredictions', () => loadTodayPredictions(false));
       safeRender('renderNextRaceDay', renderNextRaceDay);
   document.getElementById('refreshClock').textContent = '載入時間：' + new Date().toLocaleTimeString('zh-HK') + ' · 每 60 秒自動刷新';
