@@ -631,7 +631,7 @@ adminRoutes.get('/api/seed-missing-jockey-elo', async (c) => {
         SELECT r.id AS race_id, rm.date AS race_date, r.race_number
           FROM races r JOIN race_meetings rm ON rm.id = r.meeting_id
          WHERE rm.date >= ?
-         ORDER BY rm.date ASC, r.race_number ASC
+         ORDER BY rm.date ASC, rm.venue ASC, r.race_number ASC, r.id ASC
       `).bind(since).all<{ race_id: string; race_date: string; race_number: number }>();
       const raceList = races ?? [];
       if (raceList.length === 0) return c.json({ ok: true, since, racesProcessed: 0, writtenSnapshots: 0 });
