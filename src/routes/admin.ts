@@ -531,6 +531,7 @@ adminRoutes.get('/api/meetings', async (c) => {
            (SELECT COUNT(*) FROM entries_upcoming e WHERE e.race_date = m.date) AS entry_count
     FROM race_meetings m
     LEFT JOIN races r ON r.meeting_id = m.id
+    WHERE m.venue IN ('ST','HV')
     GROUP BY m.id
     ORDER BY m.date DESC
     LIMIT ?
@@ -903,6 +904,70 @@ adminRoutes.get('/api/seed-missing-jockey-elo', async (c) => {
     }
   });
 
+  // ── /api/data-housekeeping — one-shot DB cleanup ──────────────────
+  // 1) Drop stale hit-rate cache rows so cron recomputes
+  // 2) Backfill race_meetings.total_races where NULL but races exist
+  // 3) Cascade-delete non-race-venue meetings (S1 etc)
+  adminRoutes.post('/api/data-housekeeping', async (c) => {
+    const dryRun = c.req.query('dry') === '1';
+    const dropCacheDates = (c.req.query('drop_cache_dates') || '2026-05-09')
+      .split(',').map((s) => s.trim()).filter(Boolean);
+    const out: Record<string, any> = { dryRun, ranAt: new Date().toISOString() };
+    try {
+      if (dropCacheDates.length > 0) {
+        const inL = dropCacheDates.map(() => '?').join(',');
+        if (dryRun) {
+          const { results } = await c.env.DB.prepare(`SELECT date, engine, races_evaluated, computed_at FROM meeting_hit_rate_cache WHERE date IN (${inL})`).bind(...dropCacheDates).all();
+          out.staleCacheRowsWouldDelete = results ?? [];
+        } else {
+          const r = await c.env.DB.prepare(`DELETE FROM meeting_hit_rate_cache WHERE date IN (${inL})`).bind(...dropCacheDates).run();
+          out.staleCacheRowsDeleted = r.meta.changes ?? 0;
+        }
+      }
+      if (dryRun) {
+        const { results } = await c.env.DB.prepare(`SELECT m.id, m.date, m.venue, m.total_races, (SELECT COUNT(*) FROM races WHERE meeting_id = m.id) AS actual_races FROM race_meetings m WHERE m.total_races IS NULL AND (SELECT COUNT(*) FROM races WHERE meeting_id = m.id) > 0`).all();
+        out.totalRacesWouldBackfill = results ?? [];
+      } else {
+        const r = await c.env.DB.prepare(`UPDATE race_meetings SET total_races = (SELECT COUNT(*) FROM races WHERE meeting_id = race_meetings.id) WHERE total_races IS NULL AND (SELECT COUNT(*) FROM races WHERE meeting_id = race_meetings.id) > 0`).run();
+        out.totalRacesBackfilled = r.meta.changes ?? 0;
+      }
+      const { results: ghosts } = await c.env.DB.prepare(`SELECT id, date, venue, track_condition FROM race_meetings WHERE venue NOT IN ('ST','HV')`).all<any>();
+      const ghostRows = ghosts ?? [];
+      if (dryRun) {
+        out.nonRaceVenuesWouldDelete = ghostRows;
+      } else if (ghostRows.length > 0) {
+        const ids = ghostRows.map((r: any) => r.id);
+        const inL = ids.map(() => '?').join(',');
+        const { results: rIds } = await c.env.DB.prepare(`SELECT id FROM races WHERE meeting_id IN (${inL})`).bind(...ids).all<{ id: string }>();
+        const raceIds = (rIds ?? []).map((r) => r.id);
+        const counts: Record<string, number | string> = {};
+        if (raceIds.length > 0) {
+          const rIn = raceIds.map(() => '?').join(',');
+          for (const t of ['race_results','sectional_times','horse_sectional_times','running_comments','dividends','race_videos']) {
+            try { const r = await c.env.DB.prepare(`DELETE FROM ${t} WHERE race_id IN (${rIn})`).bind(...raceIds).run(); counts[t] = r.meta.changes ?? 0; }
+            catch (e: any) { counts[t + '_err'] = String(e?.message ?? e); }
+          }
+          for (const nb of [{tbl:'horse_form_records',col:'race_id'},{tbl:'horse_elo_snapshots',col:'as_of_race_id'},{tbl:'jockey_elo_snapshots',col:'as_of_race_id'},{tbl:'trainer_elo_snapshots',col:'as_of_race_id'}]) {
+            try { const r = await c.env.DB.prepare(`UPDATE ${nb.tbl} SET ${nb.col} = NULL WHERE ${nb.col} IN (${rIn})`).bind(...raceIds).run(); counts[`${nb.tbl}_nulled`] = r.meta.changes ?? 0; }
+            catch (e: any) { counts[`${nb.tbl}_err`] = String(e?.message ?? e); }
+          }
+        }
+        try { const eu = await c.env.DB.prepare(`DELETE FROM entries_upcoming WHERE (race_date || '|' || venue) IN (SELECT (date || '|' || venue) FROM race_meetings WHERE id IN (${inL}))`).bind(...ids).run(); counts.entries_upcoming = eu.meta.changes ?? 0; } catch (e: any) { counts.entries_err = String(e?.message ?? e); }
+        const dR = await c.env.DB.prepare(`DELETE FROM races WHERE meeting_id IN (${inL})`).bind(...ids).run();
+        const dM = await c.env.DB.prepare(`DELETE FROM race_meetings WHERE id IN (${inL})`).bind(...ids).run();
+        out.nonRaceVenuesDeleted = ghostRows;
+        out.deletedRaces = dR.meta.changes ?? 0;
+        out.deletedMeetings = dM.meta.changes ?? 0;
+        out.cascadeCounts = counts;
+      } else {
+        out.nonRaceVenuesDeleted = [];
+      }
+      return c.json({ ok: true, ...out });
+    } catch (err: any) {
+      return c.json({ error: 'housekeeping_failed', message: String(err?.message ?? err), partial: out }, 500);
+    }
+  });
+
   adminRoutes.get('/api/jockey-elo-debug', async (c) => {
   const name = c.req.query('name');
   if (!name) return c.json({ error: 'name query param required' }, 400);
@@ -1084,6 +1149,7 @@ async function fetchAdminPageData(env: AdminEnv): Promise<Record<string, any>> {
       FROM race_meetings m
       LEFT JOIN races r ON r.meeting_id = m.id
       LEFT JOIN meeting_hit_rate_cache c ON c.date = m.date AND c.engine = 'v12'
+      WHERE m.venue IN ('ST','HV')
       GROUP BY m.id ORDER BY m.date DESC LIMIT 10
     `).all().catch(() => ({ results: [] as any[] }));
 
