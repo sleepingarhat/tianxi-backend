@@ -276,7 +276,8 @@ async function main() {
 
   const sql: string[] = [];
   sql.push(`-- HKJC race results · ${a.date} @ ${a.venue} · ${parsed.length} races · ${new Date().toISOString()}`);
-  sql.push(`BEGIN TRANSACTION;`);
+  // Note: D1 wraps the whole --file in an atomic session automatically;
+  // explicit BEGIN/COMMIT are rejected ("use state.storage.transaction()").
 
   for (const [id, h] of horses) {
     sql.push(`INSERT OR IGNORE INTO horses (id, name_en, name_ch, code) VALUES (${esc(id)}, ${esc(h.name_ch)}, ${esc(h.name_ch)}, ${esc(h.code)});`);
@@ -327,7 +328,6 @@ async function main() {
     }
   }
 
-  sql.push(`COMMIT;`);
   writeFileSync(a.out, sql.join('\n') + '\n');
   console.error(`[results] wrote ${sql.length} statements to ${a.out}`);
   console.log(JSON.stringify({
