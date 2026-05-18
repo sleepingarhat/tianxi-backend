@@ -635,12 +635,45 @@ adminRoutes.get('/api/seed-missing-jockey-elo', async (c) => {
         return c.json({ ok: true, dryRun: true, wouldDelete: staleRows });
       }
 
-      // Cascade delete: first race_results (via race ids), then races, then meetings.
+      // Cascade: collect race ids first, then delete from every child table,
+      // then races, then race_meetings. Nullable FKs (horse_form_records.race_id,
+      // *_elo_snapshots.as_of_race_id) are NULL'd instead of deleted.
       const ids = staleRows.map((r: any) => r.id);
       const inList = ids.map(() => '?').join(',');
-      const deletedResults = await c.env.DB.prepare(
-        `DELETE FROM race_results WHERE race_id IN (SELECT id FROM races WHERE meeting_id IN (${inList}))`
-      ).bind(...ids).run();
+      const { results: raceIdRows } = await c.env.DB.prepare(
+        `SELECT id FROM races WHERE meeting_id IN (${inList})`
+      ).bind(...ids).all<{ id: string }>();
+      const raceIds = (raceIdRows ?? []).map((r) => r.id);
+
+      const counts: Record<string, number> = {};
+      if (raceIds.length > 0) {
+        const rIn = raceIds.map(() => '?').join(',');
+        // Hard-delete child rows (non-nullable race_id FK)
+        const childTables = [
+          'race_results', 'sectional_times', 'horse_sectional_times',
+          'running_comments', 'dividends', 'odds_snapshots_legacy', 'race_videos',
+        ];
+        for (const t of childTables) {
+          const r = await c.env.DB.prepare(
+            `DELETE FROM ${t} WHERE race_id IN (${rIn})`
+          ).bind(...raceIds).run();
+          counts[t] = r.meta.changes ?? 0;
+        }
+        // Null-out nullable race_id FKs (preserve data)
+        const nullable = [
+          { tbl: 'horse_form_records', col: 'race_id' },
+          { tbl: 'horse_elo_snapshots', col: 'as_of_race_id' },
+          { tbl: 'jockey_elo_snapshots', col: 'as_of_race_id' },
+          { tbl: 'trainer_elo_snapshots', col: 'as_of_race_id' },
+        ];
+        for (const { tbl, col } of nullable) {
+          const r = await c.env.DB.prepare(
+            `UPDATE ${tbl} SET ${col} = NULL WHERE ${col} IN (${rIn})`
+          ).bind(...raceIds).run();
+          counts[`${tbl}_nulled`] = r.meta.changes ?? 0;
+        }
+      }
+
       const deletedRaces = await c.env.DB.prepare(
         `DELETE FROM races WHERE meeting_id IN (${inList})`
       ).bind(...ids).run();
@@ -652,7 +685,7 @@ adminRoutes.get('/api/seed-missing-jockey-elo', async (c) => {
         ok: true,
         deletedMeetings: deletedMeetings.meta.changes ?? 0,
         deletedRaces: deletedRaces.meta.changes ?? 0,
-        deletedResults: deletedResults.meta.changes ?? 0,
+        cascadeCounts: counts,
         stale: staleRows,
       });
     } catch (err: any) {
