@@ -1272,6 +1272,48 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
 
   <div id="alertbar"></div>
 
+    <style>
+      .cmp-wrap{margin:14px 0 22px;padding:14px 16px;background:#fff;border:1px solid var(--rule);border-radius:6px}
+      .cmp-wrap h2{margin:0 0 4px;font-size:16px;font-weight:600;letter-spacing:.3px}
+      .cmp-sub{color:var(--mut);font-size:12px;margin-bottom:10px;line-height:1.55}
+      .cmp-ctrl{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:12px;font-size:13px}
+      .cmp-ctrl select{padding:4px 8px;border:1px solid var(--rule);border-radius:4px;background:#fff;font:inherit;min-width:140px}
+      .cmp-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+      .cmp-col{border:1px solid var(--rule);border-radius:5px;padding:0;display:flex;flex-direction:column;aspect-ratio:1/1;overflow:hidden}
+      .cmp-col h3{margin:0;padding:8px 12px;font-size:13px;font-weight:600;background:#fafafa;border-bottom:1px solid var(--rule);text-transform:uppercase;letter-spacing:.5px;color:var(--mut)}
+      .cmp-list{flex:1;display:grid;grid-template-rows:repeat(4,1fr)}
+      .cmp-cell{padding:8px 12px;border-bottom:1px solid #eee;display:grid;grid-template-columns:28px 1fr auto;gap:8px;align-items:center;font-size:13px;line-height:1.35;transition:background .15s}
+      .cmp-cell:last-child{border-bottom:none}
+      .cmp-cell.match{background:#fff7d6}
+      .cmp-cell.match .cmp-name::before{content:"✓ ";color:#7A5A20;font-weight:700}
+      .cmp-cell.empty{color:var(--mut);font-style:italic;justify-content:center;align-items:center;display:flex;grid-template-columns:none}
+      .cmp-rank{font-weight:700;color:var(--mut);font-variant-numeric:tabular-nums;text-align:center}
+      .cmp-name{font-weight:600}
+      .cmp-name .num{color:var(--mut);font-weight:500;margin-right:4px}
+      .cmp-draw{font-size:11px;color:var(--mut);background:#f3f1ec;padding:2px 6px;border-radius:3px;white-space:nowrap}
+      .cmp-cell.match .cmp-draw{background:#f7e9b5;color:#7A5A20}
+      .cmp-empty-box{padding:18px;text-align:center;color:var(--mut);font-size:12px}
+      .cmp-status{font-size:11px;color:var(--mut);margin-left:auto}
+      @media (max-width:520px){
+        .cmp-grid{grid-template-columns:1fr;gap:8px}
+        .cmp-col{aspect-ratio:auto;min-height:280px}
+      }
+    </style>
+
+    <section class="cmp-wrap" id="cmpSection">
+      <h2>預測與賽果 <span style="font-size:11px;font-weight:400;color:var(--mut);margin-left:6px">PREDICTION VS RESULT</span></h2>
+      <div class="cmp-sub">揀賽事日期同場次，比對天喜預測首 4 名同實際賽果首 4 名。左右兩邊同時出現嘅馬匹會用<span style="background:#fff7d6;padding:1px 4px;border-radius:2px">金黃底</span>標記。</div>
+      <div class="cmp-ctrl">
+        <label>日期 <select id="cmpDate" aria-label="賽事日期"></select></label>
+        <label>場次 <select id="cmpRace" aria-label="場次" disabled><option>—</option></select></label>
+        <span id="cmpStatus" class="cmp-status" aria-live="polite"></span>
+      </div>
+      <div class="cmp-grid">
+        <div class="cmp-col"><h3>天喜預測 首 4 名</h3><div class="cmp-list" id="cmpLeft" aria-live="polite"><div class="cmp-empty-box">揀日期同場次以載入</div></div></div>
+        <div class="cmp-col"><h3>實際賽果 首 4 名</h3><div class="cmp-list" id="cmpRight" aria-live="polite"><div class="cmp-empty-box">揀日期同場次以載入</div></div></div>
+      </div>
+    </section>
+
   <h2>資料來源覆蓋（14 個核心表）</h2>
   <table id="coverDS"><thead><tr>
     <th>資料源</th><th>歷史齊全</th><th>自動更新</th><th>最新運行</th><th>最後成功</th><th>數量 / 最新</th><th>負責工作流</th>
@@ -1289,65 +1331,19 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
   <h2>最近工作流運行</h2>
   <table id="runs"><thead><tr><th>ID</th><th>名稱</th><th>狀態</th><th>結果</th><th>更新時間</th></tr></thead><tbody></tbody></table>
 
-  <div id="hitRateRollup" style="margin:14px 0;padding:12px 14px;background:linear-gradient(135deg,#f0f7ff,#fafcff);border:1px solid var(--rule);border-radius:6px;font-size:12px">
-    <div style="color:var(--mut)">最近 <select id="rollupDays" style="font-size:11px;padding:1px 4px" onchange="loadHitRateRollup()"><option value="7">7</option><option value="14">14</option><option value="30" selected>30</option><option value="60">60</option><option value="90">90</option></select> 日整體命中率 <span id="rollupStatus" style="color:var(--mut);margin-left:8px">載入中…</span></div>
-    <div id="rollupContent" style="margin-top:8px"></div>
-  </div>
   <h2>最近賽事</h2>
   <table id="recentMeetings"><thead><tr>
-    <th>日期</th><th>場地</th><th>場地狀況</th><th>場數</th><th>預測 / 命中率 (Top1 / Top3)</th>
+  <th>日期</th><th>場地</th><th>場地狀況</th><th>場數</th>
   </tr></thead><tbody></tbody></table>
   <div id="meetingPanel" style="margin-top:14px"></div>
 
     <h2>即日賽事 R5 預測</h2>
     <div class="actions-row">
       <button class="tp-run" id="btnTodayPredict" onclick="loadTodayPredictions(false)">▶ 載入即日賽事預測報告（R5 · ELO + 檔位 + 負磅）</button>
-        <button class="tp-run" id="btnTodayPredictForce" onclick="forceRebuildTodayPredictions()" style="background:#444;margin-left:6px">⟳ 強制重新運算</button>
       <span id="todayPredictStatus" style="font-size:12px;color:var(--mut)"></span>
     </div>
     <div id="todayPredictResults"></div>
 
-    <h2>📊 預測準確率回測（R5 生產引擎 · 滾動視窗）</h2>
-    <div style="margin:8px 0">
-      <label style="font-size:13px;color:var(--mut)">視窗：
-        <select id="accDays" onchange="loadPredictionAccuracy()" style="padding:3px 6px">
-          <option value="7">過去 7 日</option>
-          <option value="30" selected>過去 30 日</option>
-          <option value="90">過去 90 日</option>
-        </select>
-      </label>
-      <span id="accStatus" style="margin-left:10px;font-size:12px;color:var(--mut)"></span>
-      <button onclick="triggerBackfill()" style="margin-left:10px;padding:3px 10px;font-size:12px">🔄 立即回填賽果</button>
-    </div>
-    <div id="predAccuracyResults"></div>
-
-    <h2>💰 ROI 回測（實際派彩 · 平注 $1）<span style="font-size:11px;font-weight:400;color:var(--mut);margin-left:6px">證實：SP ∈ [3,8] 60 日 +19% ROI</span></h2>
-    <div style="margin:8px 0">
-      <label style="font-size:13px;color:var(--mut)">視窗：
-        <select id="roiDays" onchange="loadRoi()" style="padding:3px 6px">
-          <option value="30">過去 30 日</option>
-          <option value="60" selected>過去 60 日</option>
-          <option value="90">過去 90 日</option>
-        </select>
-      </label>
-      <span id="roiStatus" style="margin-left:10px;font-size:12px;color:var(--mut)"></span>
-    </div>
-    <div id="roiResults"></div>
-
-    <h2>🎯 今日價值貼士（SP ∈ [3,8] 過濾）<span style="font-size:11px;font-weight:400;color:var(--mut);margin-left:6px">用即時 WIN 賠率過濾 R5 排第 1 馬</span></h2>
-    <div style="margin:8px 0">
-      <label style="font-size:13px;color:var(--mut)">odds 範圍：
-        <input id="vpMin" type="number" step="0.5" value="3" min="1.01" style="width:55px;padding:3px 6px"> –
-        <input id="vpMax" type="number" step="0.5" value="8" min="1.01" style="width:55px;padding:3px 6px">
-      </label>
-      <button onclick="loadValuePicks()" style="margin-left:10px;padding:3px 10px;font-size:12px">🔍 計算今日價值貼士</button>
-      <span id="vpStatus" style="margin-left:10px;font-size:12px;color:var(--mut)"></span>
-    </div>
-    <div id="vpResults"></div>
-
-    <h2>即日賽事排位表 + 即時賠率 <span id="nrdLabel" style="font-size:13px;font-weight:400;color:var(--mut)"></span></h2>
-    <div id="nrdRaces"></div>
-    <div id="nrdHorses"></div>
 
   <script>
   // ── 伺服器端預載資料 (SSR) — 無需任何 fetch 呼叫 ──
@@ -1470,54 +1466,21 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
   }
 
   function renderMeetings() {
-    const data = D.meetings || {};
-    const tb = document.querySelector('#recentMeetings tbody');
-    if (!tb) { console.error('[admin] #recentMeetings tbody not found'); return; }
-    if (!data.meetings || !data.meetings.length) {
-      tb.innerHTML = '<tr><td colspan="5" class="warn">無賽事資料</td></tr>'; return;
-    }
-    window._meetingList = data.meetings;
-    const today = (D.status && D.status.serverTime ? D.status.serverTime : new Date().toISOString()).substring(0, 10);
-    tb.innerHTML = data.meetings.map((m, i) => {
-      const venue = m.venue === 'ST' ? '沙田' : m.venue === 'HV' ? '跑馬地' : (m.venue || '—');
-      const isUpcoming = m.date >= today && m.entry_count > 0;
-      const isPast = m.date < today;
-      const hasResults = m.race_count > 0;
-      const raceCountTxt = m.race_count > 0 ? m.race_count + ' 場' : m.total_races ? m.total_races + ' 場' : m.entry_count > 0 ? '<span class="muted-cell">排位 ' + m.entry_count + ' 匹</span>' : '<span class="muted-cell">—</span>';
-      // Hit-rate is cached server-side by the daily cron (src/index.ts). The SSR
-      // 'meetRows' query embeds cache columns directly so this row renders instantly
-      // — no client-side fetch chain on every page view.
-      const t1 = m.cached_top1_hit_rate;
-      const t3 = m.cached_top3_any_hit_rate;
-      const evaluated = m.cached_races_evaluated;
-      let actionCell;
-        if (isPast && !hasResults) {
-          actionCell = '<span class="muted-cell" style="font-size:11px">⚠ 賽果未同步</span>';
-        } else if (isPast && hasResults) {
-          if (t1 != null && t3 != null) {
-            const t1cls = t1 >= 30 ? 'ok' : t1 < 15 ? 'bad' : '';
-            const t3cls = t3 >= 60 ? 'ok' : t3 < 40 ? 'bad' : '';
-            actionCell = '<a href="javascript:void(0)" onclick="runHitReport(' + i + ')" style="text-decoration:none;color:inherit;display:inline-block;padding:2px 6px;border-radius:3px;cursor:pointer" onmouseover="this.style.background=&#39;#f0f7ff&#39;" onmouseout="this.style.background=&#39;&#39;">'
-                      + '<span class="' + t1cls + '" style="font-variant-numeric:tabular-nums;font-weight:600">' + t1.toFixed(1) + '%</span>'
-                      + ' <span class="muted-cell">/</span> '
-                      + '<span class="' + t3cls + '" style="font-variant-numeric:tabular-nums;font-weight:600">' + t3.toFixed(1) + '%</span>'
-                      + ' <span style="font-size:10px;color:var(--mut)">(' + evaluated + ' 場 · 點看詳情)</span>'
-                      + '</a>';
-          } else {
-            actionCell = '<span class="muted-cell" style="font-size:11px">命中率待算（每日凌晨自動）</span>';
-          }
-        } else if (isUpcoming) {
-          // 即日 / 將來賽事日：唔再喺呢度俾按鈕，因為下面已經有「即日賽事 R5 預測」掣
-          actionCell = '<span class="muted-cell" style="font-size:11px">' + m.entry_count + ' 匹排位 · 用下方「即日賽事 R5 預測」</span>';
-        } else {
-          actionCell = '<span class="muted-cell">—</span>';
-        }
-        return '<tr>' +
+      const data = D.meetings || {};
+      const tb = document.querySelector('#recentMeetings tbody');
+      if (!tb) { console.error('[admin] #recentMeetings tbody not found'); return; }
+      if (!data.meetings || !data.meetings.length) {
+        tb.innerHTML = '<tr><td colspan="4" class="warn">無賽事資料</td></tr>'; return;
+      }
+      window._meetingList = data.meetings;
+      tb.innerHTML = data.meetings.map((m, i) => {
+        const venue = m.venue === 'ST' ? '沙田' : m.venue === 'HV' ? '跑馬地' : (m.venue || '—');
+        const raceCountTxt = m.race_count > 0 ? m.race_count + ' 場' : m.total_races ? m.total_races + ' 場' : m.entry_count > 0 ? '<span class="muted-cell">排位 ' + m.entry_count + ' 匹</span>' : '<span class="muted-cell">—</span>';
+        return '<tr style="cursor:pointer" onclick="cmpJumpTo(&quot;' + m.date + '&quot;)" title="點擊跳到頂部「預測與賽果」比對">' +
           '<td><strong>' + (m.date || '—') + '</strong></td>' +
           '<td>' + venue + '</td>' +
           '<td class="muted-cell">' + (m.track_condition || '—') + '</td>' +
           '<td>' + raceCountTxt + '</td>' +
-          '<td>' + actionCell + '</td>' +
           '</tr>';
       }).join('');
       // No client-side auto-load chain; SSR already has the numbers.
@@ -2164,6 +2127,113 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
     }, 60000);
   }
   scheduleReload();
+        // ── 預測與賽果 (PREDICTION VS RESULT) ──────────────────────────────
+        var _cmpToken = 0, _cmpCache = {};
+        function cmpEsc(s){ return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
+        function cmpNorm(s){ return String(s==null?'':s).trim().toLowerCase(); }
+        function cmpKey(h){
+          if (!h) return null;
+          if (h.horseId) return 'h:'+h.horseId;
+          var no = h.horseNumber!=null?h.horseNumber:h.no;
+          var nm = h.nameCh||h.name;
+          if (no!=null && no!=='' && nm) return 'no:'+no+'|nm:'+cmpNorm(nm);
+          return null;
+        }
+        function cmpCell(rank, h, isMatch){
+          if (!h) return '<div class="cmp-cell empty">—</div>';
+          var no = h.horseNumber!=null?h.horseNumber:h.no;
+          var draw = h.draw!=null?h.draw:(h.barrier!=null?h.barrier:null);
+          return '<div class="cmp-cell'+(isMatch?' match':'')+'">'
+            + '<div class="cmp-rank">'+rank+'</div>'
+            + '<div class="cmp-name">'+(no!=null?'<span class="num">#'+cmpEsc(no)+'</span>':'')+cmpEsc(h.nameCh||h.name||'—')+'</div>'
+            + (draw!=null?'<div class="cmp-draw">檔 '+cmpEsc(draw)+'</div>':'<div class="cmp-draw" style="opacity:.4">檔 —</div>')
+            + '</div>';
+        }
+        function cmpRender(left, right){
+          var L = (left||[]).filter(Boolean).slice(0,4);
+          var R = (right||[]).filter(Boolean).slice(0,4);
+          var ls = {}, rs = {};
+          L.forEach(function(h){ var k=cmpKey(h); if(k) ls[k]=true; });
+          R.forEach(function(h){ var k=cmpKey(h); if(k) rs[k]=true; });
+          var leftEl = document.getElementById('cmpLeft');
+          var rightEl = document.getElementById('cmpRight');
+          if (!L.length) { leftEl.innerHTML = '<div class="cmp-empty-box">未有預測（此場暫未產生天喜預測）</div>'; }
+          else { leftEl.innerHTML = [0,1,2,3].map(function(i){ var h=L[i]; var k=h&&cmpKey(h); return cmpCell(i+1, h, !!(k&&rs[k])); }).join(''); }
+          if (!R.length) { rightEl.innerHTML = '<div class="cmp-empty-box">賽果未出（此場未完賽或未同步）</div>'; }
+          else { rightEl.innerHTML = [0,1,2,3].map(function(i){ var h=R[i]; var k=h&&cmpKey(h); return cmpCell(i+1, h, !!(k&&ls[k])); }).join(''); }
+        }
+        async function cmpLoadDate(date){
+          var raceSel = document.getElementById('cmpRace');
+          var status = document.getElementById('cmpStatus');
+          raceSel.innerHTML = '<option>載入中…</option>'; raceSel.disabled = true;
+          status.textContent = '載入 '+date+' 比對資料中…';
+          var myToken = ++_cmpToken;
+          try {
+            var data;
+            if (_cmpCache[date]) { data = _cmpCache[date]; }
+            else {
+              var res = await fetch('/admin/api/analyze/hit-rate?date='+encodeURIComponent(date)+'&refresh=1', { headers: { 'x-admin-token': TOKEN } });
+              data = await res.json();
+              if (!data || data.error) { throw new Error(data && data.error || 'fetch failed'); }
+              _cmpCache[date] = data;
+            }
+            if (myToken !== _cmpToken) return;
+            var races = (data.races||[]).slice().sort(function(a,b){ return (a.raceNumber||0)-(b.raceNumber||0); });
+            if (!races.length) {
+              raceSel.innerHTML = '<option>無場次</option>';
+              status.textContent = date+' · 無比對資料';
+              cmpRender([],[]);
+              return;
+            }
+            raceSel.innerHTML = races.map(function(r){
+              var lbl = 'R'+(r.raceNumber||'?')+(r.distance? ' · '+r.distance+'m':'')+(r.going? ' · '+r.going:'');
+              return '<option value="'+(r.raceNumber||'')+'">'+cmpEsc(lbl)+'</option>';
+            }).join('');
+            raceSel.disabled = false;
+            status.textContent = date+' · '+races.length+' 場';
+            cmpRenderRace(date, races[0].raceNumber);
+          } catch(e){
+            if (myToken !== _cmpToken) return;
+            raceSel.innerHTML = '<option>錯誤</option>';
+            status.textContent = '錯誤：'+e.message;
+            cmpRender([],[]);
+          }
+        }
+        function cmpRenderRace(date, raceNum){
+          var data = _cmpCache[date]; if (!data) return;
+          var race = (data.races||[]).find(function(r){ return String(r.raceNumber)===String(raceNum); });
+          if (!race) { cmpRender([],[]); return; }
+          cmpRender(race.predictedTop4||race.predictedTop3||[], race.actualTop4||race.actualTop3||[]);
+        }
+        function cmpInit(){
+          var dateSel = document.getElementById('cmpDate');
+          var raceSel = document.getElementById('cmpRace');
+          if (!dateSel || !raceSel) return;
+          var meets = (D && D.meetings && D.meetings.meetings) || [];
+          var today = (D.status && D.status.serverTime ? D.status.serverTime : new Date().toISOString()).substring(0,10);
+          var eligible = meets.filter(function(m){ return m.date < today && m.race_count > 0; });
+          if (!eligible.length) {
+            dateSel.innerHTML = '<option>無已完賽資料</option>';
+            return;
+          }
+          dateSel.innerHTML = eligible.map(function(m){
+            var v = m.venue==='ST'?'沙田':m.venue==='HV'?'跑馬地':(m.venue||'');
+            return '<option value="'+m.date+'">'+m.date+(v?' · '+v:'')+'</option>';
+          }).join('');
+          dateSel.onchange = function(){ cmpLoadDate(dateSel.value); };
+          raceSel.onchange = function(){ cmpRenderRace(dateSel.value, raceSel.value); };
+          cmpLoadDate(eligible[0].date);
+        }
+        window.cmpJumpTo = function(date){
+          var dateSel = document.getElementById('cmpDate');
+          if (!dateSel) return;
+          var found = Array.from(dateSel.options).some(function(o){ if (o.value===date){ dateSel.value=date; return true; } return false; });
+          if (found) { cmpLoadDate(date); var sec=document.getElementById('cmpSection'); if(sec) sec.scrollIntoView({behavior:'smooth',block:'start'}); }
+        };
+        if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', cmpInit);
+        else setTimeout(cmpInit, 0);
+
+  
 </script>
 </body></html>`;
 }
