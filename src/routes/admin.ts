@@ -2192,6 +2192,34 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
   scheduleReload();
         // ── 預測與賽果 (PREDICTION VS RESULT) ──────────────────────────────
         var _cmpToken = 0, _cmpCache = {};
+          var _CMP_LS_KEY = 'tx_cmp_cache_v1';
+          var _CMP_LS_MAX = 3; // 保留近 3 個賽事日比對資料
+          try {
+            var _raw = localStorage.getItem(_CMP_LS_KEY);
+            if (_raw) {
+              var _parsed = JSON.parse(_raw);
+              if (_parsed && typeof _parsed === 'object') {
+                Object.keys(_parsed).forEach(function(k){
+                  var v = _parsed[k];
+                  if (v && v.data) _cmpCache[k] = v.data;
+                });
+              }
+            }
+          } catch (_e) { /* ignore */ }
+          function _cmpPersist(date, data){
+            try {
+              var raw = localStorage.getItem(_CMP_LS_KEY);
+              var obj = raw ? JSON.parse(raw) : {};
+              if (!obj || typeof obj !== 'object') obj = {};
+              obj[date] = { data: data, ts: Date.now() };
+              // LRU: keep newest _CMP_LS_MAX by ts
+              var keys = Object.keys(obj).sort(function(a,b){ return (obj[b].ts||0) - (obj[a].ts||0); });
+              if (keys.length > _CMP_LS_MAX) {
+                keys.slice(_CMP_LS_MAX).forEach(function(k){ delete obj[k]; });
+              }
+              localStorage.setItem(_CMP_LS_KEY, JSON.stringify(obj));
+            } catch (_e) { /* quota/privacy errors ignored */ }
+          }
         function cmpEsc(s){ return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
         function cmpNorm(s){ return String(s==null?'':s).trim().toLowerCase(); }
         function cmpKey(h){
