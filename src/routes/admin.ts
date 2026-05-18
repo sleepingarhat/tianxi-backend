@@ -2021,7 +2021,6 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
         var res = await fetch('/admin/api/backfill-prediction-results', { method: 'POST' });
         var data = await res.json();
         statusEl.textContent = '回填完成：處理 ' + (data.daysProcessed||0) + ' 日，更新 ' + (data.totalUpdated||0) + ' 筆';
-        await loadPredictionAccuracy();
       } catch (e) {
         statusEl.textContent = '錯誤：' + e.message;
       }
@@ -2111,8 +2110,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
   safeRender('renderMeetings', renderMeetings);
   safeRender('loadHitRateRollup', loadHitRateRollup);
         safeRender('loadTodayPredictions', () => loadTodayPredictions(false));
-        safeRender('loadPredictionAccuracy', loadPredictionAccuracy);
-    safeRender('renderNextRaceDay', renderNextRaceDay);
+      safeRender('renderNextRaceDay', renderNextRaceDay);
   document.getElementById('refreshClock').textContent = '載入時間：' + new Date().toLocaleTimeString('zh-HK') + ' · 每 60 秒自動刷新';
   // Auto-reload page every 60s for fresh data — but skip while autoLoadHitChain is running
   // (chain takes ~4min serial for ~10 past meetings @ ~25s each; reload would interrupt it)
@@ -2172,7 +2170,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
             var data;
             if (_cmpCache[date]) { data = _cmpCache[date]; }
             else {
-              var res = await fetch('/admin/api/analyze/hit-rate?date='+encodeURIComponent(date)+'&refresh=1', { headers: { 'x-admin-token': TOKEN } });
+              var res = await fetch('/api/analyze/hit-rate?date='+encodeURIComponent(date)+'&refresh=1');
               data = await res.json();
               if (!data || data.error) { throw new Error(data && data.error || 'fetch failed'); }
               _cmpCache[date] = data;
