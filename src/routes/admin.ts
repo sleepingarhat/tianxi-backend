@@ -1636,8 +1636,8 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
     window._meetingHits[m.date] = 'loading';
     renderMeetings();
     try {
-      // refresh=1 invalidates pre-Stage7 cached payloads so we always get top-4 + reason fields.
-      const res = await fetch('/api/analyze/hit-rate?date=' + encodeURIComponent(m.date) + '&refresh=1');
+      // 用 server cache（已包含 top-4 + reason fields；過期 cache 已由 housekeeping 清咗）
+        const res = await fetch('/api/analyze/hit-rate?date=' + encodeURIComponent(m.date));
       const data = await res.json();
       if (data.error) {
         panel.innerHTML = '<div style="padding:10px;color:var(--red)">錯誤：' + data.error + '</div>';
@@ -2263,10 +2263,12 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
             var data;
             if (_cmpCache[date]) { data = _cmpCache[date]; }
             else {
-              var res = await fetch('/api/analyze/hit-rate?date='+encodeURIComponent(date)+'&refresh=1');
-              data = await res.json();
-              if (!data || data.error) { throw new Error(data && data.error || 'fetch failed'); }
-              _cmpCache[date] = data;
+              // 用 server-side cache (meeting_hit_rate_cache)；唔再加 refresh=1
+                var res = await fetch('/api/analyze/hit-rate?date='+encodeURIComponent(date));
+                data = await res.json();
+                if (!data || data.error) { throw new Error(data && data.error || 'fetch failed'); }
+                _cmpCache[date] = data;
+                _cmpPersist(date, data);
             }
             if (myToken !== _cmpToken) return;
             var races = (data.races||[]).slice().sort(function(a,b){ return (a.raceNumber||0)-(b.raceNumber||0); });
