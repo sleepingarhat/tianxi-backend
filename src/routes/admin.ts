@@ -584,7 +584,83 @@ adminRoutes.get('/api/seed-missing-jockey-elo', async (c) => {
     trainers: { total: tTotal, withoutSnapshot: tMissing },
   });
 });
-adminRoutes.get('/api/jockey-elo-debug', async (c) => {
+// ── /api/sql-read — read-only SELECT for diagnostics ────────────────────
+  // Body: { sql: 'SELECT ...' }  (single SELECT, no semicolons in middle)
+  // Returns: { rows: [...], rowCount }
+  adminRoutes.post('/api/sql-read', async (c) => {
+    try {
+      const body = await c.req.json<{ sql?: string }>();
+      const sql = (body?.sql ?? '').trim();
+      if (!sql) return c.json({ error: 'sql body required' }, 400);
+      if (!/^select\s/i.test(sql)) return c.json({ error: 'SELECT only' }, 400);
+      // disallow multi-statement (allow only optional trailing semicolon)
+      const stripped = sql.replace(/;+\s*$/, '');
+      if (stripped.includes(';')) return c.json({ error: 'single statement only' }, 400);
+      const { results } = await c.env.DB.prepare(stripped).all<any>();
+      const rows = results ?? [];
+      return c.json({ rows: rows.slice(0, 500), rowCount: rows.length, truncated: rows.length > 500 });
+    } catch (err: any) {
+      return c.json({ error: 'sql_read_failed', message: String(err?.message ?? err) }, 500);
+    }
+  });
+
+  // ── /api/cleanup-duplicate-meetings — delete stale race_meetings rows ──
+  // For each date with multiple race_meetings rows, keeps the one with the most
+  // linked races (canonical) and deletes the rest. Cascades to remove orphan
+  // races/race_results via the FK (assumed ON DELETE CASCADE). Idempotent.
+  adminRoutes.post('/api/cleanup-duplicate-meetings', async (c) => {
+    const dryRun = c.req.query('dry') === '1';
+    try {
+      const { results: stale } = await c.env.DB.prepare(`
+        WITH ranked AS (
+          SELECT
+            m.id, m.date, m.venue,
+            COUNT(r.id) AS race_count,
+            ROW_NUMBER() OVER (
+              PARTITION BY m.date
+              ORDER BY COUNT(r.id) DESC, m.id DESC
+            ) AS rn
+          FROM race_meetings m
+          LEFT JOIN races r ON r.meeting_id = m.id
+          GROUP BY m.id
+        )
+        SELECT id, date, venue, race_count FROM ranked WHERE rn > 1
+      `).all<any>();
+
+      const staleRows = stale ?? [];
+      if (staleRows.length === 0) {
+        return c.json({ ok: true, message: 'no duplicates found', stale: [] });
+      }
+      if (dryRun) {
+        return c.json({ ok: true, dryRun: true, wouldDelete: staleRows });
+      }
+
+      // Cascade delete: first race_results (via race ids), then races, then meetings.
+      const ids = staleRows.map((r: any) => r.id);
+      const inList = ids.map(() => '?').join(',');
+      const deletedResults = await c.env.DB.prepare(
+        `DELETE FROM race_results WHERE race_id IN (SELECT id FROM races WHERE meeting_id IN (${inList}))`
+      ).bind(...ids).run();
+      const deletedRaces = await c.env.DB.prepare(
+        `DELETE FROM races WHERE meeting_id IN (${inList})`
+      ).bind(...ids).run();
+      const deletedMeetings = await c.env.DB.prepare(
+        `DELETE FROM race_meetings WHERE id IN (${inList})`
+      ).bind(...ids).run();
+
+      return c.json({
+        ok: true,
+        deletedMeetings: deletedMeetings.meta.changes ?? 0,
+        deletedRaces: deletedRaces.meta.changes ?? 0,
+        deletedResults: deletedResults.meta.changes ?? 0,
+        stale: staleRows,
+      });
+    } catch (err: any) {
+      return c.json({ error: 'cleanup_failed', message: String(err?.message ?? err) }, 500);
+    }
+  });
+
+  adminRoutes.get('/api/jockey-elo-debug', async (c) => {
   const name = c.req.query('name');
   if (!name) return c.json({ error: 'name query param required' }, 400);
   const db = c.env.DB;
