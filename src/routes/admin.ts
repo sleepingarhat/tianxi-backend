@@ -1356,7 +1356,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
       .cmp-rank{font-weight:700;color:var(--mut);font-variant-numeric:tabular-nums;text-align:center}
       .cmp-name{font-weight:600}
       .cmp-name .num{color:var(--mut);font-weight:500;margin-right:4px}
-      .cmp-draw{font-size:11px;color:var(--mut);background:#f3f1ec;padding:2px 6px;border-radius:3px;white-space:nowrap}
+      .cmp-odds,.cmp-draw{font-size:11px;color:var(--mut);background:#f3f1ec;padding:2px 6px;border-radius:3px;white-space:nowrap}
       .cmp-cell.match .cmp-draw{background:#f7e9b5;color:#7A5A20}
       .cmp-empty-box{padding:18px;text-align:center;color:var(--mut);font-size:12px}
       .cmp-status{font-size:11px;color:var(--mut);margin-left:auto}
@@ -2192,7 +2192,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
   scheduleReload();
         // ── 預測與賽果 (PREDICTION VS RESULT) ──────────────────────────────
         var _cmpToken = 0, _cmpCache = {};
-          var _CMP_LS_KEY = 'tx_cmp_cache_v1';
+          var _CMP_LS_KEY = 'tx_cmp_cache_v2';
           var _CMP_LS_MAX = 3; // 保留近 3 個賽事日比對資料
           try {
             var _raw = localStorage.getItem(_CMP_LS_KEY);
