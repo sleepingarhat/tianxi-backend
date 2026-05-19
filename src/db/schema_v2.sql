@@ -439,3 +439,20 @@ SELECT
   END AS is_transition
 FROM horse_form_records
 WHERE trainer_name IS NOT NULL;
+
+-- ── LGB pre-computed predictions (Stage 7, 2026-05-19) ──────────────────
+-- Populated nightly by the LGB predict-upcoming GH workflow (Phase B).
+-- analyze.ts reads lgb_score and uses it as primary ranking signal when present;
+-- if a race has no row here, falls back to the existing ELO + factor composite.
+-- Designed as an additive, non-breaking layer.
+CREATE TABLE IF NOT EXISTS lgb_predictions (
+  race_id       TEXT NOT NULL,
+  horse_id      TEXT NOT NULL,
+  lgb_score     REAL NOT NULL,
+  p_win         REAL,
+  model_version TEXT,
+  created_at    TEXT DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (race_id, horse_id)
+);
+CREATE INDEX IF NOT EXISTS idx_lgbp_race ON lgb_predictions(race_id);
+CREATE INDEX IF NOT EXISTS idx_lgbp_created ON lgb_predictions(created_at DESC);
