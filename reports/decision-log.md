@@ -447,3 +447,28 @@
 
   明天 2026-05-20 HV 賽馬日，prod 已 ready。
   
+
+  ---
+
+  ## 2026-05-19 · Phantom meeting row defence (commit 9ad99d0)
+
+  **Trigger**: User reported /schedule/ page showed two cards for 2026-05-20 — phantom `2026-05-20_ST` (total_races=1, track="好地至黏地") + real `2026-05-20_HV` (total_races=NULL → UI fallback rendered as "排位 233 匹" from entries_upcoming count instead of race count).
+
+  **Root causes**:
+  1. Phantom `race_meetings` row `2026-05-20_ST` exists in D1 (1 corresponding `races` row also exists). Likely written historically by `scrape-results.ts` which blindly INSERTs whatever HKJC returned for the (date, venue) query.
+  2. Real `2026-05-20_HV` row has `total_races=NULL` because `races` table not yet populated (race day tomorrow, only `entries_upcoming` filled).
+  3. `/api/meetings` returned `total_races=m.total_races` directly, no fallback to entries_upcoming distinct race count.
+
+  **Fix B (治本 — defensive, this commit)**:
+  1. `src/routes/meetings.ts`: COALESCE `total_races` to `(SELECT COUNT(DISTINCT race_number) FROM entries_upcoming WHERE race_date=m.date AND venue=m.venue)`. Also adds WHERE filter to hide meetings that have neither a non-null total_races nor any entries_upcoming row (future phantoms with all-NULL meta won't surface).
+  2. `scripts/scrape-racecard.ts`: pre-INSERT guard. Before `upsertMeeting.run(...)`, runs UNION ALL check on entries_upcoming + race_meetings. If neither has evidence, logs `[scrape-racecard] SKIP phantom meeting <id>` and `return` from the transaction callback (no insert).
+  3. `scripts/scrape-results.ts`: blind `INSERT INTO race_meetings VALUES ... ON CONFLICT` → `INSERT INTO race_meetings ... SELECT ... WHERE EXISTS (entries_upcoming) OR EXISTS (race_meetings) ON CONFLICT`. `entries_upcoming` is retained for past dates so post-race ingest continues to work.
+
+  **Verified live (commit 9ad99d0 deployed)**:
+  - `GET /api/meetings` for 2026-05-20_HV now returns `totalRaces: 10` (was `null`). UI no longer falls back to wrong "排位 N 匹" display.
+  - 2026-05-20_ST phantom still surfaces because `total_races=1` is non-null (filter only hides all-NULL phantoms). User opted out of destructive cleanup A (`DELETE FROM race_meetings WHERE id='2026-05-20_ST'`).
+
+  **Fix A (治表 — not applied)**: Manual `DELETE FROM race_meetings WHERE id='2026-05-20_ST'` + cascade-clean its 1 races row still needed for full UI fix. User chose to defer.
+
+  **Future scrapes**: next time `scrape-racecard.ts` or `scrape-results.ts` is invoked for a (date, venue) with no entries_upcoming evidence, it will SKIP and log. Phantom rows can no longer be created from those two ingest paths. `import-csv.ts` (bulk historical import) intentionally not guarded.
+  
