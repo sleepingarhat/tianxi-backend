@@ -57,7 +57,7 @@ jobs:
         run: npm ci
 
       - name: Install python deps
-        run: pip install --quiet lightgbm pandas numpy
+        run: pip install --quiet lightgbm pandas numpy scikit-learn
 
       - name: Compute data signature (cache key — must match lgb_walkforward.yml)
         id: sig
