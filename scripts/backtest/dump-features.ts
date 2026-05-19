@@ -324,17 +324,26 @@
   function classToNum(c: string | null | undefined): number | null {
     if (!c) return null;
     const s = String(c).trim();
+    // English
     let m = s.match(/Class\s*(\d+)/i);
     if (m) return parseInt(m[1], 10);
     if (/griffin/i.test(s)) return 6;
     m = s.match(/Group\s*(\d+)/i);
     if (m) return -parseInt(m[1], 10);
-    // Chinese variants
-    m = s.match(/第\s*(\d+)\s*班/);
-    if (m) return parseInt(m[1], 10);
-    if (/國際一級/.test(s)) return -1;
-    if (/國際二級/.test(s)) return -2;
-    if (/國際三級/.test(s)) return -3;
+    // Chinese variants — both Arabic ("第4班") and Chinese ("第四班") digits.
+    const cnDigit: Record<string, number> = { '一':1, '二':2, '兩':2, '三':3, '四':4, '五':5, '六':6, '七':7, '八':8, '九':9, '十':10 };
+    m = s.match(/第\s*([0-9一二三四五六七八九十兩])\s*班/);
+    if (m) {
+      const d = m[1];
+      if (/\d/.test(d)) return parseInt(d, 10);
+      if (d in cnDigit) return cnDigit[d];
+    }
+    // 新馬 = griffin/new horses
+    if (/新馬|無評分|0班/.test(s)) return 6;
+    // 國際/Group equivalents
+    if (/國際一級|一級賽/.test(s)) return -1;
+    if (/國際二級|二級賽/.test(s)) return -2;
+    if (/國際三級|三級賽/.test(s)) return -3;
     return null;
   }
 
