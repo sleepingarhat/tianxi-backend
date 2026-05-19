@@ -443,6 +443,96 @@ adminRoutes.get('/api/coverage', async (c) => {
   return c.json({ datasets, factors, checkedAt: new Date().toISOString() });
 });
 
+  // ── /api/feature-audit ─ Coverage stats for the 5 candidate ML features
+  adminRoutes.get('/api/feature-audit', async (c) => {
+    const db = c.env.DB;
+    const [
+      rrTotal, rrRunPos, rrFinTime, rrClass,
+      twTotal, twTimeSec, twTimeText,
+      racesTotal, racesClass,
+      formTotal, formClass, formRunPos, formFinTime, formPos, formDate,
+      classChangeHorses, classChangeRecords,
+      paceCoverage90d,
+    ] = await Promise.all([
+      scalar<number>(db, `SELECT COUNT(*) FROM race_results`),
+      scalar<number>(db, `SELECT COUNT(*) FROM race_results WHERE running_position IS NOT NULL AND running_position != ''`),
+      scalar<number>(db, `SELECT COUNT(*) FROM race_results WHERE finish_time IS NOT NULL`),
+      scalar<number>(db, `SELECT COUNT(*) FROM race_results rr JOIN races r ON r.id=rr.race_id WHERE r.class IS NOT NULL AND r.class != ''`),
+      scalar<number>(db, `SELECT COUNT(*) FROM horse_trackwork`),
+      scalar<number>(db, `SELECT COUNT(*) FROM horse_trackwork WHERE time_sec IS NOT NULL`),
+      scalar<number>(db, `SELECT COUNT(*) FROM horse_trackwork WHERE time_text IS NOT NULL AND time_text != ''`),
+      scalar<number>(db, `SELECT COUNT(*) FROM races`),
+      scalar<number>(db, `SELECT COUNT(*) FROM races WHERE class IS NOT NULL AND class != ''`),
+      scalar<number>(db, `SELECT COUNT(*) FROM horse_form_records`),
+      scalar<number>(db, `SELECT COUNT(*) FROM horse_form_records WHERE race_class IS NOT NULL AND race_class != ''`),
+      scalar<number>(db, `SELECT COUNT(*) FROM horse_form_records WHERE running_position IS NOT NULL AND running_position != ''`),
+      scalar<number>(db, `SELECT COUNT(*) FROM horse_form_records WHERE finish_time_sec IS NOT NULL`),
+      scalar<number>(db, `SELECT COUNT(*) FROM horse_form_records WHERE finishing_position_num IS NOT NULL AND finishing_position_num > 0 AND finishing_position_num < 99`),
+      scalar<number>(db, `SELECT COUNT(*) FROM horse_form_records WHERE race_date IS NOT NULL`),
+      // horses that have ≥2 distinct race_class values in form_records → class-change feature feasible
+      scalar<number>(db, `SELECT COUNT(*) FROM (SELECT horse_id FROM horse_form_records WHERE race_class IS NOT NULL AND race_class != '' GROUP BY horse_id HAVING COUNT(DISTINCT race_class) >= 2)`),
+      scalar<number>(db, `SELECT COUNT(*) FROM horse_form_records WHERE race_class IS NOT NULL AND race_class != ''`),
+      // pace coverage on recent 90 days of race_results
+      scalar<number>(db, `SELECT COUNT(*) FROM race_results rr JOIN races r ON r.id=rr.race_id JOIN race_meetings m ON m.id=r.meeting_id WHERE m.date >= date('now','-90 day') AND rr.running_position IS NOT NULL AND rr.running_position != ''`),
+    ]);
+
+    const pct = (n: number, d: number) => d > 0 ? Math.round((n/d)*1000)/10 : 0;
+
+    return c.json({
+      generatedAt: new Date().toISOString(),
+      feature_data_availability: {
+        '1_pace_running_position': {
+          source: 'race_results.running_position',
+          total_rows: rrTotal,
+          populated_rows: rrRunPos,
+          coverage_pct: pct(rrRunPos, rrTotal),
+          recent_90d_populated: paceCoverage90d,
+          also_in_horse_form_records: formRunPos,
+          notes: 'Format: "2-2-1-1" (sectional positions). HK fields max 14 → strong pace-clash signal.',
+        },
+        '2_trackwork_time': {
+          source: 'horse_trackwork.time_sec',
+          total_rows: twTotal,
+          normalized_sec_rows: twTimeSec,
+          any_time_text_rows: twTimeText,
+          sec_coverage_pct: pct(twTimeSec, twTotal),
+          text_coverage_pct: pct(twTimeText, twTotal),
+          notes: 'time_sec is normalized from "0.36.8" style; rows w/ "slow"/"easy" text remain NULL.',
+        },
+        '3_top4_anti_cannibalization': {
+          source: 'selection-time algorithm (not data dependent)',
+          feasible: true,
+          notes: 'Pure post-ranking diversification — needs (1) pace style + (5) trainer/jockey to penalize duplicates.',
+        },
+        '4_class_change': {
+          source: 'races.class + horse_form_records.race_class',
+          races_total: racesTotal,
+          races_with_class: racesClass,
+          races_class_pct: pct(racesClass, racesTotal),
+          form_records_total: formTotal,
+          form_records_with_class: formClass,
+          form_class_pct: pct(formClass, formTotal),
+          horses_with_class_change: classChangeHorses,
+          notes: 'Needs current race class (races.class) + horse last race class (form_records.race_class) → delta.',
+        },
+        '5_ml_ensemble_lgbm': {
+          source: 'LGB Stage 3 walkforward already implemented',
+          feasible: true,
+          notes: 'scripts/backtest/lgb_walkforward.py + dump-features.ts exist. Last run 2026-05-08: Top1 21.6% vs ELO 17.0% on 1299 races.',
+        },
+      },
+      raw: {
+        race_results: { total: rrTotal, with_running_position: rrRunPos, with_finish_time: rrFinTime, joined_with_class: rrClass },
+        horse_trackwork: { total: twTotal, with_time_sec: twTimeSec, with_time_text: twTimeText },
+        races: { total: racesTotal, with_class: racesClass },
+        horse_form_records: {
+          total: formTotal, with_class: formClass, with_running_position: formRunPos,
+          with_finish_time_sec: formFinTime, with_finishing_position: formPos, with_date: formDate,
+        },
+      },
+    });
+  });
+
 // ── /api/alerts (unchanged) ──
 adminRoutes.get('/api/alerts', async (c) => {
   const db = c.env.DB;
