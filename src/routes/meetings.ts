@@ -13,7 +13,20 @@ meetingsRoutes.get('/', async (c) => {
   const limit = parseInt(c.req.query('limit') || '20');
   const offset = parseInt(c.req.query('offset') || '0');
 
-  let sql = 'SELECT * FROM race_meetings WHERE 1=1';
+  // FIX 2026-05-20 dup-row bug: (a) COALESCE total_races fallback to entries_upcoming
+  // distinct race count for upcoming meetings whose races aren't populated yet;
+  // (b) hide phantom meetings with neither races nor entries (legacy dirty data).
+  let sql =
+    'SELECT m.id, m.date, m.venue, m.track_condition, m.weather, ' +
+    '  COALESCE(m.total_races, ' +
+    '    (SELECT COUNT(DISTINCT race_number) FROM entries_upcoming ' +
+    '     WHERE race_date = m.date AND venue = m.venue) ' +
+    '  ) AS total_races ' +
+    'FROM race_meetings m WHERE 1=1 ' +
+    'AND ( ' +
+    '  m.total_races IS NOT NULL ' +
+    '  OR EXISTS (SELECT 1 FROM entries_upcoming WHERE race_date = m.date AND venue = m.venue) ' +
+    ')';
   const params: unknown[] = [];
 
   if (from) {

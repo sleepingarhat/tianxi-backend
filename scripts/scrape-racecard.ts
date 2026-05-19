@@ -164,6 +164,20 @@
     let deleted = 0;
     let inserted = 0;
 
+    // Guard against phantom meetings: only persist race_meetings row if there is
+    // evidence (entries_upcoming row OR existing race_meetings row). HKJC racecard
+    // endpoints occasionally returned stale/wrong venues, which created rows like
+    // 2026-05-20_ST when only HV was actually racing that day.
+    const hasEvidence = db.prepare(
+      `SELECT 1 FROM entries_upcoming WHERE race_date = ? AND venue = ? LIMIT 1
+         UNION ALL
+       SELECT 1 FROM race_meetings    WHERE date      = ? AND venue = ? LIMIT 1`,
+    ).get(meetingDate, venueCode, meetingDate, venueCode);
+    if (!hasEvidence) {
+      console.warn(`[scrape-racecard] SKIP phantom meeting ${meetingDate}_${venueCode} — no entries_upcoming or existing race_meetings row`);
+      return;
+    }
+
     const tx = db.transaction(() => {
       upsertMeeting.run(`${meetingDate}_${venueCode}`, meetingDate, venueCode);
 

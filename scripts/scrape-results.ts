@@ -291,9 +291,15 @@ async function main() {
 
   // race_meetings: never regress total_races (MAX of existing vs new)
   const firstGoing = parsed[0].header.going;
+  // Guard against phantom meetings: only persist race_meetings if there is prior
+  // evidence (entries_upcoming row OR existing race_meetings row). entries_upcoming
+  // is retained for past dates so post-race ingestion still works; pure phantom
+  // dates from stale HKJC results scrape have neither and get silently no-op'd.
   sql.push(
     `INSERT INTO race_meetings (id, date, venue, track_condition, total_races) ` +
-    `VALUES (${esc(meetingId)}, ${esc(a.date)}, ${esc(a.venue)}, ${esc(firstGoing)}, ${parsed.length}) ` +
+    `SELECT ${esc(meetingId)}, ${esc(a.date)}, ${esc(a.venue)}, ${esc(firstGoing)}, ${parsed.length} ` +
+    `WHERE EXISTS (SELECT 1 FROM entries_upcoming WHERE race_date = ${esc(a.date)} AND venue = ${esc(a.venue)}) ` +
+    `   OR EXISTS (SELECT 1 FROM race_meetings    WHERE date      = ${esc(a.date)} AND venue = ${esc(a.venue)}) ` +
     `ON CONFLICT(date, venue) DO UPDATE SET ` +
     `total_races = MAX(COALESCE(race_meetings.total_races, 0), excluded.total_races), ` +
     `track_condition = COALESCE(race_meetings.track_condition, excluded.track_condition);`
