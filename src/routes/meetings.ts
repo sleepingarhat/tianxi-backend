@@ -20,7 +20,7 @@ meetingsRoutes.get('/', async (c) => {
     'SELECT m.id, m.date, m.venue, m.track_condition, m.weather, ' +
     '  COALESCE(m.total_races, ' +
     '    (SELECT COUNT(DISTINCT race_number) FROM entries_upcoming ' +
-    '     WHERE race_date = m.date AND venue = m.venue) ' +
+    '     WHERE race_date = m.date AND venue = m.venue AND race_number > 0) ' +
     '  ) AS total_races ' +
     'FROM race_meetings m WHERE 1=1 ' +
     'AND ( ' +
