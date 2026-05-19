@@ -400,10 +400,12 @@
       // assigned to a numbered race. Predicting that pool as one big race is
       // meaningless — scores would diffuse across 100+ unrelated horses.)
       if (!e.race_number || Number(e.race_number) < 1) continue;
-      // Synthesize a race_id when D1 hasn't assigned one yet:
-      // YYYYMMDD_VENUE_R<n>  (matches our prod race_id naming convention).
-      const dateCompact = String(e.race_date || '').replace(/-/g, '');
-      const synthId = `${dateCompact}_${e.venue}_R${e.race_number}`;
+      // Synthesize a race_id when D1 hasn't assigned one yet.
+      // Format MUST match scripts/import-csv.ts raceId():
+      //   race_<YYYY-MM-DD>_<VENUE>_<raceNo>   (NO 'R' prefix, hyphenated date)
+      // so analyze.ts can JOIN by synth id for upcoming races whose races row
+      // is created later by import-csv with the same key.
+      const synthId = `race_${e.race_date}_${e.venue}_${e.race_number}`;
       const raceId: string = e.race_id || synthId;
       if (!metaByKey.has(raceId)) {
         metaByKey.set(raceId, {
