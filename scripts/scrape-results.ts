@@ -305,13 +305,16 @@ async function main() {
     `track_condition = COALESCE(race_meetings.track_condition, excluded.track_condition);`
   );
 
+  // Gate races INSERT on meeting row existence (race_meetings INSERT above is itself
+  // guarded by WHERE EXISTS, so if the meeting was skipped as phantom, races are too).
   for (const p of parsed) {
     const raceId = `race_${a.date}_${a.venue}_${p.header.race_number}`;
     sql.push(
       `INSERT OR REPLACE INTO races (id, meeting_id, race_number, title, class, distance, going, track, course, prize) ` +
-      `VALUES (${esc(raceId)}, ${esc(meetingId)}, ${p.header.race_number}, ${esc(p.header.title)}, ` +
+      `SELECT ${esc(raceId)}, ${esc(meetingId)}, ${p.header.race_number}, ${esc(p.header.title)}, ` +
       `${esc(p.header.klass)}, ${p.header.distance ?? 'NULL'}, ${esc(p.header.going)}, ` +
-      `${esc(p.header.track)}, ${esc(p.header.course)}, ${esc(p.header.prize)});`
+      `${esc(p.header.track)}, ${esc(p.header.course)}, ${esc(p.header.prize)} ` +
+      `WHERE EXISTS (SELECT 1 FROM race_meetings WHERE id = ${esc(meetingId)});`
     );
   }
 
@@ -324,12 +327,13 @@ async function main() {
         `INSERT OR REPLACE INTO race_results ` +
         `(id, race_id, horse_id, horse_number, finishing_position, draw, jockey_id, trainer_id, ` +
         `actual_weight, declared_weight, lbw, running_position, finish_time, win_odds) ` +
-        `VALUES (${esc(resultId)}, ${esc(raceId)}, ${esc(r.horse_id)}, ${r.horse_number}, ` +
+        `SELECT ${esc(resultId)}, ${esc(raceId)}, ${esc(r.horse_id)}, ${r.horse_number}, ` +
         `${r.finishing_position}, ${r.draw ?? 'NULL'}, ` +
         `${esc(r.jockey_name ? `jockey_${r.jockey_name}` : null)}, ` +
         `${esc(r.trainer_name ? `trainer_${r.trainer_name}` : null)}, ` +
         `${r.actual_weight ?? 'NULL'}, ${r.declared_weight ?? 'NULL'}, ` +
-        `${esc(r.lbw)}, ${esc(r.running_position)}, ${r.finish_time ?? 'NULL'}, ${r.win_odds ?? 'NULL'});`
+        `${esc(r.lbw)}, ${esc(r.running_position)}, ${r.finish_time ?? 'NULL'}, ${r.win_odds ?? 'NULL'} ` +
+        `WHERE EXISTS (SELECT 1 FROM races WHERE id = ${esc(raceId)});`
       );
     }
   }
