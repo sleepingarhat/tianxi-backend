@@ -272,13 +272,30 @@
        ORDER BY rm.date DESC LIMIT 8`);
 
     // ── Stage 6 (NEW): class change — last race_class for horse ────────────
-    // horse_form_records.race_class is text like "Class 4", "Class 1", "Griffin", "Group 3".
-    const qLastClass = db.prepare(`
-      SELECT race_class AS rc
+    // horse_form_records.race_class is text. Format varies:
+    //   - bare digit "4"  (from form_records CSV col 9)
+    //   - "Class 4"       (older formats)
+    //   - "第四班"        (Chinese narrative)
+    //   - "Griffin"/"Group 1"
+    // Date format in form_records is DD/MM/YYYY (e.g. "01/01/2019"), NOT ISO YYYY-MM-DD.
+    // String compare against meta.date (YYYY-MM-DD) would be nonsense, so we fetch ALL
+    // prior records and sort in JS using normalized dates.
+    const qAllClassHistory = db.prepare(`
+      SELECT race_class AS rc, race_date AS dt
         FROM horse_form_records
-       WHERE horse_id = ? AND race_date < ?
+       WHERE horse_id = ?
          AND race_class IS NOT NULL AND race_class != ''
-       ORDER BY race_date DESC LIMIT 1`);
+         AND race_date IS NOT NULL AND race_date != ''`);
+    // Normalize date: accept DD/MM/YYYY → YYYY-MM-DD; pass through ISO.
+    function normDate(s: string): string | null {
+      if (!s) return null;
+      const t = s.trim();
+      const ddmm = t.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
+      if (ddmm) return `${ddmm[3]}-${ddmm[2].padStart(2,'0')}-${ddmm[1].padStart(2,'0')}`;
+      const iso = t.match(/^(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})$/);
+      if (iso) return `${iso[1]}-${iso[2].padStart(2,'0')}-${iso[3].padStart(2,'0')}`;
+      return null;
+    }
 
   
   // ── Bonus helpers (verbatim) ────────────────────────────────────────────
@@ -324,6 +341,8 @@
   function classToNum(c: string | null | undefined): number | null {
     if (!c) return null;
     const s = String(c).trim();
+    // Bare digit (form_records col 9 stores "4" not "Class 4" / "第四班")
+    if (/^[1-9]$/.test(s)) return parseInt(s, 10);
     // English
     let m = s.match(/Class\s*(\d+)/i);
     if (m) return parseInt(m[1], 10);
@@ -499,9 +518,21 @@
       else if (pace.style === 3) paceClash = Math.max(0, 2 - raceNClosers); // few closers = +1/+2
       else if (pace.style === 2) paceClash = 0;
       // horse_form_records.horse_id = horses.code (A001), but race_results.horse_id is prefixed (horse_A001). Bridge.
+      // Also: form_records.race_date is DD/MM/YYYY → fetch all + sort in JS using normDate.
       const horseCode = bridgeId('horse', r.horse_id);
-      const lastClassRow = horseCode ? qLastClass.get(horseCode, meta.date) as { rc: string | null } | undefined : undefined;
-      const lastClassNum = classToNum(lastClassRow?.rc ?? null);
+      let lastClassRaw: string | null = null;
+      if (horseCode) {
+        const hist = qAllClassHistory.all(horseCode) as { rc: string | null; dt: string }[];
+        let bestIso = '';
+        for (const h of hist) {
+          const iso = normDate(h.dt);
+          if (iso && iso < meta.date && iso > bestIso) {
+            bestIso = iso;
+            lastClassRaw = h.rc;
+          }
+        }
+      }
+      const lastClassNum = classToNum(lastClassRaw);
       const classDelta = (classNowNum != null && lastClassNum != null) ? (lastClassNum - classNowNum) : null;
 
       const row = [
