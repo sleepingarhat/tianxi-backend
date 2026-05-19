@@ -2133,22 +2133,40 @@ analyzeRoutes.get('/factors', (c) => {
             const computedConf = hRead?.confidence != null ? Math.round(hRead.confidence*100)/100 : (seedConfidence != null ? seedConfidence : null);
             return { horseId, horseNumber: e.horse_number, nameCh: e.name_ch, nameEn: e.name_en, jockeyCh: e.jockey_name, trainerCh: e.trainer_name, draw: e.draw, declaredWeight: e.declared_weight, rating: e.rating, horseElo: hElo != null ? Math.round(hElo*10)/10 : null, jockeyElo: jElo != null ? Math.round(jElo*10)/10 : null, trainerElo: tElo != null ? Math.round(tElo*10)/10 : null, eloComposite: eloComposite != null ? Math.round(eloComposite*10)/10 : null, eloEngine: hRead?.engine ?? engine, eloSource, horseConfidence: computedConf, horseConfWeightFactor: Math.round(horseConfFactor*100)/100, horseFrozen: hRead?.isFrozen ?? false, horseRetired: hRead?.isRetired ?? false, factorBonus: Math.round(factorBonus*10)/10, factorBreakdown, finalScore: finalScore != null ? Math.round(finalScore*10)/10 : null, daysSinceLast: daysSince, _score: base + factorBonus / 100 };
           });
-          // Stage 7: when LGB pre-computed score exists, override _score before softmax.
-          // Falls back per-horse to ELO+factor _score when LGB missing for a runner.
-          let raceHasLgb = false;
-          for (const s of enriched as any[]) {
-            const lgb = s.horseId ? lgbScoreByRaceHorse.get(`${lgbLookupRaceId}::${s.horseId}`) : undefined;
-            if (lgb && Number.isFinite(lgb.score)) {
-              s._score = lgb.score;
-              s.lgbScore = Math.round(lgb.score * 1000) / 1000;
-              s.scoreSource = 'lgb';
-              s.lgbModelVersion = lgb.modelVersion;
-              raceHasLgb = true;
-            } else {
-              s.scoreSource = 'elo+factor';
+          // Stage 7: race-level ALL-OR-NOTHING LGB (architect review 2026-05-19).
+            // Mixed-scale softmax (LGB margin + ELO base) isn't calibrated → distorts probs.
+            // Also rewrites finalScore so qimen variant + prediction_log are consistent.
+            let raceHasLgb = false;
+            let lgbModelVerForRace: string | null = null;
+            let lgbHits = 0;
+            for (const s of enriched as any[]) {
+              const lgb = s.horseId ? lgbScoreByRaceHorse.get(`${lgbLookupRaceId}::${s.horseId}`) : undefined;
+              if (lgb && Number.isFinite(lgb.score)) {
+                (s as any).__lgb = lgb;
+                lgbHits++;
+                if (!lgbModelVerForRace) lgbModelVerForRace = lgb.modelVersion;
+              }
             }
-          }
-          const expScores = enriched.map((s) => Math.exp(s._score));
+            const allHaveLgb = lgbHits > 0 && lgbHits === (enriched as any[]).length;
+            if (allHaveLgb) raceHasLgb = true;
+            for (const s of enriched as any[]) {
+              const lgb = (s as any).__lgb;
+              delete (s as any).__lgb;
+              if (allHaveLgb && lgb) {
+                s._score = lgb.score;
+                s.lgbScore = Math.round(lgb.score * 1000) / 1000;
+                s.lgbModelVersion = lgb.modelVersion;
+                s.scoreSource = 'lgb';
+                s.finalScore = Math.round((1500 + lgb.score * 100) * 10) / 10;
+              } else {
+                s.scoreSource = lgb ? 'elo+factor (partial-lgb-skipped)' : 'elo+factor';
+                if (lgb) {
+                  s.lgbScore = Math.round(lgb.score * 1000) / 1000;
+                  s.lgbModelVersion = lgb.modelVersion;
+                }
+              }
+            }
+            const expScores = enriched.map((s) => Math.exp(s._score));
           const Z = expScores.reduce((a, b) => a + b, 0) || 1;
           const picks = enriched.map((s, i) => { const { _score, ...rest } = s as any; return { ...rest, pWin: Math.round((expScores[i]/Z)*1000)/1000, pTop3: Math.round(Math.min((expScores[i]/Z)*3,0.99)*1000)/1000 }; });
           picks.sort((a: any, b: any) => b.pWin - a.pWin);
