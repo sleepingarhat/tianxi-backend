@@ -1593,7 +1593,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
 
     <h2>即日賽事 R5 預測</h2>
     <div class="actions-row">
-      <button class="tp-run" id="btnTodayPredict" onclick="loadTodayPredictions(false)">▶ 載入即日賽事預測報告（R5 · ELO + 檔位 + 負磅）</button>
+      <button class="tp-run" id="btnTodayPredict" onclick="loadTodayPredictions(false)">▶ 載入即日賽事預測報告（LGB lambdarank · ELO + 檔位 + 負磅）</button>
       <span id="todayPredictStatus" style="font-size:12px;color:var(--mut)"></span>
     </div>
     <div id="todayPredictResults"></div>
@@ -2283,6 +2283,21 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
     function renderTodayPredictions(data) {
       var el = document.getElementById('todayPredictResults');
       if (!el) return;
+      // Model badge — surfaces the actual engine version + LGB coverage so it is
+      // visible at a glance which model produced the predictions.
+      var statusEl = document.getElementById('todayPredictStatus');
+      if (statusEl) {
+        var mv = data.lgbModelVersion || '(none)';
+        var cov = data.lgbCoverage || {};
+        var covTxt = (cov.rows != null) ? (cov.rows + ' rows') : 'no coverage';
+        var anyLgb = (data.races || []).some(function(r){ return r.scoreSource === 'lgb'; });
+        var allLgb = (data.races || []).length > 0 && (data.races || []).every(function(r){ return r.scoreSource === 'lgb'; });
+        var badge = allLgb ? '✓ LGB applied to ALL races'
+                : anyLgb ? '◑ LGB applied to SOME races (fallback elsewhere)'
+                : '○ LGB fallback — using ELO + factor only';
+        var color = allLgb ? 'var(--green)' : anyLgb ? '#c80' : 'var(--mut)';
+        statusEl.innerHTML = '<span style="color:var(--ink)">model:</span> <code>' + mv + '</code> · ' + covTxt + ' · <span style="color:' + color + '">' + badge + '</span>';
+      }
       function fmtElo(v) { return v != null ? '<span class="tp-elo">' + Math.round(v) + '</span>' : '<span style="color:var(--mut)">—</span>'; }
       function fmtBonus(v, fb) {
         if (v == null) return '—';
