@@ -25,7 +25,7 @@ meetingsRoutes.get('/', async (c) => {
     'FROM race_meetings m WHERE 1=1 ' +
     'AND ( ' +
     '  m.total_races IS NOT NULL ' +
-    '  OR EXISTS (SELECT 1 FROM entries_upcoming WHERE race_date = m.date AND venue = m.venue) ' +
+    '  OR EXISTS (SELECT 1 FROM entries_upcoming WHERE race_date = m.date AND venue = m.venue AND race_number > 0) ' +
     ')';
   const params: unknown[] = [];
 
