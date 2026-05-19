@@ -165,7 +165,13 @@ export const analyzeRoutes = new Hono<{ Bindings: Env }>();
             p.pWin ?? null, p.pTop3 ?? null, p.rank ?? null,
             generatedAt,
             p.lgbScore ?? null,
-            p.lgbModelVersion ?? payload.lgbModelVersion ?? null,
+            // Only attribute a model version when this pick was actually rescored by LGB.
+            // Without this gate, payload-level lgbModelVersion would leak onto qimen /
+            // partial-coverage rows whose scoreSource is not 'lgb', contaminating
+            // future engine-split reporting (architect review of c4b0fd1).
+            (p.scoreSource === 'lgb' || p.lgbScore != null)
+              ? (p.lgbModelVersion ?? payload.lgbModelVersion ?? null)
+              : null,
             p.scoreSource ?? null
           )
         );
