@@ -604,6 +604,10 @@ export async function computeHitRateStats(db: any, date: string, engine: EloEngi
       const actualTop3Ids = new Set(actualTop3.map((a: any) => a.horse_id));
       const actualTop2Ids = new Set(actualTop2.map((a: any) => a.horse_id));
       const actualTop4Ids = new Set(actualTop4.map((a: any) => a.horse_id));
+        // odds lookup by horse_id (covers ALL runners in race_results, not just top 4)
+        const oddsById = new Map<string, number | null>(
+          (actualByRace.get(race.raceNumber) ?? []).map((a: any) => [a.horse_id, a.win_odds ?? null])
+        );
 
       const top1Hit = actualTop1Id != null && predictedTop3[0]?.horseId === actualTop1Id;
       const intersect = predictedTop3.filter((p: any) => actualTop3Ids.has(p.horseId)).length;
@@ -663,6 +667,7 @@ export async function computeHitRateStats(db: any, date: string, engine: EloEngi
           factorBonus: p.factorBonus,
           reason: buildPickReason(p),
           hit: actualTop4Ids.has(p.horseId),
+          winOdds: oddsById.get(p.horseId) ?? null,
         })),
         actualTop3: actualTop3.map((a: any) => ({
           position: a.finishing_position, horseNumber: a.horse_number, horseId: a.horse_id,
