@@ -1165,6 +1165,24 @@ async function computeComposite(
   const raceGoing: string | null = raceCtx?.going ?? null;
   const raceVenue: string | null = raceCtx?.venue ?? null;
 
+  // ── Stage 7 (2026-05-19): LGB pre-computed score lookup ─────────────────
+  // Nightly GH workflow trains LightGBM lambdarank and writes per-runner
+  // scores to lgb_predictions. When present, lgb_score overrides _score
+  // (the softmax ranking input). ELO breakdown stays in the response for
+  // transparency. Backtest: 21.65% Top1 vs 17.0% ELO baseline (+27% rel).
+  const lgbScoreByHorse: Record<string, number> = {};
+  let lgbModelVersion: string | null = null;
+  try {
+    const { results: lgbRows } = await db.prepare(
+      `SELECT horse_id, lgb_score, model_version FROM lgb_predictions WHERE race_id = ?`
+    ).bind(raceId).all<any>();
+    for (const r of (lgbRows || [])) {
+      lgbScoreByHorse[r.horse_id] = Number(r.lgb_score);
+      if (!lgbModelVersion) lgbModelVersion = r.model_version;
+    }
+  } catch { /* table may not exist on stale workers */ }
+  const hasLgb = Object.keys(lgbScoreByHorse).length > 0;
+
   // Leakage fix (2026-04-30): use date-filtered subqueries instead of
   // h.total_wins/h.total_starts (which are recomputed post-ingest to include
   // the same-day race being predicted). wins_pre/starts_pre count results
@@ -1269,8 +1287,13 @@ async function computeComposite(
     const base = eloComposite != null ? (eloComposite - 1500) / 200 : 0;
     // winRate computed from pre-race wins/starts only (no same-day leakage).
     const winRate = r.starts_pre > 0 ? r.wins_pre / r.starts_pre : 0;
-    const score = base + winRate * 1.2 + factorBonus / 100;
-    const finalScore = eloComposite != null ? eloComposite + factorBonus : null;
+    // Stage 7: prefer LGB score when present, fall back to ELO+factor composite.
+    const lgbScore = lgbScoreByHorse[r.horse_id];
+    const useLgb = lgbScore != null && Number.isFinite(lgbScore);
+    const score = useLgb ? lgbScore : (base + winRate * 1.2 + factorBonus / 100);
+    const finalScore = useLgb
+      ? Math.round(lgbScore * 1000) / 1000
+      : (eloComposite != null ? eloComposite + factorBonus : null);
 
     return {
       horse_id: r.horse_id,
@@ -1293,6 +1316,9 @@ async function computeComposite(
       factorBreakdown,
       finalScore,
       daysSinceLast: daysSince,
+      lgbScore: useLgb ? Math.round(lgbScore * 1000) / 1000 : null,
+      scoreSource: useLgb ? 'lgb' : 'elo',
+      lgbModelVersion: useLgb ? lgbModelVersion : null,
       _score: score,
     };
   }));
@@ -1326,6 +1352,9 @@ async function computeComposite(
       factorBreakdown: s.factorBreakdown,
       finalScore: s.finalScore != null ? Math.round(s.finalScore * 10) / 10 : null,
       daysSinceLast: s.daysSinceLast,
+      lgbScore: (s as any).lgbScore ?? null,
+      scoreSource: (s as any).scoreSource ?? 'elo',
+      lgbModelVersion: (s as any).lgbModelVersion ?? null,
       pWin: Math.round(pWin * 1000) / 1000,
       pTop3: Math.round(pTop3 * 1000) / 1000,
       valueDelta: valueDelta != null ? Math.round(valueDelta * 1000) / 1000 : null,
