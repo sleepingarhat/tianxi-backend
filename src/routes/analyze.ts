@@ -2014,11 +2014,41 @@ analyzeRoutes.get('/factors', (c) => {
         for (const e of entries) { const rn = e.race_number ?? 0; if (!raceMap.has(rn)) raceMap.set(rn, []); raceMap.get(rn)!.push(e); }
         const raceNumbers = Array.from(raceMap.keys()).sort((a, b) => a - b);
         let seedRatingCount = 0, seedClassCount = 0;
+
+        // ── Stage 7 (2026-05-19): batch-load LGB pre-computed scores ─────────
+        // Synth race_id matches scripts/import-csv.ts raceId():
+        //   race_<YYYY-MM-DD>_<VENUE>_<raceNo>
+        // For upcoming races (no races row yet) the dump-features synth uses
+        // the same key, so lookup works before & after results are imported.
+        const lgbScoreByRaceHorse = new Map<string, { score: number; pWin: number | null; modelVersion: string | null }>();
+        let todayPicksLgbModelVersion: string | null = null;
+        try {
+          const synthRaceIds = raceNumbers
+            .filter(rn => rn > 0)
+            .map(rn => racesDBMap.get(rn)?.id ?? `race_${targetDate}_${meeting.venue}_${rn}`);
+          if (synthRaceIds.length) {
+            const ph = synthRaceIds.map(() => '?').join(',');
+            const { results: lgbRows } = await db.prepare(
+              `SELECT race_id, horse_id, lgb_score, p_win, model_version
+                 FROM lgb_predictions WHERE race_id IN (${ph})`
+            ).bind(...synthRaceIds).all<any>().catch(() => ({ results: [] as any[] }));
+            for (const r of (lgbRows ?? [])) {
+              lgbScoreByRaceHorse.set(`${r.race_id}::${r.horse_id}`, {
+                score: Number(r.lgb_score),
+                pWin: r.p_win != null ? Number(r.p_win) : null,
+                modelVersion: r.model_version ?? null,
+              });
+              if (!todayPicksLgbModelVersion && r.model_version) todayPicksLgbModelVersion = r.model_version;
+            }
+          }
+        } catch { /* table may not exist on cold envs */ }
+
         const racePredictions = raceNumbers.map(raceNum => {
           const raceEntries = raceMap.get(raceNum)!;
           const firstE = raceEntries[0];
           const raceDB = racesDBMap.get(raceNum);
           const raceId = raceDB?.id ?? null;
+          const lgbLookupRaceId: string = raceDB?.id ?? `race_${targetDate}_${meeting.venue}_${raceNum}`;
           const raceTitle = raceDB?.title ?? (raceNum > 0 ? `第 ${raceNum} 場` : `${targetDate} 排位`);
           const raceDistance: number | null = firstE.distance ?? null;
           const raceGoing: string | null = raceDB?.going ?? meeting.track_condition ?? null;
@@ -2073,12 +2103,27 @@ analyzeRoutes.get('/factors', (c) => {
             const computedConf = hRead?.confidence != null ? Math.round(hRead.confidence*100)/100 : (seedConfidence != null ? seedConfidence : null);
             return { horseId, horseNumber: e.horse_number, nameCh: e.name_ch, nameEn: e.name_en, jockeyCh: e.jockey_name, trainerCh: e.trainer_name, draw: e.draw, declaredWeight: e.declared_weight, rating: e.rating, horseElo: hElo != null ? Math.round(hElo*10)/10 : null, jockeyElo: jElo != null ? Math.round(jElo*10)/10 : null, trainerElo: tElo != null ? Math.round(tElo*10)/10 : null, eloComposite: eloComposite != null ? Math.round(eloComposite*10)/10 : null, eloEngine: hRead?.engine ?? engine, eloSource, horseConfidence: computedConf, horseConfWeightFactor: Math.round(horseConfFactor*100)/100, horseFrozen: hRead?.isFrozen ?? false, horseRetired: hRead?.isRetired ?? false, factorBonus: Math.round(factorBonus*10)/10, factorBreakdown, finalScore: finalScore != null ? Math.round(finalScore*10)/10 : null, daysSinceLast: daysSince, _score: base + factorBonus / 100 };
           });
+          // Stage 7: when LGB pre-computed score exists, override _score before softmax.
+          // Falls back per-horse to ELO+factor _score when LGB missing for a runner.
+          let raceHasLgb = false;
+          for (const s of enriched as any[]) {
+            const lgb = s.horseId ? lgbScoreByRaceHorse.get(`${lgbLookupRaceId}::${s.horseId}`) : undefined;
+            if (lgb && Number.isFinite(lgb.score)) {
+              s._score = lgb.score;
+              s.lgbScore = Math.round(lgb.score * 1000) / 1000;
+              s.scoreSource = 'lgb';
+              s.lgbModelVersion = lgb.modelVersion;
+              raceHasLgb = true;
+            } else {
+              s.scoreSource = 'elo+factor';
+            }
+          }
           const expScores = enriched.map((s) => Math.exp(s._score));
           const Z = expScores.reduce((a, b) => a + b, 0) || 1;
           const picks = enriched.map((s, i) => { const { _score, ...rest } = s as any; return { ...rest, pWin: Math.round((expScores[i]/Z)*1000)/1000, pTop3: Math.round(Math.min((expScores[i]/Z)*3,0.99)*1000)/1000 }; });
           picks.sort((a: any, b: any) => b.pWin - a.pWin);
           picks.forEach((p: any, i: number) => { p.rank = i + 1; });
-          return { raceId, raceNumber: raceNum, title: raceTitle, class: raceClass, distance: raceDistance, going: raceGoing, track: raceTrack, course: raceCourse, picks };
+          return { raceId, lgbLookupRaceId, raceNumber: raceNum, title: raceTitle, class: raceClass, distance: raceDistance, going: raceGoing, track: raceTrack, course: raceCourse, picks, scoreSource: raceHasLgb ? 'lgb' : 'elo+factor' };
         });
         const eloReady = racePredictions.some((r) => r.picks?.some((p: any) => p.eloComposite != null));
         const computeMs = Date.now() - t0;
@@ -2086,6 +2131,8 @@ analyzeRoutes.get('/factors', (c) => {
           date: targetDate, venue: meeting.venue, trackCondition: meeting.track_condition,
           eloEngine: engine, eloWeights: ELO_WEIGHTS, eloReady, races: racePredictions,
           seedSummary: { ratingSeeded: seedRatingCount, classSeeded: seedClassCount, totalSeeded: seedRatingCount + seedClassCount },
+          lgbModelVersion: todayPicksLgbModelVersion,
+          lgbCoverage: { rows: lgbScoreByRaceHorse.size },
           computeMs, generatedAt: new Date().toISOString(),
         };
         // Phase A: write each prediction to prediction_log for back-test (idempotent).
