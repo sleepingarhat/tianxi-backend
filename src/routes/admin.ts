@@ -2231,15 +2231,18 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
           return null;
         }
         function cmpCell(rank, h, isMatch){
-          if (!h) return '<div class="cmp-cell empty">—</div>';
-          var no = h.horseNumber!=null?h.horseNumber:h.no;
-          var draw = h.draw!=null?h.draw:(h.barrier!=null?h.barrier:null);
-          return '<div class="cmp-cell'+(isMatch?' match':'')+'">'
-            + '<div class="cmp-rank">'+rank+'</div>'
-            + '<div class="cmp-name">'+(no!=null?'<span class="num">#'+cmpEsc(no)+'</span>':'')+cmpEsc(h.nameCh||h.name||'—')+'</div>'
-            + (draw!=null?'<div class="cmp-draw">檔 '+cmpEsc(draw)+'</div>':'<div class="cmp-draw" style="opacity:.4">檔 —</div>')
-            + '</div>';
-        }
+            if (!h) return '<div class="cmp-cell empty">—</div>';
+            var no = h.horseNumber!=null?h.horseNumber:h.no;
+            var nm = h.nameCh||h.name;
+            if (!nm) nm = h.horseId ? ('馬 '+String(h.horseId).slice(0,8)) : '—';
+            var od = (h.winOdds!=null && !isNaN(Number(h.winOdds))) ? Number(h.winOdds) : null;
+            var odTxt = od!=null ? (od>=100 ? od.toFixed(0) : od.toFixed(1)) : null;
+            return '<div class="cmp-cell'+(isMatch?' match':'')+'">'
+              + '<div class="cmp-rank">'+rank+'</div>'
+              + '<div class="cmp-name">'+(no!=null?'<span class="num">#'+cmpEsc(no)+'</span>':'')+cmpEsc(nm)+'</div>'
+              + (odTxt!=null ? '<div class="cmp-odds">賠率 '+cmpEsc(odTxt)+'</div>' : '<div class="cmp-odds" style="opacity:.4">賠率 —</div>')
+              + '</div>';
+          }
         function cmpRender(left, right){
           var L = (left||[]).filter(Boolean).slice(0,4);
           var R = (right||[]).filter(Boolean).slice(0,4);
