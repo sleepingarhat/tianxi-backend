@@ -1,0 +1,159 @@
+name: LGB Predict Upcoming (Stage 7)
+
+# Trains LightGBM on full history (bulk-local.db) and POSTs per-runner scores
+# for upcoming races back to prod via /admin/api/lgb-predictions.
+# analyze.ts reads these scores and uses lgb_score as the primary ranking
+# signal when present.
+
+on:
+  workflow_dispatch:
+    inputs:
+      days_ahead:
+        description: 'How many days ahead to score'
+        required: false
+        default: '7'
+      force_rebuild_db:
+        description: 'Ignore cache and rebuild bulk-local.db'
+        required: false
+        default: 'false'
+  schedule:
+    - cron: '0 20 * * *'  # 04:00 HKT — runs after capy_racecard daily sync
+
+jobs:
+  predict:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout backend
+        uses: actions/checkout@v4
+        with:
+          path: tianxi-backend
+
+      - name: Checkout data (public repo, sparse)
+        uses: actions/checkout@v4
+        with:
+          repository: sleepingarhat/tianxi-database
+          path: hkjc-data
+          sparse-checkout: |
+            data
+            horses/form_records
+            last_sync.json
+          sparse-checkout-cone-mode: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: tianxi-backend/package-lock.json
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install node deps
+        run: npm ci
+        working-directory: tianxi-backend
+
+      - name: Install python deps
+        run: pip install lightgbm==4.5.0 pandas==2.2.3 numpy==1.26.4
+
+      - name: Compute cache key
+        id: cache-key
+        run: |
+          DATA_SHA=$(cd hkjc-data && git rev-parse --short HEAD)
+          SCRIPTS_HASH=$(find tianxi-backend/scripts/ingest tianxi-backend/scripts/elo tianxi-backend/scripts/import-csv.ts tianxi-backend/src/db/schema.sql -type f 2>/dev/null | sort | xargs sha256sum | sha256sum | head -c12)
+          KEY="bulk-db-${DATA_SHA}-${SCRIPTS_HASH}"
+          echo "key=$KEY" >> $GITHUB_OUTPUT
+          echo "Cache key: $KEY"
+
+      - name: Restore bulk-local.db cache
+        if: ${{ inputs.force_rebuild_db != 'true' }}
+        uses: actions/cache/restore@v4
+        with:
+          path: bulk-local.db
+          key: ${{ steps.cache-key.outputs.key }}
+
+      - name: Build bulk-local.db if cache miss
+        run: |
+          if [ -f bulk-local.db ]; then
+            echo "Using cached bulk-local.db"
+            ls -lh bulk-local.db
+          else
+            echo "Cache miss — rebuilding"
+            cd tianxi-backend
+            npx tsx scripts/import-csv.ts --data-dir=../hkjc-data/data --db=../bulk-local.db
+            npx tsx scripts/ingest/index.ts --form --data-dir=../hkjc-data --db=../bulk-local.db
+            npx tsx scripts/elo/index.ts --db=../bulk-local.db
+          fi
+
+      - name: DB sanity counts
+        run: |
+          sqlite3 bulk-local.db "SELECT 'meetings:' || COUNT(*) FROM race_meetings;
+            SELECT 'races:' || COUNT(*) FROM races;
+            SELECT 'results:' || COUNT(*) FROM race_results;
+            SELECT 'form_records:' || COUNT(*) FROM horse_form_records;
+            SELECT 'horse_elo:' || COUNT(*) FROM horse_elo_snapshots;"
+
+      - name: Dump training features (full history)
+        run: |
+          cd tianxi-backend
+          YESTERDAY=$(date -u -d 'yesterday' +%Y-%m-%d)
+          npx tsx scripts/backtest/dump-features.ts \
+            --db=../bulk-local.db \
+            --from=2024-09-01 --to=$YESTERDAY \
+            --out=../features.csv
+          echo "Training rows: $(wc -l < ../features.csv)"
+
+      - name: Fetch upcoming entries from prod
+        env:
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          DAYS_AHEAD: ${{ inputs.days_ahead || '7' }}
+        run: |
+          FROM=$(date -u +%Y-%m-%d)
+          TO=$(date -u -d "+${DAYS_AHEAD} day" +%Y-%m-%d)
+          echo "Fetching entries $FROM .. $TO"
+          curl -fsSL "https://tianxi.racing/admin/api/entries-upcoming-export?from=$FROM&to=$TO&token=$ADMIN_TOKEN" \
+            -o upcoming-entries.json
+          echo "Entry count: $(jq '.count' upcoming-entries.json)"
+          jq '.entries[0]' upcoming-entries.json || true
+
+      - name: Dump features for upcoming entries
+        run: |
+          cd tianxi-backend
+          npx tsx scripts/backtest/dump-features.ts \
+            --db=../bulk-local.db \
+            --upcoming-json=../upcoming-entries.json \
+            --out=../upcoming-features.csv
+          echo "Upcoming feature rows: $(wc -l < ../upcoming-features.csv)"
+          head -2 ../upcoming-features.csv | cut -c1-200
+
+      - name: Train LGB + predict + upload to prod
+        env:
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+        run: |
+          MODEL_VER="lgb-lambdarank-$(date -u +%Y%m%d)"
+          python tianxi-backend/scripts/backtest/predict_upcoming.py \
+            --train=features.csv \
+            --upcoming=upcoming-features.csv \
+            --admin-url=https://tianxi.racing/admin/api/lgb-predictions \
+            --token="$ADMIN_TOKEN" \
+            --model-version="$MODEL_VER"
+
+      - name: Save bulk-local.db cache
+        if: success() && inputs.force_rebuild_db == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: bulk-local.db
+          key: ${{ steps.cache-key.outputs.key }}
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lgb-predict-upcoming
+          path: |
+            upcoming-entries.json
+            upcoming-features.csv
+          if-no-files-found: warn
+          retention-days: 14
