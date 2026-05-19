@@ -533,6 +533,93 @@ adminRoutes.get('/api/coverage', async (c) => {
     });
   });
 
+// ── /api/lgb-predictions ─ Stage 7: pre-computed LGB scores ───────────────
+// POST: batch upsert from the nightly LGB predict-upcoming GH workflow.
+// GET:  inspect coverage (count + latest model version) or a single race.
+// analyze.ts (computeComposite) reads these scores and uses lgb_score as
+// the primary ranking signal when present; absence → falls back to ELO+factor.
+adminRoutes.post('/api/lgb-predictions', async (c) => {
+  const body = await c.req.json<{
+    predictions?: Array<{ raceId: string; horseId: string; lgbScore: number; pWin?: number }>;
+    modelVersion?: string;
+  }>().catch(() => null);
+  if (!body || !Array.isArray(body.predictions) || body.predictions.length === 0) {
+    return c.json({ error: 'predictions array required' }, 400);
+  }
+  const modelVersion = body.modelVersion || 'lgb-v1';
+  const now = new Date().toISOString();
+  // Defensive: create table if migration not yet applied
+  await c.env.DB.prepare(
+    `CREATE TABLE IF NOT EXISTS lgb_predictions (
+       race_id TEXT NOT NULL, horse_id TEXT NOT NULL,
+       lgb_score REAL NOT NULL, p_win REAL,
+       model_version TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+       PRIMARY KEY (race_id, horse_id))`
+  ).run().catch(() => {});
+  let upserted = 0;
+  const races = new Set<string>();
+  for (let i = 0; i < body.predictions.length; i += 100) {
+    const batch = body.predictions.slice(i, i + 100);
+    const stmts = batch.map((p) => {
+      races.add(p.raceId);
+      return c.env.DB.prepare(
+        `INSERT INTO lgb_predictions (race_id, horse_id, lgb_score, p_win, model_version, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(race_id, horse_id) DO UPDATE SET
+           lgb_score = excluded.lgb_score,
+           p_win = excluded.p_win,
+           model_version = excluded.model_version,
+           created_at = excluded.created_at`
+      ).bind(p.raceId, p.horseId, p.lgbScore, p.pWin ?? null, modelVersion, now);
+    });
+    await c.env.DB.batch(stmts);
+    upserted += batch.length;
+  }
+  return c.json({ ok: true, upserted, races: races.size, modelVersion, at: now });
+});
+
+adminRoutes.get('/api/lgb-predictions', async (c) => {
+  const raceId = c.req.query('raceId');
+  if (raceId) {
+    const { results } = await c.env.DB.prepare(
+      `SELECT race_id, horse_id, lgb_score, p_win, model_version, created_at
+         FROM lgb_predictions WHERE race_id = ? ORDER BY lgb_score DESC`
+    ).bind(raceId).all<any>().catch(() => ({ results: [] as any[] }));
+    return c.json({ raceId, predictions: results || [] });
+  }
+  const cnt = await c.env.DB.prepare(
+    `SELECT COUNT(*) AS rows_n, COUNT(DISTINCT race_id) AS races_n,
+            MAX(created_at) AS latest, MIN(created_at) AS earliest
+       FROM lgb_predictions`
+  ).first<any>().catch(() => null);
+  const ver = await c.env.DB.prepare(
+    `SELECT model_version, COUNT(*) AS n FROM lgb_predictions
+      GROUP BY model_version ORDER BY n DESC LIMIT 5`
+  ).all<any>().catch(() => ({ results: [] as any[] }));
+  return c.json({ summary: cnt || {}, byModelVersion: ver.results || [] });
+});
+
+// ── /api/entries-upcoming-export ─ feed for GH Actions predict pipeline ──
+adminRoutes.get('/api/entries-upcoming-export', async (c) => {
+  const today = new Date().toISOString().slice(0, 10);
+  const from = c.req.query('from') || today;
+  const to = c.req.query('to') || from;
+  const { results } = await c.env.DB.prepare(`
+    SELECT e.race_date, e.venue, e.race_number, e.race_class, e.distance, e.track, e.course,
+           e.horse_id, e.horse_number, e.horse_code, e.draw, e.jockey_name, e.jockey_id,
+           e.trainer_name, e.trainer_id, e.actual_weight, e.declared_weight, e.rating,
+           e.priority_order, m.id AS meeting_id, m.track_condition AS going,
+           r.id AS race_id
+      FROM entries_upcoming e
+      LEFT JOIN race_meetings m ON m.date = e.race_date AND m.venue = e.venue
+      LEFT JOIN races r ON r.meeting_id = m.id AND r.race_number = e.race_number
+     WHERE e.race_date BETWEEN ? AND ?
+       AND (e.priority_order IS NULL OR e.priority_order = '' OR e.priority_order = '正選')
+     ORDER BY e.race_date, e.venue, e.race_number, e.horse_number
+  `).bind(from, to).all<any>().catch(() => ({ results: [] as any[] }));
+  return c.json({ from, to, count: (results || []).length, entries: results || [] });
+});
+
 // ── /api/alerts (unchanged) ──
 adminRoutes.get('/api/alerts', async (c) => {
   const db = c.env.DB;
