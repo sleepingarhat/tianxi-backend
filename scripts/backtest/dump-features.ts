@@ -395,6 +395,11 @@
     const metaByKey: Map<string, RaceMeta> = new Map();
     for (const e of entries) {
       if (!e.horse_id) continue;  // skip unresolved runners
+      // Skip reserve/unassigned pool entries: race_number 0 or missing.
+      // (HKJC pre-declarations land horses in a "race 0" bucket until they're
+      // assigned to a numbered race. Predicting that pool as one big race is
+      // meaningless — scores would diffuse across 100+ unrelated horses.)
+      if (!e.race_number || Number(e.race_number) < 1) continue;
       // Synthesize a race_id when D1 hasn't assigned one yet:
       // YYYYMMDD_VENUE_R<n>  (matches our prod race_id naming convention).
       const dateCompact = String(e.race_date || '').replace(/-/g, '');
