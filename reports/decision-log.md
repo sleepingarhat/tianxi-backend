@@ -471,4 +471,24 @@
   **Fix A (治表 — not applied)**: Manual `DELETE FROM race_meetings WHERE id='2026-05-20_ST'` + cascade-clean its 1 races row still needed for full UI fix. User chose to defer.
 
   **Future scrapes**: next time `scrape-racecard.ts` or `scrape-results.ts` is invoked for a (date, venue) with no entries_upcoming evidence, it will SKIP and log. Phantom rows can no longer be created from those two ingest paths. `import-csv.ts` (bulk historical import) intentionally not guarded.
+
+  ## 2026-05-19 — Phantom 2026-05-20_ST cleanup + race_number=0 reserve-pool guard
+
+  **Symptom.** /schedule for 2026-05-20 showed two rows: HV (totalRaces=10, should be 9) + ST (totalRaces=1 "好地至黏地"). Neither was real — only HV races that day, with 9 races.
+
+  **Root cause.**
+  1. `entries_upcoming` had a stray `race_number=0` bucket holding 125 horses (HKJC reserve/standby entries scraped into the same table). This inflated the `COUNT(DISTINCT race_number)` fallback in /api/meetings from 9 to 10.
+  2. `race_meetings` had a phantom `2026-05-20_ST` row + 1 child `races` row + **14 `race_results` + 9 `dividends`** with `finish_time` and `win_odds` for a date that hadn't happened yet (today=2026-05-19). The racecard or results scraper misattributed an unrelated race chain to a non-existent ST meeting.
+
+  **Fix (commit `ca67e94`).**
+  - `src/routes/meetings.ts`: COALESCE fallback subquery adds `AND race_number > 0` to exclude the reserve pool from race counts going forward.
+  - `src/routes/admin.ts`: added one-shot `POST /admin/api/cleanup-2026-05-20-phantom` endpoint.
+
+  **Endpoint cascade fix (commit `119aaf5`).** First version 500'd because the phantom race had non-nullable FK children. Rewrote to mirror `cleanup-duplicate-meetings` cascade: SELECT race ids → DELETE non-nullable race_id children (race_results, sectional_times, horse_sectional_times, running_comments, dividends, odds_snapshots_legacy, race_videos) → UPDATE...NULL nullable race_id refs (horse_form_records, *_elo_snapshots) → DELETE races, race_meetings, reserve pool.
+
+  **Verified.** Endpoint returned: race_results=14, dividends=9, races_st=1, race_meetings_st=1, reserve_pool_hv=125 deleted. Post-cleanup `/api/meetings?date=2026-05-20` returns only HV with totalRaces=9. Schedule UI clean.
+
+  **Open follow-ups.**
+  - Investigate which scraper produced phantom race_results with future `finish_time` / `win_odds` — Fix B guards already in scrape-racecard + scrape-results, but data here pre-dates them. Likely from a one-off manual or older scrape run; monitor next 2026-05-23 ST meeting for recurrence.
+  - `entries_upcoming` reserve-pool insertion: prefer storing as separate table or with `is_reserve` flag instead of `race_number=0` to avoid silent inflation of derived counts. Tracked but low priority.
   
