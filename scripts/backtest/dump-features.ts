@@ -498,7 +498,9 @@
       if (pace.style === 1) paceClash = -(raceNLeaders - 1);          // each extra leader = -1
       else if (pace.style === 3) paceClash = Math.max(0, 2 - raceNClosers); // few closers = +1/+2
       else if (pace.style === 2) paceClash = 0;
-      const lastClassRow = qLastClass.get(r.horse_id, meta.date) as { rc: string | null } | undefined;
+      // horse_form_records.horse_id = horses.code (A001), but race_results.horse_id is prefixed (horse_A001). Bridge.
+      const horseCode = bridgeId('horse', r.horse_id);
+      const lastClassRow = horseCode ? qLastClass.get(horseCode, meta.date) as { rc: string | null } | undefined : undefined;
       const lastClassNum = classToNum(lastClassRow?.rc ?? null);
       const classDelta = (classNowNum != null && lastClassNum != null) ? (lastClassNum - classNowNum) : null;
 
