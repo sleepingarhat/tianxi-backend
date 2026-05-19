@@ -1014,17 +1014,57 @@ adminRoutes.get('/api/seed-missing-jockey-elo', async (c) => {
   // that aren't real race entries — inflated COUNT(DISTINCT race_number) from 9 to 10).
   // Idempotent: re-running just returns 0 deleted on each table.
   adminRoutes.post('/api/cleanup-2026-05-20-phantom', async (c) => {
-    const dRaces = await c.env.DB.prepare(`DELETE FROM races WHERE meeting_id = ?`).bind('2026-05-20_ST').run();
-    const dMeet  = await c.env.DB.prepare(`DELETE FROM race_meetings WHERE id = ?`).bind('2026-05-20_ST').run();
-    const dPool  = await c.env.DB.prepare(`DELETE FROM entries_upcoming WHERE race_date = ? AND venue = ? AND race_number = 0`).bind('2026-05-20', 'HV').run();
-    return c.json({
-      ok: true,
-      deleted: {
-        races_st: dRaces.meta?.changes ?? 0,
-        race_meetings_st: dMeet.meta?.changes ?? 0,
-        reserve_pool_hv: dPool.meta?.changes ?? 0,
-      },
-    });
+    try {
+      const { results: raceRows } = await c.env.DB.prepare(
+        `SELECT id FROM races WHERE meeting_id = ?`
+      ).bind('2026-05-20_ST').all<{ id: string }>();
+      const raceIds = (raceRows ?? []).map((r) => r.id);
+
+      const counts: Record<string, number> = {};
+
+      if (raceIds.length > 0) {
+        const inList = raceIds.map(() => '?').join(',');
+        const childTables = [
+          'race_results', 'sectional_times', 'horse_sectional_times',
+          'running_comments', 'dividends', 'odds_snapshots_legacy', 'race_videos',
+        ];
+        for (const t of childTables) {
+          const r = await c.env.DB.prepare(
+            `DELETE FROM ${t} WHERE race_id IN (${inList})`
+          ).bind(...raceIds).run();
+          counts[t] = r.meta?.changes ?? 0;
+        }
+        const nullable: Array<[string, string]> = [
+          ['horse_form_records', 'race_id'],
+          ['horse_elo_snapshots', 'as_of_race_id'],
+          ['jockey_elo_snapshots', 'as_of_race_id'],
+          ['trainer_elo_snapshots', 'as_of_race_id'],
+        ];
+        for (const [tbl, col] of nullable) {
+          const r = await c.env.DB.prepare(
+            `UPDATE ${tbl} SET ${col} = NULL WHERE ${col} IN (${inList})`
+          ).bind(...raceIds).run();
+          counts[`${tbl}_nulled`] = r.meta?.changes ?? 0;
+        }
+      }
+
+      const dRaces = await c.env.DB.prepare(`DELETE FROM races WHERE meeting_id = ?`).bind('2026-05-20_ST').run();
+      const dMeet  = await c.env.DB.prepare(`DELETE FROM race_meetings WHERE id = ?`).bind('2026-05-20_ST').run();
+      const dPool  = await c.env.DB.prepare(`DELETE FROM entries_upcoming WHERE race_date = ? AND venue = ? AND race_number = 0`).bind('2026-05-20', 'HV').run();
+
+      return c.json({
+        ok: true,
+        phantom_race_ids: raceIds,
+        deleted: {
+          ...counts,
+          races_st: dRaces.meta?.changes ?? 0,
+          race_meetings_st: dMeet.meta?.changes ?? 0,
+          reserve_pool_hv: dPool.meta?.changes ?? 0,
+        },
+      });
+    } catch (err: any) {
+      return c.json({ error: 'cleanup_failed', message: String(err?.message ?? err) }, 500);
+    }
   });
 
   adminRoutes.post('/api/cleanup-duplicate-meetings', async (c) => {
