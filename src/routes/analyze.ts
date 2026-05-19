@@ -131,6 +131,9 @@ export const analyzeRoutes = new Hono<{ Bindings: Env }>();
       is_hit_top4 INTEGER,
       generated_at TEXT NOT NULL,
       joined_at TEXT,
+      lgb_score REAL,
+      lgb_model_version TEXT,
+      score_source TEXT,
       PRIMARY KEY (date, race_number, horse_id, engine, variant)
     )`).run();
     await db.prepare(`CREATE INDEX IF NOT EXISTS idx_prediction_log_date ON prediction_log(date)`).run().catch(() => {});
@@ -152,14 +155,18 @@ export const analyzeRoutes = new Hono<{ Bindings: Env }>();
           db.prepare(`INSERT OR REPLACE INTO prediction_log
             (date, race_number, horse_id, engine, variant, horse_number, draw,
              horse_elo, elo_source, elo_confidence, elo_composite, factor_bonus, final_score,
-             p_win, p_top3, predicted_rank, generated_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
+             p_win, p_top3, predicted_rank, generated_at,
+             lgb_score, lgb_model_version, score_source)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
             payload.date, race.raceNumber, p.horseId, engine, variant,
             p.horseNumber ?? null, p.draw ?? null,
             p.horseElo ?? null, p.eloSource ?? null, p.horseConfidence ?? null,
             p.eloComposite ?? null, p.factorBonus ?? null, p.finalScore ?? null,
             p.pWin ?? null, p.pTop3 ?? null, p.rank ?? null,
-            generatedAt
+            generatedAt,
+            p.lgbScore ?? null,
+            p.lgbModelVersion ?? payload.lgbModelVersion ?? null,
+            p.scoreSource ?? null
           )
         );
       }
