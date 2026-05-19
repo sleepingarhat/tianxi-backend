@@ -1952,6 +1952,239 @@ analyzeRoutes.get('/factors', (c) => {
         }
         if (!targetDate) return { error: '排位表未有資料', status: 404 };
 
+        // Architect fix: cache read moved AFTER meeting selection (venue in key).
+        const t0 = Date.now();
+
+        // Pick meeting: prefer one with entries_upcoming rows for that date
+          // (today-picks is about racecards we'll predict, not historic results).
+          // Falls back to most-races meeting. ?venue=HV forces a specific venue.
+          let meeting: any = null;
+          if (forceVenue) {
+            meeting = await db.prepare(`SELECT m.* FROM race_meetings m WHERE m.date = ? AND m.venue = ? LIMIT 1`).bind(targetDate, forceVenue).first<any>().catch(() => null);
+          }
+          if (!meeting) {
+            meeting = await db.prepare(
+              `SELECT m.* FROM race_meetings m
+                WHERE m.date = ?
+                  AND EXISTS (SELECT 1 FROM entries_upcoming e WHERE e.race_date = m.date AND e.venue = m.venue AND e.race_number > 0)
+                ORDER BY (SELECT COUNT(*) FROM entries_upcoming e WHERE e.race_date = m.date AND e.venue = m.venue AND e.race_number > 0) DESC, m.id LIMIT 1`
+            ).bind(targetDate).first<any>().catch(() => null);
+          }
+          if (!meeting) {
+            meeting = await db.prepare(`SELECT m.* FROM race_meetings m WHERE m.date = ? ORDER BY (SELECT COUNT(*) FROM races r WHERE r.meeting_id = m.id) DESC, m.id LIMIT 1`).bind(targetDate).first<any>().catch(() => null);
+          }
+          if (!meeting) return { error: `${targetDate} 賽馬日記錄不存在`, status: 404 };
+
+          // Architect fix: venue-scoped cache key so HV/ST don't collide; ?venue= bypasses.
+          const cacheKey = `${engine}::${meeting.venue}`;
+          if (!fresh && !forceVenue) {
+            const cached = await readRaceDayReportCache(db, targetDate, cacheKey);
+            if (cached) return cached;
+          }
+          const loadEntries = async (withVenue: boolean) => {
+          const q = withVenue
+            ? `SELECT e.race_number, e.horse_number, e.horse_id, e.horse_code,
+                     e.draw, e.declared_weight, e.actual_weight, e.jockey_name, e.jockey_id,
+                     e.trainer_name, e.trainer_id, e.rating, e.priority_order,
+                     e.distance, e.track, e.course, e.race_class,
+                     h.name_ch, h.name_en
+               FROM entries_upcoming e LEFT JOIN horses h ON h.id = e.horse_id
+               WHERE e.race_date = ? AND e.venue = ? AND e.race_number > 0
+               ORDER BY e.race_number, e.horse_number`
+            : `SELECT e.race_number, e.horse_number, e.horse_id, e.horse_code,
+                     e.draw, e.declared_weight, e.actual_weight, e.jockey_name, e.jockey_id,
+                     e.trainer_name, e.trainer_id, e.rating, e.priority_order,
+                     e.distance, e.track, e.course, e.race_class,
+                     h.name_ch, h.name_en
+               FROM entries_upcoming e LEFT JOIN horses h ON h.id = e.horse_id
+               WHERE e.race_date = ? AND e.race_number > 0
+               ORDER BY e.race_number, e.horse_number`;
+          const stmt = withVenue ? db.prepare(q).bind(targetDate, meeting.venue) : db.prepare(q).bind(targetDate);
+          const { results } = await stmt.all<any>().catch(() => ({ results: [] as any[] }));
+          return results ?? [];
+        };
+        let entries = await loadEntries(true);
+        if (!entries.length) entries = await loadEntries(false);
+        if (!entries.length) return { error: `${targetDate} 排位表無資料`, status: 404 };
+        const prefixId = (raw: string | null | undefined, kind: 'horse' | 'jockey' | 'trainer'): string | null => {
+          if (!raw) return null;
+          const p = kind + '_';
+          return raw.startsWith(p) ? raw : p + raw;
+        };
+        const allHorseIds = [...new Set(entries.map(e => prefixId(e.horse_id ?? e.horse_code, 'horse')).filter(Boolean) as string[])];
+        const horseEloIds = allHorseIds;
+        const allJockeyIds = [...new Set(entries.map(e => prefixId(e.jockey_id ?? e.jockey_name, 'jockey')).filter(Boolean) as string[])];
+        const allTrainerIds = [...new Set(entries.map(e => prefixId(e.trainer_id ?? e.trainer_name, 'trainer')).filter(Boolean) as string[])];
+        const [horseEloMap, jockeyEloMap, trainerEloMap, recencyMap, distMap, goingMap, drawMap, condMap, injMap, wtMap, jtMap] = await Promise.all([
+          batchEloReadings(db, 'horse', horseEloIds, targetDate, engine),
+          batchEloReadings(db, 'jockey', allJockeyIds, targetDate, engine),
+          batchEloReadings(db, 'trainer', allTrainerIds, targetDate, engine),
+          batchLastRaceDate(db, allHorseIds, targetDate),
+          batchDistanceFit(db, allHorseIds, targetDate),
+          batchGoingFit(db, allHorseIds, targetDate),
+          batchDrawBias(db, entries, meeting.venue, targetDate),
+          batchConditionFit(db, allHorseIds, targetDate),
+          batchInjuryFlag(db, allHorseIds, targetDate),
+          batchWeightDelta(db, allHorseIds, entries, targetDate),
+          batchJtComboFit(db, entries, targetDate),
+        ]);
+        const { results: racesFromDB } = await db.prepare(
+          `SELECT race_number, id, title, going FROM races WHERE meeting_id = ? ORDER BY race_number`
+        ).bind(meeting.id).all<any>().catch(() => ({ results: [] as any[] }));
+        const racesDBMap = new Map((racesFromDB ?? []).map((r: any) => [r.race_number, r]));
+        const raceMap = new Map<number, any[]>();
+        for (const e of entries) { const rn = e.race_number ?? 0; if (!raceMap.has(rn)) raceMap.set(rn, []); raceMap.get(rn)!.push(e); }
+        const raceNumbers = Array.from(raceMap.keys()).sort((a, b) => a - b);
+        let seedRatingCount = 0, seedClassCount = 0;
+
+        // ── Stage 7 (2026-05-19): batch-load LGB pre-computed scores ─────────
+        // Synth race_id matches scripts/import-csv.ts raceId():
+        //   race_<YYYY-MM-DD>_<VENUE>_<raceNo>
+        // For upcoming races (no races row yet) the dump-features synth uses
+        // the same key, so lookup works before & after results are imported.
+        const lgbScoreByRaceHorse = new Map<string, { score: number; pWin: number | null; modelVersion: string | null }>();
+        let todayPicksLgbModelVersion: string | null = null;
+        try {
+          const synthRaceIds = raceNumbers
+            .filter(rn => rn > 0)
+            .map(rn => racesDBMap.get(rn)?.id ?? `race_${targetDate}_${meeting.venue}_${rn}`);
+          if (synthRaceIds.length) {
+            const ph = synthRaceIds.map(() => '?').join(',');
+            const { results: lgbRows } = await db.prepare(
+              `SELECT race_id, horse_id, lgb_score, p_win, model_version
+                 FROM lgb_predictions WHERE race_id IN (${ph})`
+            ).bind(...synthRaceIds).all<any>().catch(() => ({ results: [] as any[] }));
+            for (const r of (lgbRows ?? [])) {
+              lgbScoreByRaceHorse.set(`${r.race_id}::${r.horse_id}`, {
+                score: Number(r.lgb_score),
+                pWin: r.p_win != null ? Number(r.p_win) : null,
+                modelVersion: r.model_version ?? null,
+              });
+              if (!todayPicksLgbModelVersion && r.model_version) todayPicksLgbModelVersion = r.model_version;
+            }
+          }
+        } catch { /* table may not exist on cold envs */ }
+
+        const racePredictions = raceNumbers.map(raceNum => {
+          const raceEntries = raceMap.get(raceNum)!;
+          const firstE = raceEntries[0];
+          const raceDB = racesDBMap.get(raceNum);
+          const raceId = raceDB?.id ?? null;
+          const lgbLookupRaceId: string = raceDB?.id ?? `race_${targetDate}_${meeting.venue}_${raceNum}`;
+          const raceTitle = raceDB?.title ?? (raceNum > 0 ? `第 ${raceNum} 場` : `${targetDate} 排位`);
+          const raceDistance: number | null = firstE.distance ?? null;
+          const raceGoing: string | null = raceDB?.going ?? meeting.track_condition ?? null;
+          const raceTrack: string | null = firstE.track ?? null;
+          const raceCourse: string | null = firstE.course ?? null;
+          const raceClass: string | null = firstE.race_class ?? null;
+          const enriched = raceEntries.map((e: any) => {
+            const horseId: string | null = e.horse_id ?? e.horse_code ?? null;
+            if (!horseId) return { horseId: null, horseNumber: e.horse_number, nameCh: e.name_ch ?? String(e.horse_number), nameEn: e.name_en, jockeyCh: e.jockey_name, trainerCh: e.trainer_name, draw: e.draw, declaredWeight: e.declared_weight, rating: e.rating, horseElo: null, jockeyElo: null, trainerElo: null, eloComposite: null, eloEngine: engine, eloSource: 'none', horseConfidence: null, horseFrozen: false, horseRetired: false, factorBonus: 0, factorBreakdown: null, finalScore: null, daysSinceLast: null, _score: 0 };
+            const horseEloId = horseId;
+            const jSnapshotId: string | null = prefixId(e.jockey_id ?? e.jockey_name, 'jockey');
+            const tSnapshotId: string | null = prefixId(e.trainer_id ?? e.trainer_name, 'trainer');
+            const hRead = horseEloMap.get(horseEloId) ?? null;
+            const jRead = jSnapshotId ? (jockeyEloMap.get(jSnapshotId) ?? null) : null;
+            const tRead = tSnapshotId ? (trainerEloMap.get(tSnapshotId) ?? null) : null;
+            let hElo: number | null = hRead?.rating ?? null;
+            let eloSource: 'snapshot' | 'rating-seed' | 'class-seed' | 'none' = hRead ? 'snapshot' : 'none';
+            let seedConfidence: number | null = null;
+            if (hElo == null) {
+              const seed = seedHorseElo(e.rating, raceClass);
+              hElo = seed.rating;
+              eloSource = seed.source;
+              seedConfidence = seed.confidence;
+              if (seed.source === 'rating-seed') seedRatingCount++; else seedClassCount++;
+            }
+            const jElo = jRead?.rating ?? null; const tElo = tRead?.rating ?? null;
+            // Phase A: down-weight horse ELO when low-confidence (seed) so jockey+trainer carry more.
+            // snapshot w/o explicit conf → 1.0; rating-seed → 0.4; class-seed → 0.2.
+            const horseConfFactor = eloSource === 'snapshot' ? (hRead?.confidence ?? 1) : (seedConfidence ?? 0);
+            const effHorseW = ELO_WEIGHTS.horse * horseConfFactor;
+            const parts: number[] = [];
+            if (hElo != null) parts.push(hElo * effHorseW);
+            if (jElo != null) parts.push(jElo * ELO_WEIGHTS.jockey);
+            if (tElo != null) parts.push(tElo * ELO_WEIGHTS.trainer);
+            const wSum = (hElo != null ? effHorseW : 0) + (jElo != null ? ELO_WEIGHTS.jockey : 0) + (tElo != null ? ELO_WEIGHTS.trainer : 0);
+            const eloComposite = wSum > 0 ? parts.reduce((a, b) => a + b, 0) / wSum : null;
+            const lastDate = recencyMap.get(horseId) ?? null;
+            const daysSince = lastDate ? Math.round((new Date(targetDate!).getTime() - new Date(lastDate).getTime()) / 86400000) : null;
+            const recency = recencyBonus(daysSince);
+            const fDist = distMap.get(`${horseId}:${distBucket(raceDistance)}`) ?? { bonus: 0, conf: 0, note: '無距離往績' };
+            const fGoing = goingMap.get(`${horseId}:${raceGoing ?? ''}`) ?? { bonus: 0, conf: 0, note: '無場地往績' };
+            const fDraw = drawMap.get(`${e.draw}:${meeting.venue}:${distBucket(raceDistance)}`) ?? { bonus: 0, conf: 0, note: '檔位資料不全' };
+            const fWeight = wtMap.get(horseId) ?? { bonus: 0, conf: 0, note: '無體重往績' };
+            const fCond = condMap.get(horseId) ?? { bonus: 0, conf: 0, note: '無晨操記錄' };
+            const fInjury = injMap.get(horseId) ?? { bonus: 0, conf: 0, note: '無傷病記錄' };
+            const fJT = jtMap.get(`${jSnapshotId ?? ''}:${tSnapshotId ?? ''}`) ?? { bonus: 0, conf: 0, note: '騎練配對資料不全' };
+            const factorBreakdown = { recency: { bonus: recency, conf: daysSince != null ? 1 : 0, note: daysSince != null ? `距上次 ${daysSince} 天` : (eloSource !== 'snapshot' ? '新馬未曾出賽' : '無上次紀錄') }, distance: fDist, going: fGoing, draw: fDraw, weight: fWeight, condition: fCond, injury: fInjury, jtCombo: fJT };
+            // R5 ablation (88d): production keeps only draw + weight (see reports/decision-log.md).
+            const factorBonus = fDraw.bonus + fWeight.bonus;
+            const base = eloComposite != null ? (eloComposite - 1500) / 200 : 0;
+            const finalScore = eloComposite != null ? eloComposite + factorBonus : null;
+            const computedConf = hRead?.confidence != null ? Math.round(hRead.confidence*100)/100 : (seedConfidence != null ? seedConfidence : null);
+            return { horseId, horseNumber: e.horse_number, nameCh: e.name_ch, nameEn: e.name_en, jockeyCh: e.jockey_name, trainerCh: e.trainer_name, draw: e.draw, declaredWeight: e.declared_weight, rating: e.rating, horseElo: hElo != null ? Math.round(hElo*10)/10 : null, jockeyElo: jElo != null ? Math.round(jElo*10)/10 : null, trainerElo: tElo != null ? Math.round(tElo*10)/10 : null, eloComposite: eloComposite != null ? Math.round(eloComposite*10)/10 : null, eloEngine: hRead?.engine ?? engine, eloSource, horseConfidence: computedConf, horseConfWeightFactor: Math.round(horseConfFactor*100)/100, horseFrozen: hRead?.isFrozen ?? false, horseRetired: hRead?.isRetired ?? false, factorBonus: Math.round(factorBonus*10)/10, factorBreakdown, finalScore: finalScore != null ? Math.round(finalScore*10)/10 : null, daysSinceLast: daysSince, _score: base + factorBonus / 100 };
+          });
+          // Stage 7: race-level ALL-OR-NOTHING LGB (architect review 2026-05-19).
+            // Mixed-scale softmax (LGB margin + ELO base) isn't calibrated → distorts probs.
+            // Also rewrites finalScore so qimen variant + prediction_log are consistent.
+            let raceHasLgb = false;
+            let lgbModelVerForRace: string | null = null;
+            let lgbHits = 0;
+            for (const s of enriched as any[]) {
+              const lgb = s.horseId ? lgbScoreByRaceHorse.get(`${lgbLookupRaceId}::${s.horseId}`) : undefined;
+              if (lgb && Number.isFinite(lgb.score)) {
+                (s as any).__lgb = lgb;
+                lgbHits++;
+                if (!lgbModelVerForRace) lgbModelVerForRace = lgb.modelVersion;
+              }
+            }
+            const allHaveLgb = lgbHits > 0 && lgbHits === (enriched as any[]).length;
+            if (allHaveLgb) raceHasLgb = true;
+            for (const s of enriched as any[]) {
+              const lgb = (s as any).__lgb;
+              delete (s as any).__lgb;
+              if (allHaveLgb && lgb) {
+                s._score = lgb.score;
+                s.lgbScore = Math.round(lgb.score * 1000) / 1000;
+                s.lgbModelVersion = lgb.modelVersion;
+                s.scoreSource = 'lgb';
+                s.finalScore = Math.round((1500 + lgb.score * 100) * 10) / 10;
+              } else {
+                s.scoreSource = lgb ? 'elo+factor (partial-lgb-skipped)' : 'elo+factor';
+                if (lgb) {
+                  s.lgbScore = Math.round(lgb.score * 1000) / 1000;
+                  s.lgbModelVersion = lgb.modelVersion;
+                }
+              }
+            }
+            const expScores = enriched.map((s) => Math.exp(s._score));
+          const Z = expScores.reduce((a, b) => a + b, 0) || 1;
+          const picks = enriched.map((s, i) => { const { _score, ...rest } = s as any; return { ...rest, pWin: Math.round((expScores[i]/Z)*1000)/1000, pTop3: Math.round(Math.min((expScores[i]/Z)*3,0.99)*1000)/1000 }; });
+          picks.sort((a: any, b: any) => b.pWin - a.pWin);
+          picks.forEach((p: any, i: number) => { p.rank = i + 1; });
+          return { raceId, raceNumber: raceNum, title: raceTitle, class: raceClass, distance: raceDistance, going: raceGoing, track: raceTrack, course: raceCourse, picks };
+        });
+        const eloReady = racePredictions.some((r) => r.picks?.some((p: any) => p.eloComposite != null));
+        return { date: targetDate, venue: meeting.venue, trackCondition: meeting.track_condition, eloEngine: engine, eloWeights: ELO_WEIGHTS, eloReady, races: racePredictions, generatedAt: new Date().toISOString() };
+      }
+
+      // GET /api/analyze/today-picks — 即日排位全因子預測 (batch-query version; ~20 D1 queries)
+    // === Race-day report compute (Stage 8) ============================
+      // Extracted so cron + admin manual trigger can re-use the same logic.
+      // Cache-first by default; pass { fresh: true } to force recompute + cache write.
+      async function runRaceDayReportCompute(db: D1Database, engine: EloEngine, opts: { fresh?: boolean; venue?: string } = {}): Promise<any> {
+        const fresh = opts.fresh === true;
+        const forceVenue = opts.venue;
+        const todayStr = new Date().toISOString().split('T')[0];
+        let targetDate: string | null = await db.prepare(
+          `SELECT MIN(race_date) FROM entries_upcoming WHERE race_date >= ?`
+        ).bind(todayStr).first<string>('MIN(race_date)').catch(() => null);
+        if (!targetDate) {
+          targetDate = await db.prepare(`SELECT MAX(race_date) FROM entries_upcoming`).first<string>('MAX(race_date)').catch(() => null);
+        }
+        if (!targetDate) return { error: '排位表未有資料', status: 404 };
+
         if (!fresh) {
           const cached = await readRaceDayReportCache(db, targetDate, engine);
           if (cached) return cached;
@@ -2141,7 +2374,7 @@ analyzeRoutes.get('/factors', (c) => {
           const picks = enriched.map((s, i) => { const { _score, ...rest } = s as any; return { ...rest, pWin: Math.round((expScores[i]/Z)*1000)/1000, pTop3: Math.round(Math.min((expScores[i]/Z)*3,0.99)*1000)/1000 }; });
           picks.sort((a: any, b: any) => b.pWin - a.pWin);
           picks.forEach((p: any, i: number) => { p.rank = i + 1; });
-          return { raceId, lgbLookupRaceId, raceNumber: raceNum, title: raceTitle, class: raceClass, distance: raceDistance, going: raceGoing, track: raceTrack, course: raceCourse, picks, scoreSource: raceHasLgb ? 'lgb' : 'elo+factor' };
+          return { raceId, lgbLookupRaceId, raceNumber: raceNum, title: raceTitle, class: raceClass, distance: raceDistance, going: raceGoing, track: raceTrack, course: raceCourse, picks, scoreSource: raceHasLgb ? 'lgb' : 'elo+factor', lgbCoverage: { hits: lgbHits, total: (enriched as any[]).length, applied: allHaveLgb }, lgbModelVersion: lgbModelVerForRace };
         });
         const eloReady = racePredictions.some((r) => r.picks?.some((p: any) => p.eloComposite != null));
         const computeMs = Date.now() - t0;
@@ -2218,7 +2451,7 @@ analyzeRoutes.get('/factors', (c) => {
         } catch (qErr: any) {
           payload.qimenError = String(qErr?.message ?? qErr);
         }
-        await writeRaceDayReportCache(db, targetDate, engine, meeting.venue, payload, computeMs).catch(() => {});
+        await writeRaceDayReportCache(db, targetDate, cacheKey, meeting.venue, payload, computeMs).catch(() => {});
         return payload;
       }
 
