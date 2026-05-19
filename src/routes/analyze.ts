@@ -1940,8 +1940,9 @@ analyzeRoutes.get('/factors', (c) => {
     // === Race-day report compute (Stage 8) ============================
       // Extracted so cron + admin manual trigger can re-use the same logic.
       // Cache-first by default; pass { fresh: true } to force recompute + cache write.
-      async function runRaceDayReportCompute(db: D1Database, engine: EloEngine, opts: { fresh?: boolean } = {}): Promise<any> {
+      async function runRaceDayReportCompute(db: D1Database, engine: EloEngine, opts: { fresh?: boolean; venue?: string } = {}): Promise<any> {
         const fresh = opts.fresh === true;
+        const forceVenue = opts.venue;
         const todayStr = new Date().toISOString().split('T')[0];
         let targetDate: string | null = await db.prepare(
           `SELECT MIN(race_date) FROM entries_upcoming WHERE race_date >= ?`
@@ -1957,8 +1958,25 @@ analyzeRoutes.get('/factors', (c) => {
         }
         const t0 = Date.now();
 
-        const meeting = await db.prepare(`SELECT m.* FROM race_meetings m WHERE m.date = ? ORDER BY (SELECT COUNT(*) FROM races r WHERE r.meeting_id = m.id) DESC, m.id LIMIT 1`).bind(targetDate).first<any>().catch(() => null);
-        if (!meeting) return { error: `${targetDate} 賽馬日記錄不存在`, status: 404 };
+        // Pick meeting: prefer one with entries_upcoming rows for that date
+          // (today-picks is about racecards we'll predict, not historic results).
+          // Falls back to most-races meeting. ?venue=HV forces a specific venue.
+          let meeting: any = null;
+          if (forceVenue) {
+            meeting = await db.prepare(`SELECT m.* FROM race_meetings m WHERE m.date = ? AND m.venue = ? LIMIT 1`).bind(targetDate, forceVenue).first<any>().catch(() => null);
+          }
+          if (!meeting) {
+            meeting = await db.prepare(
+              `SELECT m.* FROM race_meetings m
+                WHERE m.date = ?
+                  AND EXISTS (SELECT 1 FROM entries_upcoming e WHERE e.race_date = m.date AND e.venue = m.venue AND e.race_number > 0)
+                ORDER BY m.id LIMIT 1`
+            ).bind(targetDate).first<any>().catch(() => null);
+          }
+          if (!meeting) {
+            meeting = await db.prepare(`SELECT m.* FROM race_meetings m WHERE m.date = ? ORDER BY (SELECT COUNT(*) FROM races r WHERE r.meeting_id = m.id) DESC, m.id LIMIT 1`).bind(targetDate).first<any>().catch(() => null);
+          }
+          if (!meeting) return { error: `${targetDate} 賽馬日記錄不存在`, status: 404 };
         const loadEntries = async (withVenue: boolean) => {
           const q = withVenue
             ? `SELECT e.race_number, e.horse_number, e.horse_id, e.horse_code,
@@ -2208,7 +2226,8 @@ analyzeRoutes.get('/factors', (c) => {
         try {
           const engine: EloEngine = c.req.query('engine') === 'v11' ? 'v11' : 'v12';
           const fresh = c.req.query('fresh') === '1';
-          const result = await runRaceDayReportCompute(c.env.DB, engine, { fresh });
+          const venue = c.req.query('venue') || undefined;
+          const result = await runRaceDayReportCompute(c.env.DB, engine, { fresh, venue });
           if (result?.error) return c.json({ error: result.error }, (result.status ?? 500) as any);
           return c.json(result);
         } catch (err: any) {
