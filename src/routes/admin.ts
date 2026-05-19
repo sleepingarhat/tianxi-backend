@@ -998,53 +998,17 @@ adminRoutes.get('/api/seed-missing-jockey-elo', async (c) => {
 //   baseline + generated_at <  2026-05-19T00:00:00Z → score_source='elo'
 //   variant != 'baseline' (qimen, *-bt) → score_source = variant verbatim
 // Idempotent.
+// ── /api/migrate-prediction-log-lgb — RETIRED 2026-05-19 ─────────────────
+// One-shot schema + backfill. Executed against prod on 2026-05-19:
+//   ALTER: lgb_score / lgb_model_version / score_source added.
+//   Backfill: 108 baseline-post-lgb, 322 baseline-pre-lgb, 10310 non-baseline.
+//   score_source NULL rows after: 0.
+// 410 stub keeps URL routable for audit log searches.
 adminRoutes.post('/api/migrate-prediction-log-lgb', async (c) => {
-    const adds: Record<string, string> = {};
-    for (const [col, type] of [['lgb_score','REAL'],['lgb_model_version','TEXT'],['score_source','TEXT']] as Array<[string,string]>) {
-      try {
-        await c.env.DB.prepare(`ALTER TABLE prediction_log ADD COLUMN ${col} ${type}`).run();
-        adds[col] = 'added';
-      } catch (e: any) {
-        const msg = String(e?.message ?? e);
-        adds[col] = /duplicate column/i.test(msg) ? 'already-present' : `error: ${msg}`;
-      }
-    }
-
-    const LGB_VER = 'lgb-lambdarank-20260519';
-    const SHIP_TS = '2026-05-19T00:00:00Z';
-    const updates: Record<string, number> = {};
-
-    const u1 = await c.env.DB.prepare(
-      `UPDATE prediction_log SET score_source = 'lgb', lgb_model_version = ?
-        WHERE variant = 'baseline' AND generated_at >= ? AND score_source IS NULL`
-    ).bind(LGB_VER, SHIP_TS).run();
-    updates['baseline_post_lgb'] = u1.meta?.changes ?? 0;
-
-    const u2 = await c.env.DB.prepare(
-      `UPDATE prediction_log SET score_source = 'elo'
-        WHERE variant = 'baseline' AND generated_at < ? AND score_source IS NULL`
-    ).bind(SHIP_TS).run();
-    updates['baseline_pre_lgb'] = u2.meta?.changes ?? 0;
-
-    const u3 = await c.env.DB.prepare(
-      `UPDATE prediction_log SET score_source = variant
-        WHERE variant != 'baseline' AND score_source IS NULL`
-    ).run();
-    updates['non_baseline_variants'] = u3.meta?.changes ?? 0;
-
-    const { results: srcCounts } = await c.env.DB.prepare(
-      `SELECT score_source, COUNT(*) AS n FROM prediction_log GROUP BY score_source ORDER BY n DESC`
-    ).all<any>();
-    const { results: nulls } = await c.env.DB.prepare(
-      `SELECT COUNT(*) AS n FROM prediction_log WHERE score_source IS NULL`
-    ).all<any>();
-
     return c.json({
-      ok: true,
-      alter: adds,
-      backfill: updates,
-      verify: { score_source_distribution: srcCounts ?? [], score_source_null: nulls?.[0]?.n ?? 0 },
-    });
+      error: 'retired',
+      message: 'one-shot endpoint already executed on 2026-05-19; see reports/decision-log.md',
+    }, 410);
   });
 
   adminRoutes.post('/api/sql-read', async (c) => {

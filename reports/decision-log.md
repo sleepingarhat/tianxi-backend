@@ -491,4 +491,43 @@
   **Open follow-ups.**
   - Investigate which scraper produced phantom race_results with future `finish_time` / `win_odds` — Fix B guards already in scrape-racecard + scrape-results, but data here pre-dates them. Likely from a one-off manual or older scrape run; monitor next 2026-05-23 ST meeting for recurrence.
   - `entries_upcoming` reserve-pool insertion: prefer storing as separate table or with `is_reserve` flag instead of `race_number=0` to avoid silent inflation of derived counts. Tracked but low priority.
+
+  ## 2026-05-19 — prediction_log schema upgrade: score_source + lgb_score + lgb_model_version
+
+  **Problem.** prediction_log was ELO-centric; no way to separate LGB rows from R5 ELO rows in walk-forward analysis or the PREDICTION VS RESULT panel. All 10,756 historical rows were tagged `engine='v12'` with no per-row source attribution. Today's HV 2026-05-20 LGB predictions (108 rows) were silently mixed into the same column space.
+
+  **Fix (commit `c4b0fd1`).**
+  - `src/routes/analyze.ts`:
+    - `ensurePredictionLogTable` CREATE TABLE: 3 new nullable columns (`lgb_score REAL`, `lgb_model_version TEXT`, `score_source TEXT`). PK unchanged. New deploys auto-get schema.
+    - `writePredictionLog` INSERT OR REPLACE: column + bind list extended; reads `p.lgbScore` / `p.lgbModelVersion` (with payload-level fallback) / `p.scoreSource` — values already present on pick objects from L1320 + L2158-2167 LGB rescoring path.
+  - `src/routes/admin.ts`: `POST /api/migrate-prediction-log-lgb` one-shot endpoint
+    - 3 ALTER TABLE ADD COLUMN with duplicate-column catch
+    - 3 backfill UPDATEs sliced by (variant × era) for traceable counts
+    - Returns alter status + per-slice update counts + post-backfill score_source distribution + null count
+
+  **Backfill mapping.**
+  | Slice | score_source | lgb_model_version |
+  |---|---|---|
+  | baseline + generated_at ≥ 2026-05-19T00:00:00Z | `lgb` | `lgb-lambdarank-20260519` |
+  | baseline + generated_at <  2026-05-19T00:00:00Z | `elo` | NULL |
+  | variant != 'baseline' (qimen, baseline-bt, qimen-bt, r5-bt) | `<variant>` verbatim | NULL |
+
+  `lgb_score` raw cannot be recovered for historical rows (only the blended `final_score` was persisted) — stays NULL for backfilled rows; new writes populate it from now on.
+
+  **Verified (prod).** `POST /admin/api/migrate-prediction-log-lgb` returned:
+  ```json
+  {"alter":{"lgb_score":"added","lgb_model_version":"added","score_source":"added"},
+   "backfill":{"baseline_post_lgb":108,"baseline_pre_lgb":322,"non_baseline_variants":10310},
+   "verify":{"score_source_distribution":[
+     {"score_source":"qimen-bt","n":3507},{"score_source":"baseline-bt","n":3507},
+     {"score_source":"r5-bt","n":2866},{"score_source":"qimen","n":430},
+     {"score_source":"elo","n":322},{"score_source":"lgb","n":108}],
+    "score_source_null":0}}
+  ```
+
+  **Endpoint retired** in follow-up commit (410 stub) to shrink admin blast radius, consistent with the cleanup-2026-05-20-phantom pattern.
+
+  **Open follow-ups.**
+  - PREDICTION VS RESULT panel in admin UI not yet updated to filter / colour by `score_source`. Next session: surface engine in the per-race table and split aggregate hit-rate by source.
+  - Once LGB has shipped on ≥3 race days, generate first walk-forward report comparing LGB vs ELO baseline using `score_source` filter.
   
