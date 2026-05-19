@@ -309,3 +309,45 @@
   - `scripts/elo/compute_v11.ts` 仍寫 multi-axis snapshots（5 axis_key），生產 `readElo()` 只查 `axis_key='overall'`。schema 預留供將來重 test
   - `reports/multiaxis-compare.md` 1-month diag 結果留底
   
+
+  ---
+
+  ## 2026-05-19 · Stage 7 ship：LightGBM 預測 pipeline 上線（半成品，仍有 UI gap）
+
+  ### 已完成（Phase A + Phase B）
+
+  | 組件 | Status | 位置 |
+  |---|---|---|
+  | `lgb_predictions` D1 table (PRIMARY KEY race_id+horse_id) | ✅ schema_v2.sql + 寫入時 `CREATE TABLE IF NOT EXISTS` defensive | src/db/schema_v2.sql, admin POST |
+  | Admin POST `/admin/api/lgb-predictions` (upsert) | ✅ Live | src/routes/admin.ts |
+  | Admin GET `/admin/api/lgb-predictions` (summary) | ✅ Live · 已驗證返回 108 rows × 9 races | src/routes/admin.ts |
+  | Admin GET `/admin/api/entries-upcoming-export` | ✅ Live · 已驗證返回 233 entries (含 125 R0 reserve pool) | src/routes/admin.ts |
+  | `dump-features.ts --upcoming-json` mode | ✅ skips race_number=0 reserve pool · 233→108 真正參賽 | scripts/backtest/dump-features.ts |
+  | `predict_upcoming.py` (lambdarank, 200 trees, leaves=15) | ✅ Works · POST 用 User-Agent header (CF 1010 fix) | scripts/backtest/predict_upcoming.py |
+  | Nightly workflow `lgb_predict_upcoming.yml` (cron 04:00 HKT) | ✅ Live · 共用 walkforward 嘅 bulk-local.db cache | .github/workflows/lgb_predict_upcoming.yml |
+  | `analyze.ts` `computeComposite` 讀 `lgb_predictions` | ✅ Live · 當 lgb_score 存在時 override _score | src/routes/analyze.ts L1170-1293 |
+
+  ### 已驗證 E2E
+  - 預測 workflow 26107516445 跑成功，POST 108 預測去 prod  
+  - `GET /admin/api/lgb-predictions` 返回 `{rows_n:108, races_n:9, model_version:'lgb-lambdarank-20260519'}`
+
+  ### ❌ 集成 GAP（下一步要修）
+  `/api/analyze/today-picks`（即 UI 顯示明天 racecard 嘅嗰個 endpoint）**完全冇查 lgb_predictions**。佢只查 `entries_upcoming`。  
+  `/api/analyze/top-picks` 雖然有 LGB override，但係佢要求 `races` 表已有 row（即賽事已完成），upcoming 賽事根本入唔到 top-picks。
+
+  **結果：**  
+  LGB 預測雖然每晚自動跑、入到 D1，但 **用戶側面睇唔到**。要等改 today-picks 加入 lgb_predictions JOIN，或者改 top-picks fallback 去 entries_upcoming。
+
+  **另外：** 我合成嘅 race_id 用 `YYYYMMDD_VENUE_R<n>` 格式（無連字號），未確認同 Worker 內部 `races.id` schema 一致（meeting_id 用 `YYYY-MM-DD_VENUE` 有連字號）。如果格式唔啱，將來 race row 真係 insert 後 join 都會錯。
+
+  ### Stage 6 旁路狀態
+  Backtest run 26098556544 已完成 success，但無新 lift 數據對比 baseline 17.0%（pace/class fix 上線唯一驗證 = walkforward 通過，唔代表生產有 lift）。Stage 7 上線重要過再 tune Stage 6 features。
+
+  ### Backtest Anchor（之前確定，無變）
+  原始 LGB Top1=21.65% vs 純 ELO baseline 17.0%（+27% rel），window=2024-09-01..2026-04-30, 1549 races
+
+  ### 推薦下一步（按優先級）
+  1. 修 `analyze.ts` today-picks：每場 race join `lgb_predictions` ON (race_date+venue+race_number → synth race_id)，將 `p_win` 攝入返 picks payload  
+  2. 驗證 synth race_id 同 Worker 內部 races.id 一致（grep `scripts/import-csv.ts` 中 race row insert）  
+  3. UI 加 LGB score badge（可選）
+  
