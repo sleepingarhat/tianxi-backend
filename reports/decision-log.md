@@ -351,3 +351,43 @@
   2. 驗證 synth race_id 同 Worker 內部 races.id 一致（grep `scripts/import-csv.ts` 中 race row insert）  
   3. UI 加 LGB score badge（可選）
   
+
+  ---
+
+  ## 2026-05-19 · Stage 7 完成上線：LGB 完全整合到 UI
+
+  ### 修咗之前嘅 2 個 gap
+
+  | Gap | Fix | Commit |
+  |---|---|---|
+  | Synth race_id 格式錯（`YYYYMMDD_VENUE_R<n>` 對唔上 `races.id`） | 改用 `race_<YYYY-MM-DD>_<VENUE>_<raceNo>` 對齊 `scripts/import-csv.ts` `raceId()` | b10007a |
+  | `/api/analyze/today-picks` 冇查 `lgb_predictions` | `runRaceDayReportCompute` batch-load LGB scores、每場 race 用 `lgbLookupRaceId` (raceDB.id ?? synth) lookup，存在時 override `_score`；payload 加 `lgbModelVersion`/`lgbCoverage`，每場 race 加 `scoreSource`，每隻馬加 `lgbScore`/`lgbModelVersion`/`scoreSource` | 681a7ca |
+  | Meeting picker 揀錯場（揀咗 ST 嘅 races 但 entries_upcoming 係 HV） | 改先揀有 `entries_upcoming` rows 嗰隻 meeting，跟住 fallback 去最多 races 嗰隻；加 `?venue=HV` query param override | cb35fe7 |
+
+  ### 最終 E2E 驗證
+  ```
+  GET /api/analyze/today-picks?fresh=1
+  → venue: HV
+  → lgbModelVersion: lgb-lambdarank-20260519
+  → lgbCoverage: { rows: 108 }
+  → 9 races, all scoreSource='lgb'
+  → race1 top3: 皇金合 (pWin 24%) → 綫路光驊 (13%) → 首駿 (11.1%)
+  ```
+
+  每隻馬都帶埋 `lgbScore`（原始 lambdarank logit）、`scoreSource: 'lgb'`、`lgbModelVersion`。冇 LGB 嘅馬會 fallback 去 ELO+factor，唔會 crash。
+
+  ### Stage 7 完整 commit 清單（sleepingarhat/tianxi-backend）
+  - `015ab20` Phase A scaffolding（schema + admin POST/GET + analyze override）
+  - `b8b7e47`、`c61ce79` dump-features `--upcoming-json` mode + skip R0
+  - `b4d4212` predict_upcoming.py（lambdarank, 200 trees, leaves=15）
+  - `5254230`→`3247311`→`e68ead0` workflow path + cache key
+  - `e59e77c` urllib UA header（修 CF 1010）
+  - `b10007a` synth race_id 對齊 import-csv `raceId()`
+  - `681a7ca` today-picks 讀 lgb_predictions
+  - `cb35fe7` today-picks meeting picker（揀有 entries 嗰隻 + `?venue=` override）
+
+  ### 後續可選改善（非 blocker）
+  1. 清埋舊 108 行錯 format 嘅 lgb_predictions rows（`20260520_HV_R1` 等）→ 加個 admin DELETE endpoint
+  2. UI 喺每隻馬 card 加個 "LGB" badge（前端嘅工作）
+  3. 觀察 `scoreSource: 'elo+factor'` 嘅 race（即 LGB 失敗 fallback）做監控
+  
