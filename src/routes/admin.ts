@@ -575,7 +575,18 @@ adminRoutes.post('/api/lgb-predictions', async (c) => {
     await c.env.DB.batch(stmts);
     upserted += batch.length;
   }
-  return c.json({ ok: true, upserted, races: races.size, modelVersion, at: now });
+  // Architect fix: invalidate race-day-report cache so today-picks re-reads new LGB.
+    try {
+      const dateSet = new Set<string>();
+      for (const p of body.predictions) {
+        const m = /^race_(\d{4}-\d{2}-\d{2})_/.exec(p.raceId);
+        if (m) dateSet.add(m[1]);
+      }
+      for (const d of dateSet) {
+        await c.env.DB.prepare(`DELETE FROM race_day_report_cache WHERE date = ?`).bind(d).run().catch(() => {});
+      }
+    } catch { /* best-effort */ }
+    return c.json({ ok: true, upserted, races: races.size, modelVersion, at: now });
 });
 
 adminRoutes.get('/api/lgb-predictions', async (c) => {
