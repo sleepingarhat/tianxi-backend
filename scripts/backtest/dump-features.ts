@@ -48,6 +48,11 @@
   const W_JOCKEY = argNum('w-jockey', 0.2);
   const W_TRAINER = argNum('w-trainer', 0.1);
   const OUT = arg('out', 'features.csv');
+  // ── Stage 7: upcoming-prediction mode ────────────────────────────────────
+  // When set, ignore --from/--to and read race+runner list from the JSON
+  // produced by /admin/api/entries-upcoming-export. Same feature columns
+  // are computed; finishing_position / is_top1 / is_top3 emitted as 0.
+  const UPCOMING_JSON = arg('upcoming-json', '');
 
   const db = new Database(DB_PATH, { readonly: true });
   db.pragma('cache_size = -200000'); // 200MB cache
@@ -373,21 +378,72 @@
     finishing_position: number; draw: number | null; actual_weight: number | null; win_odds: number | null;
   };
 
-  const races = db.prepare(`
-    SELECT r.id AS id, rm.date AS date, rm.venue AS venue, r.race_number AS race_number,
-           r.distance AS distance, r.going AS going, r.class AS class
-      FROM races r
-      JOIN race_meetings rm ON rm.id = r.meeting_id
-     WHERE rm.date BETWEEN ? AND ?
-       AND EXISTS (SELECT 1 FROM race_results rr WHERE rr.race_id = r.id AND rr.finishing_position BETWEEN 1 AND 98)
-     ORDER BY rm.date ASC, r.id ASC`).all(FROM, TO) as RaceMeta[];
+  // ── Race + runner source ────────────────────────────────────────────────
+  // Default mode: pull historical races + finishing positions from race_results.
+  // --upcoming-json mode: read upcoming entries from JSON file (admin export).
+  let races: RaceMeta[];
+  // runnersByRace: pre-built for upcoming mode; qRunners: SQL prepared for history mode.
+  let qRunners: any = null;
+  const runnersByRace: Map<string, RunnerRow[]> = new Map();
+  const UPCOMING_MODE = UPCOMING_JSON !== '';
 
-  const qRunners = db.prepare(`
-    SELECT race_id, horse_id, jockey_id, trainer_id, finishing_position,
-           draw, actual_weight, win_odds
-      FROM race_results
-     WHERE race_id = ?
-       AND finishing_position BETWEEN 1 AND 98`);
+  if (UPCOMING_MODE) {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { readFileSync } = require('node:fs');
+    const data = JSON.parse(readFileSync(UPCOMING_JSON, 'utf8'));
+    const entries: any[] = data.entries || [];
+    const metaByKey: Map<string, RaceMeta> = new Map();
+    for (const e of entries) {
+      if (!e.horse_id) continue;  // skip unresolved runners
+      // Synthesize a race_id when D1 hasn't assigned one yet:
+      // YYYYMMDD_VENUE_R<n>  (matches our prod race_id naming convention).
+      const dateCompact = String(e.race_date || '').replace(/-/g, '');
+      const synthId = `${dateCompact}_${e.venue}_R${e.race_number}`;
+      const raceId: string = e.race_id || synthId;
+      if (!metaByKey.has(raceId)) {
+        metaByKey.set(raceId, {
+          id: raceId,
+          date: e.race_date,
+          venue: e.venue,
+          race_number: Number(e.race_number),
+          distance: Number(e.distance) || 0,
+          going: String(e.going || ''),
+          class: e.race_class || null,
+        });
+      }
+      const list = runnersByRace.get(raceId) || [];
+      list.push({
+        race_id: raceId,
+        horse_id: e.horse_id,
+        jockey_id: e.jockey_id || null,
+        trainer_id: e.trainer_id || null,
+        finishing_position: 0,  // unknown — placeholder
+        draw: e.draw != null ? Number(e.draw) : null,
+        actual_weight: e.actual_weight != null ? Number(e.actual_weight) : null,
+        win_odds: null,
+      });
+      runnersByRace.set(raceId, list);
+    }
+    races = Array.from(metaByKey.values())
+      .sort((a, b) => (a.date + a.id).localeCompare(b.date + b.id));
+    console.error(`[dump-features] UPCOMING mode: ${races.length} races, ${entries.length} entries → ${OUT}`);
+  } else {
+    races = db.prepare(`
+      SELECT r.id AS id, rm.date AS date, rm.venue AS venue, r.race_number AS race_number,
+             r.distance AS distance, r.going AS going, r.class AS class
+        FROM races r
+        JOIN race_meetings rm ON rm.id = r.meeting_id
+       WHERE rm.date BETWEEN ? AND ?
+         AND EXISTS (SELECT 1 FROM race_results rr WHERE rr.race_id = r.id AND rr.finishing_position BETWEEN 1 AND 98)
+       ORDER BY rm.date ASC, r.id ASC`).all(FROM, TO) as RaceMeta[];
+
+    qRunners = db.prepare(`
+      SELECT race_id, horse_id, jockey_id, trainer_id, finishing_position,
+             draw, actual_weight, win_odds
+        FROM race_results
+       WHERE race_id = ?
+         AND finishing_position BETWEEN 1 AND 98`);
+  }
 
   console.error(`[dump-features] ${FROM}..${TO} → ${races.length} races · ELO=${ENGINE} · W=H${W_HORSE}/J${W_JOCKEY}/T${W_TRAINER}`);
   console.error(`[dump-features] writing → ${OUT}`);
@@ -427,10 +483,13 @@
 
   for (let i = 0; i < races.length; i++) {
     const meta = races[i];
-    const runners = qRunners.all(meta.id) as RunnerRow[];
+    const runners: RunnerRow[] = UPCOMING_MODE
+      ? (runnersByRace.get(meta.id) || [])
+      : (qRunners.all(meta.id) as RunnerRow[]);
     if (runners.length < 4) continue;
 
     // sort by finish position to identify top1/top3 horse_ids for label
+    // (upcoming mode: all finishing_position=0, so top1/top3 are arbitrary; labels unused.)
     const sorted = [...runners].sort((a, b) => a.finishing_position - b.finishing_position);
     const top1Id = sorted[0].horse_id;
     const top3Set = new Set(sorted.slice(0, 3).map(r => r.horse_id));
