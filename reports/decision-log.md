@@ -391,3 +391,59 @@
   2. UI 喺每隻馬 card 加個 "LGB" badge（前端嘅工作）
   3. 觀察 `scoreSource: 'elo+factor'` 嘅 race（即 LGB 失敗 fallback）做監控
   
+
+  ---
+
+  ## 2026-05-19 (晚) · Stage 7 architect 回顧 — 6 個 critical fix
+
+  Architect (evaluate_task) 標 5 個 high-impact issue，全部修咗：
+
+  | # | Issue | Fix | Commit |
+  |---|---|---|---|
+  | 1 | Venue cache key collision (HV/ST 撞 cache) | cache read 由 meeting selection 之前移到之後，key = `${engine}::${meeting.venue}`，`?venue=` 直接 bypass cache | d790d34 |
+  | 2 | Mixed-scale softmax silent failure (部份馬冇 LGB 會混 scale) | **race-level ALL-OR-NOTHING**：一場全 12 隻有 LGB 先用 LGB，否則全場 fallback 到 ELO+factor | d790d34 |
+  | 3 | finalScore 同 qimen/log inconsistent (LGB 只覆寫 _score) | LGB 同時覆寫 finalScore = 1500 + lgb_score×100，qimen variant + prediction_log 全部見到 LGB signal | d790d34 |
+  | 4 | Tie-breaker 揀錯場 (多 meeting 有 entries 時用 m.id) | ORDER BY `(SELECT COUNT(*) FROM entries_upcoming ...)` DESC, m.id | d790d34 |
+  | 5 | Cron upload 唔 invalidate cache → stale payload | admin POST /lgb-predictions 完先 `DELETE FROM race_day_report_cache WHERE date IN (...)` | f0a690c |
+  | 6 | **Pre-existing bug**: `runRaceDayReportCompute` 有兩份 duplicate function declaration (建構 fail) | 刪除 orphan copy (block A, 228 行)，將 fixes port 到 live copy (block B, JS hoisting 用 last decl) | 3c254fb / d790d34 |
+
+  ### 最終 E2E (deploy d790d34)
+  ```
+  GET today-picks?fresh=1&venue=HV
+  → scoreSource=lgb, lgbCoverage={hits:12,total:12,applied:true}
+  → top: lgbScore=0.237 → finalScore=1523.7 (= 1500+0.237×100 ✓)
+
+  GET today-picks?fresh=1&venue=ST
+  → scoreSource=elo+factor, lgbCoverage={hits:0,total:12,applied:false}
+  → ST 冇 LGB rows → clean ELO fallback，唔會 mix scale
+
+  GET today-picks?venue=HV (cached) → fromCache=true (venue-scoped)
+  ```
+
+  ### Architect 評估嘅 silent failure mode 已封堵
+  - ❌ 唔會再有 race 喺 LGB 同 ELO score 之間混 softmax
+  - ❌ 唔會再 cache stale payload after 新 LGB upload
+  - ❌ HV / ST 唔會再撞 cache key
+
+  ### Stage 7 全部 commit 清單
+  ```
+  015ab20  Phase A scaffolding (schema + admin + analyze override)
+  b4d4212  predict_upcoming.py (lambdarank, 200 trees, leaves=15)
+  e68ead0  sklearn dep + cache key
+  3247311  workflow path
+  c61ce79  skip R0
+  b8b7e47  dump-features --upcoming-json mode
+  e59e77c  urllib UA header (CF 1010 fix)
+  b10007a  synth race_id 對齊 import-csv raceId()
+  681a7ca  today-picks 讀 lgb_predictions (initial)
+  cb35fe7  today-picks meeting picker (entries_upcoming + ?venue=)
+  c38218d  decision log Phase A+B
+  5bf150b  decision log Phase A 收尾
+  eb1187a  architect fixes (partial, deploy fail due to duplicate fn)
+  f0a690c  admin invalidate cache
+  3c254fb  remove duplicate runRaceDayReportCompute + port cacheKey
+  d790d34  port all-or-nothing LGB block to live function ★ FINAL
+  ```
+
+  明天 2026-05-20 HV 賽馬日，prod 已 ready。
+  
