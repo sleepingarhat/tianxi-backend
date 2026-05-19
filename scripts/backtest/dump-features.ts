@@ -260,6 +260,26 @@
        WHERE rr.trainer_id = ? AND r.going = ? AND rm.date < ?
          AND rr.finishing_position > 0 AND rr.finishing_position < 99`);
 
+    // ── Stage 6 (NEW): pace style — last 8 starts running_position ─────────
+    // Format: "2-2-1-1" = sectional positions through race. First segment = early.
+    const qHorsePace = db.prepare(`
+      SELECT rr.running_position AS rp
+        FROM race_results rr
+        JOIN races r ON r.id = rr.race_id
+        JOIN race_meetings rm ON rm.id = r.meeting_id
+       WHERE rr.horse_id = ? AND rm.date < ?
+         AND rr.running_position IS NOT NULL AND rr.running_position != ''
+       ORDER BY rm.date DESC LIMIT 8`);
+
+    // ── Stage 6 (NEW): class change — last race_class for horse ────────────
+    // horse_form_records.race_class is text like "Class 4", "Class 1", "Griffin", "Group 3".
+    const qLastClass = db.prepare(`
+      SELECT race_class AS rc
+        FROM horse_form_records
+       WHERE horse_id = ? AND race_date < ?
+         AND race_class IS NOT NULL AND race_class != ''
+       ORDER BY race_date DESC LIMIT 1`);
+
   
   // ── Bonus helpers (verbatim) ────────────────────────────────────────────
   function daysBetween(a: string, b: string): number {
@@ -282,8 +302,44 @@
     return -(curr - avg) * 0.5;
   }
 
+  // ── Stage 6: pace + class helpers ───────────────────────────────────────
+  // Parse "2-2-1-1" → array of integers. Returns [] if unparseable.
+  function parseRP(rp: string): number[] {
+    return rp.split('-').map(s => parseInt(s.trim(), 10)).filter(n => Number.isFinite(n) && n > 0);
+  }
+  // From last-N running_positions: { early: mean first-sectional position, style: 1=leader/2=stalker/3=closer/0=unknown }
+  function paceProfile(rps: string[]): { early: number | null; style: number } {
+    const earlies: number[] = [];
+    for (const rp of rps) {
+      const segs = parseRP(rp);
+      if (segs.length > 0) earlies.push(segs[0]);
+    }
+    if (!earlies.length) return { early: null, style: 0 };
+    const avg = earlies.reduce((a, b) => a + b, 0) / earlies.length;
+    const style = avg <= 2.5 ? 1 : avg <= 4 ? 2 : 3;
+    return { early: Math.round(avg * 100) / 100, style };
+  }
+  // Convert race class text → numeric (lower = higher class).
+  // Group 1 = -1, Group 2 = -2, Group 3 = -3 (top); Class 1 = 1 .. Class 5 = 5; Griffin = 6.
+  function classToNum(c: string | null | undefined): number | null {
+    if (!c) return null;
+    const s = String(c).trim();
+    let m = s.match(/Class\s*(\d+)/i);
+    if (m) return parseInt(m[1], 10);
+    if (/griffin/i.test(s)) return 6;
+    m = s.match(/Group\s*(\d+)/i);
+    if (m) return -parseInt(m[1], 10);
+    // Chinese variants
+    m = s.match(/第\s*(\d+)\s*班/);
+    if (m) return parseInt(m[1], 10);
+    if (/國際一級/.test(s)) return -1;
+    if (/國際二級/.test(s)) return -2;
+    if (/國際三級/.test(s)) return -3;
+    return null;
+  }
+
   // ── Race iteration ──────────────────────────────────────────────────────
-  type RaceMeta = { id: string; date: string; venue: string; race_number: number; distance: number; going: string };
+  type RaceMeta = { id: string; date: string; venue: string; race_number: number; distance: number; going: string; class: string | null };
   type RunnerRow = {
     race_id: string; horse_id: string; jockey_id: string | null; trainer_id: string | null;
     finishing_position: number; draw: number | null; actual_weight: number | null; win_odds: number | null;
@@ -291,7 +347,7 @@
 
   const races = db.prepare(`
     SELECT r.id AS id, rm.date AS date, rm.venue AS venue, r.race_number AS race_number,
-           r.distance AS distance, r.going AS going
+           r.distance AS distance, r.going AS going, r.class AS class
       FROM races r
       JOIN race_meetings rm ON rm.id = r.meeting_id
      WHERE rm.date BETWEEN ? AND ?
@@ -321,6 +377,11 @@
       'tv_starts','tv_top3','jv_starts','jv_top3','jdb_starts','jdb_top3',
       // Stage 5: track-condition specialization (jockey/trainer × going)
       'jg_starts','jg_top3','tg_starts','tg_top3',
+      // Stage 6 (NEW): pace style (per horse, last 8 starts) + race-level pace clash
+      'horse_pace_n','horse_pace_early','horse_pace_style',
+      'race_n_leaders','race_n_closers','horse_pace_clash',
+      // Stage 6 (NEW): class change (current vs horse's last race_class)
+      'class_now_num','last_class_num','class_delta',
       'finishing_position','is_top1','is_top3',
     ];
   writeFileSync(OUT, HEADER.join(',') + '\n');
@@ -346,6 +407,20 @@
     const top1Id = sorted[0].horse_id;
     const top3Set = new Set(sorted.slice(0, 3).map(r => r.horse_id));
     const fieldSize = runners.length;
+
+    // Stage 6: pre-pass to collect each runner's pace style → race-level counts
+    const paceByHorse: Map<string, { early: number | null; style: number; n: number }> = new Map();
+    for (const r of runners) {
+      const rps = (qHorsePace.all(r.horse_id, meta.date) as { rp: string }[]).map(x => x.rp);
+      const pp = paceProfile(rps);
+      paceByHorse.set(r.horse_id, { early: pp.early, style: pp.style, n: rps.length });
+    }
+    let raceNLeaders = 0, raceNClosers = 0;
+    for (const v of paceByHorse.values()) {
+      if (v.style === 1) raceNLeaders++;
+      if (v.style === 3) raceNClosers++;
+    }
+    const classNowNum = classToNum(meta.class);
 
     for (const r of runners) {
       const hElo = readElo('horse', r.horse_id, meta.date);
@@ -407,6 +482,17 @@
       const factorBonus = fRecency + fDist + fGoing + fDraw + fWeight + fCombo;
       const baselineScore = eloComposite != null ? eloComposite + factorBonus : null;
 
+      // Stage 6: pace + class
+      const pace = paceByHorse.get(r.horse_id)!;
+      // pace_clash: leaders penalized when many leaders in field; closers slightly bonus when few closers
+      let paceClash: number | null = null;
+      if (pace.style === 1) paceClash = -(raceNLeaders - 1);          // each extra leader = -1
+      else if (pace.style === 3) paceClash = Math.max(0, 2 - raceNClosers); // few closers = +1/+2
+      else if (pace.style === 2) paceClash = 0;
+      const lastClassRow = qLastClass.get(r.horse_id, meta.date) as { rc: string | null } | undefined;
+      const lastClassNum = classToNum(lastClassRow?.rc ?? null);
+      const classDelta = (classNowNum != null && lastClassNum != null) ? (lastClassNum - classNowNum) : null;
+
       const row = [
           meta.id, meta.date, meta.venue, meta.race_number, meta.distance, meta.going, fieldSize,
           r.horse_id, r.jockey_id, r.trainer_id, r.draw, r.actual_weight, r.win_odds,
@@ -417,6 +503,9 @@
           formN, formAvgPosW, formTop3RateW, formPosSlope,
           tvF?.starts ?? 0, tvF?.top3 ?? 0, jvF?.starts ?? 0, jvF?.top3 ?? 0, jdbF?.starts ?? 0, jdbF?.top3 ?? 0,
           jgF?.starts ?? 0, jgF?.top3 ?? 0, tgF?.starts ?? 0, tgF?.top3 ?? 0,
+          pace.n, pace.early, pace.style,
+          raceNLeaders, raceNClosers, paceClash,
+          classNowNum, lastClassNum, classDelta,
           r.finishing_position,
           r.horse_id === top1Id ? 1 : 0,
           top3Set.has(r.horse_id) ? 1 : 0,
