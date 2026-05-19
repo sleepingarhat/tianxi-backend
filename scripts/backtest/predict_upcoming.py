@@ -112,6 +112,8 @@ def main() -> int:
         headers={
             'Authorization': f'Bearer {args.token}',
             'Content-Type': 'application/json',
+            'User-Agent': 'tianxi-lgb-predict/1.0 (+github-actions)',
+            'Accept': 'application/json',
         },
     )
     try:
