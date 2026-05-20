@@ -24,7 +24,9 @@ Follow-up to v1 (2026-05-19) addressing four weaknesses surfaced by post-ship re
      minimizing log loss. Posted lgb_score = log(p_final) so analyze.ts's
      existing ranking by lgb_score automatically reflects the ensemble.
 
-Order of operations: early-stopped fit → refit-full → τ_lgb → τ_elo → α.
+Order of operations: early-stopped fit → (val_scores from early-stopped booster)
+→ τ_lgb → τ_elo → α  (fit on CLEAN pre-refit val_scores to avoid leakage)
+→ refit on FULL data with frozen best_iter → predict upcoming with frozen τ/α.
 
 CLI flags --no-calibrate / --no-ensemble / --val-days=0 fall back step-by-step
 to the v1 behaviour if anything in the pipeline misbehaves.
@@ -50,6 +52,22 @@ FEAT_COLS = [
     'race_n_leaders', 'race_n_closers', 'horse_pace_clash',
     'class_now_num', 'last_class_num', 'class_delta',
 ]
+
+
+def standardize_per_race(scores: np.ndarray, race_ids: np.ndarray) -> np.ndarray:
+    """Per-race z-score: (s - race_mean) / max(race_std, 1.0).
+    Used to bring ELO baseline_score (which lives on 1500±50) onto a softmax-friendly
+    scale comparable to LGB raw scores (~±5). Without this, fit_temperature for ELO
+    saturates against its upper bound (τ ≈ 100) because the optimizer can never
+    flatten a 1500±50 distribution enough — see decision log 2026-05-20."""
+    out = np.zeros_like(scores, dtype=float)
+    for rid in np.unique(race_ids):
+        mask = race_ids == rid
+        s = scores[mask].astype(float)
+        m = s.mean()
+        sd = max(float(s.std()), 1.0)
+        out[mask] = (s - m) / sd
+    return out
 
 
 def per_race_softmax(scores: np.ndarray, race_ids: np.ndarray, tau: float = 1.0) -> np.ndarray:
@@ -160,7 +178,10 @@ def main() -> int:
     params = {
         'objective': 'lambdarank',
         'metric': 'ndcg',
-        'ndcg_eval_at': [1, 3],
+        # NDCG@5: averaged signal over wider band → more stable early-stopping
+        # decisions than NDCG@1 / NDCG@3 alone with only 90 val races.
+        'ndcg_eval_at': [1, 3, 5],
+        'first_metric_only': True,  # early-stop reads the first (NDCG@1) for parity with v1
         'learning_rate': args.learning_rate,
         'num_leaves': args.num_leaves,
         'min_data_in_leaf': args.min_data_in_leaf,
@@ -205,7 +226,8 @@ def main() -> int:
         val_scores = booster.predict(Xv)
         val_rids = val_part['race_id'].to_numpy()
         val_is_top1 = (val_part['finishing_position'] == 1).astype(int).to_numpy()
-        val_baseline = val_part['baseline_score'].fillna(0).to_numpy()
+        val_baseline_raw = val_part['baseline_score'].fillna(0).to_numpy()
+        val_baseline = standardize_per_race(val_baseline_raw, val_rids)
 
         diag['val_log_loss']['baseline'] = race_log_loss(
             per_race_softmax(val_scores, val_rids, 1.0), val_is_top1, val_rids)
@@ -272,7 +294,8 @@ def main() -> int:
     Xu = upc[FEAT_COLS].fillna(-1.0).to_numpy()
     upc_scores = booster.predict(Xu)
     upc_rids = upc['race_id'].to_numpy()
-    upc_baseline = upc['baseline_score'].fillna(0).to_numpy()
+    upc_baseline_raw = upc['baseline_score'].fillna(0).to_numpy()
+    upc_baseline = standardize_per_race(upc_baseline_raw, upc_rids)
 
     p_lgb_upc = per_race_softmax(upc_scores, upc_rids, tau_lgb)
     p_elo_upc = per_race_softmax(upc_baseline, upc_rids, tau_elo)
