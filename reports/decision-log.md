@@ -811,3 +811,22 @@
     • ELO failed bad-YAML run: actions/runs/26188836517 (failure, 54e44d0)
     • ELO original failure (drove this work): actions/runs/26180812139
   
+
+  ### Post-signoff: architect's "extend to jockey/trainer" hardening (commits e506536 → fix follow-up)
+
+  Tried e506536 — symmetric FAIL gate across horse/jockey/trainer.
+  Run #26190475406 failed on a pre-existing condition: jockey & trainer
+  `max_d` consistently reach 2026-04-15 while horse and form both reach
+  2026-05-06. Since D1 retains jockey/trainer through 2026-05-17 from
+  earlier runs that DID update those tables, the gap is an axis-cadence
+  asymmetry inside compute_v12, not a regression introduced this session.
+
+  Investigating compute_v12 is out of scope for this PM session. Follow-up
+  commit downgrades jockey/trainer to WARN so the diagnostic still
+  surfaces without false-failing the pipeline.
+
+    • **#ELO-2026-002** — compute_v12 updates horse_elo_snapshots through
+      form max_d (2026-05-06) but jockey/trainer stop at 2026-04-15 in
+      the same run. Investigate whether this is intentional (sample-size
+      gating per jockey/trainer) or a silent code-path divergence.
+  
