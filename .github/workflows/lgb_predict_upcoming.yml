@@ -57,7 +57,7 @@ jobs:
         run: npm ci
 
       - name: Install python deps
-        run: pip install --quiet lightgbm pandas numpy scikit-learn
+        run: pip install --quiet lightgbm pandas numpy scikit-learn scipy
 
       - name: Compute data signature (cache key — must match lgb_walkforward.yml)
         id: sig
@@ -152,7 +152,7 @@ jobs:
           ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
         working-directory: tianxi-backend
         run: |
-          MODEL_VER="lgb-lambdarank-$(date -u +%Y%m%d)"
+          MODEL_VER="lgb-ensemble-$(date -u +%Y%m%d)"
           python scripts/backtest/predict_upcoming.py \
             --train=features.csv \
             --upcoming=upcoming-features.csv \

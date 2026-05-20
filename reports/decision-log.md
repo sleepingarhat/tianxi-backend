@@ -530,4 +530,41 @@
   **Open follow-ups.**
   - PREDICTION VS RESULT panel in admin UI not yet updated to filter / colour by `score_source`. Next session: surface engine in the per-race table and split aggregate hit-rate by source.
   - Once LGB has shipped on ≥3 race days, generate first walk-forward report comparing LGB vs ELO baseline using `score_source` filter.
+
+  ## 2026-05-19 — LGB Stage 7 v2: graded label + validation + temperature calibration + ELO ensemble
+
+  **Problem.** v1 of `predict_upcoming.py` (shipped earlier today) had four known weaknesses surfaced in the post-ship review:
+  1. Binary `is_top1` label — 95% negative rows, ignores 2nd/3rd ordering signal.
+  2. No validation set / early stopping — hard-coded `n_estimators=200` may overfit or underfit.
+  3. Raw softmax over-peaked — `p_win` not calibrated, unsafe for Kelly-style sizing.
+  4. LGB once applied fully overrides ELO — no fallback when LGB underperforms in a regime (e.g. first-timer-heavy races).
+
+  **Fix (commit `<sha>`).** Rewrote `scripts/backtest/predict_upcoming.py` end-to-end:
+
+  | # | Change | Detail |
+  |---|---|---|
+  | 1 | Graded lambdarank label | Switched from `is_top1` to `max_pos - finishing_position` clipped at 0. Matches `lgb_walkforward.py` so train/eval are aligned. |
+  | 2 | Validation + early stopping | Last `--val-days=30` days held out. `lgb.train` with `early_stopping(20)` picks best iteration. Model is then **refit on FULL data** with that iteration count so production sees most-recent races. |
+  | 3 | Temperature calibration | Independent τ_lgb and τ_elo learned on validation by minimizing per-race winner log loss (`scipy.optimize.minimize_scalar`, log-bounded). |
+  | 4 | ELO ensemble | `p_final = α·p_lgb + (1-α)·p_elo` where each engine is per-race softmaxed independently (no mixed-scale concern — satisfies architect's 2026-05-19 ALL-OR-NOTHING gate intent). α learned on validation. Posted `lgb_score = log(p_final)` so analyze.ts ranking automatically reflects the ensemble; `p_win` is the calibrated blended probability. |
+
+  **Safety flags.** `--no-calibrate`, `--no-ensemble`, `--val-days=0` peel each layer back to v1 behaviour if anything misbehaves.
+
+  **Workflow updates** (`.github/workflows/lgb_predict_upcoming.yml`):
+  - Added `scipy` to pip install line (was implicit via scikit-learn; making explicit).
+  - Model version tag bumped from `lgb-lambdarank-YYYYMMDD` to `lgb-ensemble-YYYYMMDD` so the admin UI badge + `prediction_log.lgb_model_version` clearly distinguish v1 from v2 rows.
+
+  **Storage compatibility.** No schema change. `admin.ts POST /api/lgb-predictions` already accepts arbitrary extra fields (the new `diagnostics` block is logged then dropped). `prediction_log` schema is unchanged from the morning's migration. analyze.ts behaviour identical — it sorts by `lgb_score` and uses race-level all-or-nothing gating; the ensemble math happens entirely in Python.
+
+  **Validation expected on next nightly run** (04:00 HKT). Look in GH Actions log for:
+  ```
+  [predict] early stopping picked best_iteration=...
+  [predict] τ_lgb=...  τ_elo=...
+  [predict] α=...  ensemble val log loss ...
+  ```
+  α ≈ 1.0 means LGB dominates (ensemble degenerates to pure-LGB); 0.3–0.7 means the blend is doing real work.
+
+  **Open follow-ups deferred** from the four-weakness list:
+  - Per-venue model (HV vs ST split) — wait for more data; ~400 races/year combined is already thin.
+  - Closing-odds calibration target — current calibration uses `is_top1` outcomes. Comparing Brier score vs market would be a separate evaluation task.
   
