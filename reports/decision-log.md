@@ -600,4 +600,35 @@
   - Admin UI `score_source` split panel — surface v1 vs v2 prediction counts.
   - LGB hyperparameter sweep on validation log loss (best_iter > 1).
   - ELO baseline standardization to fix τ_elo boundary.
+
+  ## 2026-05-20 — LGB v2 refit-placement fix (commit 1e92f6d) + verified
+
+  Architect re-review of `59b8909` caught that the reorder in `2cac780`
+  landed the refit-on-full block at 8-space indent right after the legacy
+  `else:` branch, so Python parsed it as PART of the legacy branch:
+
+    - Validation mode (default): refit-on-full SKIPPED → upcoming predictions
+      used the train_part-only booster (missing the last 30 days held out
+      for early stopping).
+    - Legacy mode (`--val-days=0`): refit ran but referenced `best_iter`
+      which was only defined inside `use_val` → NameError.
+
+  `1e92f6d` lifts the refit block to top-level (4-space) right before
+  "Predict upcoming", guarded by `if use_val:`. Legacy mode already trains
+  on full corpus (`train_part == train` when use_val is False), so no
+  refit needed there.
+
+  **Verification run `26146429496` on `1e92f6d`: SUCCESS**, and crucially
+  the log now contains:
+  ```
+  [predict] refitting on full data (19058 rows) with num_boost_round=1 (τ/α frozen above)
+  [predict] POST 200: {"ok":true,"upserted":108,"races":9,"modelVersion":"lgb-ensemble-20260520"}
+  ```
+  i.e. step 4 of the architect's intended pipeline now executes. Production
+  booster trains on all 19,058 rows; τ/α frozen from clean pre-refit val
+  predictions; applied to 9 upcoming races (108 horses).
+
+  The two non-blocking caveats from the earlier verification (`best_iter=1`
+  and `τ_elo≈100` boundary) remain unchanged — they are data/scale issues,
+  not refit-placement issues, and are tracked as follow-ups.
   
