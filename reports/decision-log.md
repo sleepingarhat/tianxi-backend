@@ -567,4 +567,37 @@
   **Open follow-ups deferred** from the four-weakness list:
   - Per-venue model (HV vs ST split) — wait for more data; ~400 races/year combined is already thin.
   - Closing-odds calibration target — current calibration uses `is_top1` outcomes. Comparing Brier score vs market would be a separate evaluation task.
+
+  ## 2026-05-20 — LGB v2 verification run (commits 2cac780 → 59b8909)
+
+  **Three commits this session on top of d4ba9dd:**
+  - `2cac780` — architect fix: eliminate validation leakage in τ/α calibration (fit on pre-refit booster predictions, then refit-on-full, then freeze τ/α). Added boundary warnings for τ_lgb, τ_elo, α.
+  - `59b8909` — pure whitespace fix: dedent (template-literal indentation had leaked into the Python source, broke at `IndentationError` on line 2).
+
+  **Manual workflow_dispatch verification** (run `26145066187` on `59b8909`): **SUCCESS** — POST 200, 108 predictions across 9 races stored under `modelVersion=lgb-ensemble-20260520`.
+
+  **Validation diagnostics from the verification run** (training 19,058 rows / 1,549 races; val 1,122 rows / 90 races held out from last 30 days):
+
+  ```
+  val log loss (LGB raw τ=1):       2.4918
+  val log loss (LGB calibrated):    2.3289   τ_lgb = 0.059
+  val log loss (ELO calibrated):    2.9868   τ_elo = 99.999  ⚠ boundary
+  val log loss (ensemble):          2.3173   α     = 0.739
+  best_iteration:                   1
+  ```
+
+  **Two honest caveats surfaced:**
+
+  1. **`best_iteration=1`** — lambdarank early stopping hit the patience cutoff after the very first boosting round. With 90 validation races × 1 winner each, NDCG@1 signal is too noisy to drive boosting further. This is **healthier** than v1's hard-coded 200 rounds (which definitely overfit), but it also tells us the validation set is too small to extract a confident iteration count. Follow-up: tune hyperparams (smaller learning rate, larger `min_data_in_leaf`, or switch early-stop metric to NDCG@5). Not blocking — α=0.739 means the ensemble is still LGB-driven and the calibrated p_win is monotone with rank.
+
+  2. **`τ_elo ≈ 100`** at the optimization boundary — the boundary warning fired correctly. ELO `baseline_score` (scale 1500±50) is too compressed for per-race softmax to extract probability from at any temperature. The ranking signal in ELO is fine (analyze.ts uses it for the baseline pick), but as a **probability source** for the ensemble it contributes mostly uniform mass. The 26% weight ELO gets in α effectively acts as a shrinkage prior toward uniform. Follow-up: try `(baseline_score - mean) / std` standardization before softmax, or learn a per-race deviation feature instead of raw score.
+
+  **Conclusion.** v2 is in production and behaves correctly. Both calibration concerns are about **data shape** rather than bugs — the pipeline did exactly what the architect's review wanted (no leakage, frozen τ/α post-refit, boundary warnings). Hyperparameter and feature-scale tuning are separate follow-ups.
+
+  **Deferred this session (carried over from d4ba9dd entry):**
+  - Per-venue model (HV/ST split) — too thin (~200 races each).
+  - Closing-odds Brier evaluation — useful for measuring calibration vs market.
+  - Admin UI `score_source` split panel — surface v1 vs v2 prediction counts.
+  - LGB hyperparameter sweep on validation log loss (best_iter > 1).
+  - ELO baseline standardization to fix τ_elo boundary.
   
