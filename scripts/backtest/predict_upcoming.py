@@ -194,18 +194,14 @@
           diag['best_iteration'] = int(best_iter)
           diag['val_races'] = int(val_part['race_id'].nunique())
 
-          # Refit on FULL data with best_iteration so the production model sees
-          # the most recent races (which were held out for early stopping).
-          Xfull = train[FEAT_COLS].fillna(-1.0).to_numpy()
-          yfull = make_graded_label(train)
-          grp_full = train.groupby('race_id', sort=False).size().to_numpy()
-          print(f'[predict] refitting on full data ({len(Xfull)} rows) with num_boost_round={best_iter}', flush=True)
-          booster = lgb.train(
-              params, lgb.Dataset(Xfull, label=yfull, group=grp_full),
-              num_boost_round=int(best_iter),
-          )
-
-          # #3 Temperature calibration on validation set
+          # ── CRITICAL: fit τ/α on the PRE-REFIT model's val predictions ──────
+          # If we refit on full data first and then predict on val, the model
+          # has memorized the val rows and τ/α would be tuned on leaked
+          # predictions (architect review of d4ba9dd flagged exactly this).
+          # So: 1) score val with the early-stopped (train-only) booster,
+          #     2) fit τ_lgb, τ_elo, α on those clean predictions,
+          #     3) refit on FULL data for production,
+          #     4) apply the FROZEN τ/α to upcoming.
           val_scores = booster.predict(Xv)
           val_rids = val_part['race_id'].to_numpy()
           val_is_top1 = (val_part['finishing_position'] == 1).astype(int).to_numpy()
@@ -226,6 +222,11 @@
               diag['tau_elo'] = tau_elo
               print(f'[predict] τ_lgb={tau_lgb:.3f} (val log loss {diag["val_log_loss"]["lgb_calibrated"]:.4f})', flush=True)
               print(f'[predict] τ_elo={tau_elo:.3f} (val log loss {diag["val_log_loss"]["elo_calibrated"]:.4f})', flush=True)
+              # Warn if optimizer hit a bound — signals model/data mis-spec.
+              for name, val in (('τ_lgb', tau_lgb), ('τ_elo', tau_elo)):
+                  if val < 0.02 or val > 50.0:
+                      print(f'[predict] WARNING: {name}={val:.4f} near optimization bound — '
+                            f'inputs may be on a degenerate scale or labels mis-specified', flush=True)
           else:
               p_lgb_val = per_race_softmax(val_scores, val_rids, 1.0)
               p_elo_val = per_race_softmax(val_baseline, val_rids, 1.0)
@@ -237,6 +238,12 @@
               diag['val_log_loss']['ensemble'] = race_log_loss(blended_val, val_is_top1, val_rids)
               diag['alpha'] = alpha
               print(f'[predict] α={alpha:.3f}, ensemble val log loss {diag["val_log_loss"]["ensemble"]:.4f}', flush=True)
+              if alpha < 0.05:
+                  print(f'[predict] WARNING: α≈0 — ELO baseline strictly dominates LGB on validation; '
+                        f'check feature quality or training horizon', flush=True)
+              elif alpha > 0.95:
+                  print(f'[predict] WARNING: α≈1 — ensemble degenerates to pure-LGB; '
+                        f'ELO blend contributing no useful signal on validation', flush=True)
           else:
               print(f'[predict] ensemble disabled — posting pure-LGB p_win', flush=True)
       else:
@@ -246,6 +253,16 @@
           booster = lgb.train(params, lgb.Dataset(Xtr, label=ytr, group=grp_tr),
                               num_boost_round=n_round)
           diag['best_iteration'] = n_round
+
+          # ── Refit on FULL data with frozen best_iter (τ_lgb/τ_elo/α stay fixed) ──
+          Xfull = train[FEAT_COLS].fillna(-1.0).to_numpy()
+          yfull = make_graded_label(train)
+          grp_full = train.groupby('race_id', sort=False).size().to_numpy()
+          print(f'[predict] refitting on full data ({len(Xfull)} rows) with num_boost_round={best_iter} (τ/α frozen above)', flush=True)
+          booster = lgb.train(
+              params, lgb.Dataset(Xfull, label=yfull, group=grp_full),
+              num_boost_round=int(best_iter),
+          )
 
       # ── Predict upcoming ────────────────────────────────────────────────
       Xu = upc[FEAT_COLS].fillna(-1.0).to_numpy()
