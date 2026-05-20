@@ -254,7 +254,11 @@ def main() -> int:
                             num_boost_round=n_round)
         diag['best_iteration'] = n_round
 
-        # ── Refit on FULL data with frozen best_iter (τ_lgb/τ_elo/α stay fixed) ──
+    # ── Refit on FULL data with frozen best_iter (τ_lgb/τ_elo/α stay fixed) ──
+    # Only runs in validation mode: legacy mode already trained on the full corpus
+    # (train_part == train when use_val is False). best_iter is only defined inside
+    # the use_val branch — guard prevents NameError in legacy mode.
+    if use_val:
         Xfull = train[FEAT_COLS].fillna(-1.0).to_numpy()
         yfull = make_graded_label(train)
         grp_full = train.groupby('race_id', sort=False).size().to_numpy()
