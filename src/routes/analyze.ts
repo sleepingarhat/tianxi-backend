@@ -559,6 +559,41 @@ function buildPickReason(pick: any): string {
   return parts.join(' · ') || '無因子數據';
 }
 
+// 共用 helper：批量載入指定賽事日所有場次的 LGB 預測分數
+// 被 computePicksFromEntries (hit-rate) 與 runRaceDayReportCompute (today-picks) 共用，
+// 防止兩條路徑 drift（曾經 hit-rate 冇 LGB 路徑 → admin 面板顯示純 ELO）。
+export async function loadLgbScoresForMeeting(
+  db: any,
+  raceNumbers: number[],
+  racesDBMap: Map<number, any>,
+  targetDate: string,
+  venue: string,
+): Promise<{ map: Map<string, { score: number; pWin: number | null; modelVersion: string | null }>; modelVersion: string | null }> {
+  const map = new Map<string, { score: number; pWin: number | null; modelVersion: string | null }>();
+  let modelVersion: string | null = null;
+  try {
+    const synthRaceIds = raceNumbers
+      .filter(rn => rn > 0)
+      .map(rn => racesDBMap.get(rn)?.id ?? `race_${targetDate}_${venue}_${rn}`);
+    if (synthRaceIds.length) {
+      const ph = synthRaceIds.map(() => '?').join(',');
+      const { results: lgbRows } = await db.prepare(
+        `SELECT race_id, horse_id, lgb_score, p_win, model_version
+           FROM lgb_predictions WHERE race_id IN (${ph})`
+      ).bind(...synthRaceIds).all<any>().catch(() => ({ results: [] as any[] }));
+      for (const r of (lgbRows ?? [])) {
+        map.set(`${r.race_id}::${r.horse_id}`, {
+          score: Number(r.lgb_score),
+          pWin: r.p_win != null ? Number(r.p_win) : null,
+          modelVersion: r.model_version ?? null,
+        });
+        if (!modelVersion && r.model_version) modelVersion = r.model_version;
+      }
+    }
+  } catch { /* table may not exist on cold envs */ }
+  return { map, modelVersion };
+}
+
 // 共用 helper：計算指定賽事日的命中率統計（被 /hit-rate 與 /hit-rate-rollup 共用）
 export async function computeHitRateStats(db: any, date: string, engine: EloEngine): Promise<
   | { error: string; status: number }
@@ -670,13 +705,20 @@ export async function computeHitRateStats(db: any, date: string, engine: EloEngi
           nameCh: p.nameCh, jockeyCh: p.jockeyCh, trainerCh: p.trainerCh,
           horseElo: p.horseElo, jockeyElo: p.jockeyElo, trainerElo: p.trainerElo,
           eloComposite: p.eloComposite, finalScore: p.finalScore, pWin: p.pWin,
+          lgbScore: p.lgbScore ?? null, lgbModelVersion: p.lgbModelVersion ?? null,
+          scoreSource: p.scoreSource ?? null,
         })),
+        scoreSource: (race as any).scoreSource ?? null,
+        lgbModelVersion: (race as any).lgbModelVersion ?? null,
+        lgbCoverage: (race as any).lgbCoverage ?? null,
         // New: top-4 picks (rank 1-4) with per-pick reason text + hit flag
         predictedTop4: predictedTop4.map((p: any) => ({
           rank: p.rank, horseNumber: p.horseNumber, horseId: p.horseId,
           nameCh: p.nameCh, jockeyCh: p.jockeyCh, trainerCh: p.trainerCh,
           horseElo: p.horseElo, jockeyElo: p.jockeyElo, trainerElo: p.trainerElo,
           eloComposite: p.eloComposite, finalScore: p.finalScore, pWin: p.pWin,
+          lgbScore: p.lgbScore ?? null, lgbModelVersion: p.lgbModelVersion ?? null,
+          scoreSource: p.scoreSource ?? null,
           factorBonus: p.factorBonus,
           reason: buildPickReason(p),
           hit: actualTop4Ids.has(p.horseId),
@@ -1894,33 +1936,9 @@ analyzeRoutes.get('/factors', (c) => {
         const raceMap = new Map<number, any[]>();
         for (const e of entries) { const rn = e.race_number ?? 0; if (!raceMap.has(rn)) raceMap.set(rn, []); raceMap.get(rn)!.push(e); }
         const raceNumbers = Array.from(raceMap.keys()).sort((a, b) => a - b);
-        // ── Stage 7 (2026-05-21): batch-load LGB pre-computed scores ──
-        // Mirrors runRaceDayReportCompute logic so hit-rate (post-race compare)
-        // uses the same LGB-ranked picks as today-picks. Previously this helper
-        // returned ELO-only picks → admin "預測與賽果" face never reflected LGB.
-        // All-or-nothing per race (no mixed-scale softmax).
-        const lgbScoreByRaceHorse = new Map<string, { score: number; pWin: number | null; modelVersion: string | null }>();
-        let helperLgbModelVersion: string | null = null;
-        try {
-          const synthRaceIds = raceNumbers
-            .filter(rn => rn > 0)
-            .map(rn => racesDBMap.get(rn)?.id ?? `race_${targetDate}_${meeting.venue}_${rn}`);
-          if (synthRaceIds.length) {
-            const ph = synthRaceIds.map(() => '?').join(',');
-            const { results: lgbRows } = await db.prepare(
-              `SELECT race_id, horse_id, lgb_score, p_win, model_version
-                 FROM lgb_predictions WHERE race_id IN (${ph})`
-            ).bind(...synthRaceIds).all<any>().catch(() => ({ results: [] as any[] }));
-            for (const r of (lgbRows ?? [])) {
-              lgbScoreByRaceHorse.set(`${r.race_id}::${r.horse_id}`, {
-                score: Number(r.lgb_score),
-                pWin: r.p_win != null ? Number(r.p_win) : null,
-                modelVersion: r.model_version ?? null,
-              });
-              if (!helperLgbModelVersion && r.model_version) helperLgbModelVersion = r.model_version;
-            }
-          }
-        } catch { /* table may not exist on cold envs */ }
+        // ── Stage 7 (2026-05-21): batch-load LGB pre-computed scores via shared helper ──
+        const { map: lgbScoreByRaceHorse, modelVersion: helperLgbModelVersion } =
+          await loadLgbScoresForMeeting(db, raceNumbers, racesDBMap, targetDate, meeting.venue);
 
         const racePredictions = raceNumbers.map(raceNum => {
           const raceEntries = raceMap.get(raceNum)!;
@@ -2120,33 +2138,13 @@ analyzeRoutes.get('/factors', (c) => {
         const raceNumbers = Array.from(raceMap.keys()).sort((a, b) => a - b);
         let seedRatingCount = 0, seedClassCount = 0;
 
-        // ── Stage 7 (2026-05-19): batch-load LGB pre-computed scores ─────────
+        // ── Stage 7 (2026-05-21): batch-load LGB pre-computed scores via shared helper ──
         // Synth race_id matches scripts/import-csv.ts raceId():
         //   race_<YYYY-MM-DD>_<VENUE>_<raceNo>
         // For upcoming races (no races row yet) the dump-features synth uses
         // the same key, so lookup works before & after results are imported.
-        const lgbScoreByRaceHorse = new Map<string, { score: number; pWin: number | null; modelVersion: string | null }>();
-        let todayPicksLgbModelVersion: string | null = null;
-        try {
-          const synthRaceIds = raceNumbers
-            .filter(rn => rn > 0)
-            .map(rn => racesDBMap.get(rn)?.id ?? `race_${targetDate}_${meeting.venue}_${rn}`);
-          if (synthRaceIds.length) {
-            const ph = synthRaceIds.map(() => '?').join(',');
-            const { results: lgbRows } = await db.prepare(
-              `SELECT race_id, horse_id, lgb_score, p_win, model_version
-                 FROM lgb_predictions WHERE race_id IN (${ph})`
-            ).bind(...synthRaceIds).all<any>().catch(() => ({ results: [] as any[] }));
-            for (const r of (lgbRows ?? [])) {
-              lgbScoreByRaceHorse.set(`${r.race_id}::${r.horse_id}`, {
-                score: Number(r.lgb_score),
-                pWin: r.p_win != null ? Number(r.p_win) : null,
-                modelVersion: r.model_version ?? null,
-              });
-              if (!todayPicksLgbModelVersion && r.model_version) todayPicksLgbModelVersion = r.model_version;
-            }
-          }
-        } catch { /* table may not exist on cold envs */ }
+        const { map: lgbScoreByRaceHorse, modelVersion: todayPicksLgbModelVersion } =
+          await loadLgbScoresForMeeting(db, raceNumbers, racesDBMap, targetDate, meeting.venue);
 
         const racePredictions = raceNumbers.map(raceNum => {
           const raceEntries = raceMap.get(raceNum)!;
