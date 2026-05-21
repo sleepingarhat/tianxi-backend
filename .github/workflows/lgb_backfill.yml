@@ -1,0 +1,185 @@
+name: LGB Backfill Past Meetings (P3)
+
+# 2026-05-21 P3-A: walk-forward LGB inference for past meetings whose
+# lgb_predictions rows are missing, so the ensemble path (TX-Oracle v3)
+# stops silently falling back to ELO+factor on past dates.
+#
+# Strict no-leakage: for each target date d, trains LGB on race_date < d ONLY,
+# then predicts d. Reuses predict_upcoming v2 calibration helpers verbatim.
+#
+# After POST: this workflow also force-refreshes meeting_hit_rate_cache for
+# each backfilled date (refresh=1) so admin renders the new ensemble metrics.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dates:
+        description: 'Comma-separated YYYY-MM-DD dates to backfill'
+        required: true
+        default: '2026-05-17,2026-05-13,2026-05-09,2026-05-06,2026-05-02'
+      force_rebuild_db:
+        description: 'Ignore cache and rebuild bulk-local.db'
+        required: false
+        default: 'false'
+      refresh_hit_rate:
+        description: 'After POST, force-refresh hit-rate cache for each date'
+        required: false
+        default: 'true'
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout backend
+        uses: actions/checkout@v4
+        with:
+          path: tianxi-backend
+
+      - name: Checkout data (public repo, sparse)
+        uses: actions/checkout@v4
+        with:
+          repository: sleepingarhat/tianxi-database
+          path: hkjc-data
+          sparse-checkout: |
+            data
+            horses/form_records
+            last_sync.json
+          sparse-checkout-cone-mode: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: tianxi-backend/package-lock.json
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install backend deps
+        working-directory: tianxi-backend
+        run: npm ci
+
+      - name: Install python deps
+        run: pip install --quiet lightgbm pandas numpy scikit-learn scipy
+
+      - name: Compute data signature (cache key — must match lgb_walkforward.yml)
+        id: sig
+        run: |
+          DATA_SHA=$(cd hkjc-data && git rev-parse HEAD)
+          SCRIPTS_HASH=$(find tianxi-backend/scripts/ingest tianxi-backend/scripts/elo tianxi-backend/scripts/import-csv.ts tianxi-backend/src/db/schema.sql -type f 2>/dev/null | sort | xargs sha256sum | sha256sum | head -c12)
+          KEY="lgb-db-${DATA_SHA:0:12}-${SCRIPTS_HASH}"
+          echo "key=$KEY" >> $GITHUB_OUTPUT
+          echo "Cache key: $KEY"
+
+      - name: Restore bulk-local.db cache
+        id: db-cache
+        if: inputs.force_rebuild_db != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: tianxi-backend/bulk-local.db
+          key: ${{ steps.sig.outputs.key }}
+
+      - name: Build bulk-local.db (import results CSVs)
+        if: steps.db-cache.outputs.cache-hit != 'true'
+        working-directory: tianxi-backend
+        run: |
+          npx tsx scripts/import-csv.ts --data-dir ../hkjc-data/data --db ./bulk-local.db
+          ls -lh bulk-local.db
+
+      - name: Ingest horse form records
+        if: steps.db-cache.outputs.cache-hit != 'true'
+        working-directory: tianxi-backend
+        run: |
+          npx tsx scripts/ingest/index.ts form --data-dir=../hkjc-data --db=./bulk-local.db
+          ls -lh bulk-local.db
+
+      - name: Compute ELO ratings
+        if: steps.db-cache.outputs.cache-hit != 'true'
+        working-directory: tianxi-backend
+        run: |
+          npx tsx scripts/elo/compute.ts --db=./bulk-local.db --reset
+          ls -lh bulk-local.db
+
+      - name: Save bulk-local.db cache
+        if: always() && steps.db-cache.outputs.cache-hit != 'true' && hashFiles('tianxi-backend/bulk-local.db') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: tianxi-backend/bulk-local.db
+          key: ${{ steps.sig.outputs.key }}
+
+      - name: DB sanity counts
+        working-directory: tianxi-backend
+        run: |
+          sudo apt-get -qq install -y sqlite3 >/dev/null 2>&1 || true
+          sqlite3 bulk-local.db "SELECT 'meetings:' || COUNT(*) FROM race_meetings;
+            SELECT 'races:' || COUNT(*) FROM races;
+            SELECT 'results:' || COUNT(*) FROM race_results;"
+
+      - name: Dump full-history features
+        working-directory: tianxi-backend
+        run: |
+          YESTERDAY=$(date -u -d 'yesterday' +%Y-%m-%d)
+          npx tsx scripts/backtest/dump-features.ts \
+            --db=bulk-local.db \
+            --from=2024-09-01 --to=$YESTERDAY \
+            --out=features.csv
+          echo "feature rows: $(wc -l < features.csv)"
+          head -1 features.csv | tr ',' '\n' | head -20
+
+      - name: Walk-forward backfill + POST
+        env:
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          DATES: ${{ inputs.dates }}
+        working-directory: tianxi-backend
+        run: |
+          MODEL_VER="lgb-backfill-$(date -u +%Y%m%d)"
+          python scripts/backtest/predict_backfill.py \
+            --features=features.csv \
+            --dates="$DATES" \
+            --admin-url=https://tianxi.racing/admin/api/lgb-predictions \
+            --token="$ADMIN_TOKEN" \
+            --model-version="$MODEL_VER" \
+            | tee backfill.log
+
+      - name: Refresh hit-rate cache for backfilled dates
+        if: inputs.refresh_hit_rate != 'false'
+        env:
+          DATES: ${{ inputs.dates }}
+        run: |
+          set +e
+          IFS=',' read -ra ARR <<< "$DATES"
+          for d in "${ARR[@]}"; do
+            d=$(echo "$d" | xargs)
+            echo "Refreshing hit-rate for $d ..."
+            HTTP_CODE=$(curl -s -o /tmp/hr.json -w '%{http_code}' --max-time 90 \
+              "https://tianxi.racing/api/analyze/hit-rate?date=$d&refresh=1")
+            echo "  HTTP $HTTP_CODE · size $(stat -c%s /tmp/hr.json 2>/dev/null || echo 0)B"
+            # Extract just the source/coverage flags for at-a-glance verification
+            python3 -c "
+import json,sys
+try:
+    d=json.load(open('/tmp/hr.json'))
+    s=d.get('summary') or {}
+    print(f'    ensembleAvailable={s.get(\"ensembleAvailable\")} '
+          f'coverage={s.get(\"ensembleCoveragePct\")}% '
+          f'breakdown={s.get(\"scoreSourceBreakdown\")} '
+          f'top1={s.get(\"top1HitRate\")}%')
+except Exception as e:
+    print(f'    parse failed: {e}')
+" 2>/dev/null
+            sleep 2
+          done
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lgb-backfill
+          path: |
+            tianxi-backend/features.csv
+            tianxi-backend/backfill.log
+          if-no-files-found: warn
+          retention-days: 14
