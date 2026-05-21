@@ -31,11 +31,19 @@ export const analyzeRoutes = new Hono<{ Bindings: Env }>();
     ).run();
   }
 
+  // P0 architect fix 2026-05-21: cache version tag invalidates pre-ensemble
+  // rows so admin doesn't serve stale ELO-only payloads as if they were
+  // TX-Oracle v3 ensemble results. Bumping this constant is a one-shot evict.
+  const HIT_RATE_CACHE_VERSION = 'tx3';
+  function _engineKey(engine: string): string {
+    return `${engine}-${HIT_RATE_CACHE_VERSION}`;
+  }
+
   export async function readHitRateCache(db: D1Database, date: string, engine: string): Promise<any | null> {
     try {
       const row = await db.prepare(
         `SELECT payload_json, computed_at FROM meeting_hit_rate_cache WHERE date=? AND engine=?`
-      ).bind(date, engine).first<{ payload_json: string; computed_at: string }>();
+      ).bind(date, _engineKey(engine)).first<{ payload_json: string; computed_at: string }>();
       if (!row?.payload_json) return null;
       const parsed = JSON.parse(row.payload_json);
       parsed.cachedAt = row.computed_at;
@@ -51,7 +59,7 @@ export const analyzeRoutes = new Hono<{ Bindings: Env }>();
           top1_hit_rate, top3_any_hit_rate, top3_avg_intersect, payload_json, computed_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).bind(
-      date, engine, payload.meeting?.venue ?? null,
+      date, _engineKey(engine), payload.meeting?.venue ?? null,
       s.racesEvaluated ?? null, s.top1Hits ?? null, s.top3AnyHits ?? null, s.top3SumIntersect ?? null,
       s.top1HitRate ?? null, s.top3AnyHitRate ?? null, s.top3AvgIntersect ?? null,
       JSON.stringify({ summary: s, races: payload.races, meeting: payload.meeting }),
@@ -741,6 +749,18 @@ export async function computeHitRateStats(db: any, date: string, engine: EloEngi
       };
     });
     const rate = (n: number, d: number) => d ? Math.round(n / d * 1000) / 10 : null;
+    // P0 architect fix 2026-05-21: surface ensemble availability so admin/UI
+    // can distinguish meetings actually scored by TX-Oracle v3 from those
+    // that silently fell back to pure ELO+factor (lgb_predictions empty for
+    // past dates). Aggregates per-race scoreSource into meeting-level counts.
+    let ensembleRaces = 0, eloOnlyRaces = 0, lgbHitsTotal = 0, lgbSlotsTotal = 0;
+    for (const r of races) {
+      const src = (r as any).scoreSource || 'unknown';
+      if (src.includes('tx-oracle')) ensembleRaces++; else if (src.startsWith('elo')) eloOnlyRaces++;
+      const cov = (r as any).lgbCoverage;
+      if (cov) { lgbHitsTotal += cov.hits || 0; lgbSlotsTotal += cov.total || 0; }
+    }
+    const ensembleCoveragePct = races.length ? Math.round(ensembleRaces / races.length * 1000) / 10 : null;
     return {
       meeting,
       races,
@@ -760,6 +780,12 @@ export async function computeHitRateStats(db: any, date: string, engine: EloEngi
         // New: 首/次/三/四選平均命中數 (out of 4)
         top4SumIntersect, top4Eligible,
         top4AvgIntersect: top4Eligible ? Math.round(top4SumIntersect / top4Eligible * 100) / 100 : null,
+        // P0 fix: ensemble availability transparency
+        ensembleAvailable: ensembleRaces > 0,
+        ensembleCoveragePct,
+        scoreSourceBreakdown: { ensemble: ensembleRaces, eloOnly: eloOnlyRaces, total: races.length },
+        lgbRunnerCoverage: lgbSlotsTotal ? { hits: lgbHitsTotal, slots: lgbSlotsTotal, pct: Math.round(lgbHitsTotal / lgbSlotsTotal * 1000) / 10 } : null,
+        fallbackReason: ensembleRaces === 0 && races.length > 0 ? 'LGB_PREDICTIONS_MISSING' : null,
       },
     };
   }
