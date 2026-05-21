@@ -595,7 +595,8 @@ export async function loadLgbScoresForMeeting(
 }
 
 // 共用 helper：計算指定賽事日的命中率統計（被 /hit-rate 與 /hit-rate-rollup 共用）
-export async function computeHitRateStats(db: any, date: string, engine: EloEngine): Promise<
+// alphaOverride: 用於 /admin/api/ensemble-tune α grid search (P4 backtest)。
+export async function computeHitRateStats(db: any, date: string, engine: EloEngine, alphaOverride?: number): Promise<
   | { error: string; status: number }
   | { meeting: any; races: any[]; summary: any }
 > {
@@ -632,7 +633,7 @@ export async function computeHitRateStats(db: any, date: string, engine: EloEngi
     if (!actualByRace.has(r.race_number)) actualByRace.set(r.race_number, []);
     actualByRace.get(r.race_number)!.push(r);
   }
-  const picksData = await computePicksFromEntries(db, date, meeting, entries, engine);
+  const picksData = await computePicksFromEntries(db, date, meeting, entries, engine, alphaOverride);
   // HK pool hit metrics — computed per race, aggregated into summary.
     // racesEvaluated = denom for top1/top3-any/Q/QP/Trio/Tierce (need actual top-3).
     // first4Eligible = denom for First 4 (need actual top-4).
@@ -1899,6 +1900,89 @@ analyzeRoutes.get('/factors', (c) => {
     return map;
   }
 
+    // ── TX-Oracle v3 (2026-05-21) ────────────────────────────────────────
+    // Ensemble α (LGB weight) loader. Default 0.62 (LGB-leaning but ELO
+    // retains meaningful say). Override via app_settings (key='ensemble_alpha')
+    // — written by /admin/api/ensemble-tune after backtest grid search.
+    export async function getEnsembleAlpha(db: D1Database): Promise<number> {
+      try {
+        await db.prepare(
+          `CREATE TABLE IF NOT EXISTS app_settings (
+             key TEXT PRIMARY KEY,
+             value TEXT NOT NULL,
+             updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+           )`
+        ).run().catch(() => {});
+        const row = await db.prepare(
+          `SELECT value FROM app_settings WHERE key = 'ensemble_alpha'`
+        ).first<{ value: string }>().catch(() => null);
+        if (row?.value) {
+          const n = Number(row.value);
+          if (Number.isFinite(n) && n >= 0 && n <= 1) return n;
+        }
+      } catch { /* ignore */ }
+      return 0.62;
+    }
+
+    // Apply TX-Oracle v3 ensemble in-place on enriched picks (P0 + P1).
+    // - When ANY runner has LGB: z-blend (α·lgb_z + (1-α)·elo_z) for the
+    //   whole race. Missing-LGB runners impute lgb_z = 0 (race mean →
+    //   neutral). Preserves softmax pWin coherence.
+    // - When NO runner has LGB: leave _score/finalScore from elo+factor.
+    export function applyEnsembleBlend(
+      enriched: any[],
+      alpha: number,
+      lgbScoreByRaceHorse: Map<string, { score: number; pWin: number | null; modelVersion: string | null }>,
+      lgbLookupRaceId: string,
+    ): { raceHasLgb: boolean; lgbHits: number; lgbModelVerForRace: string | null } {
+      let lgbHits = 0;
+      let lgbModelVerForRace: string | null = null;
+      const lgbVals: number[] = [];
+      const eloVals: number[] = [];
+      for (const s of enriched) {
+        const lgb = s.horseId ? lgbScoreByRaceHorse.get(`${lgbLookupRaceId}::${s.horseId}`) : undefined;
+        if (lgb && Number.isFinite(lgb.score)) {
+          (s as any).__lgb = lgb;
+          lgbVals.push(lgb.score);
+          lgbHits++;
+          if (!lgbModelVerForRace) lgbModelVerForRace = lgb.modelVersion;
+        }
+        if (s.eloComposite != null && Number.isFinite(s.eloComposite)) eloVals.push(s.eloComposite as number);
+      }
+      const raceHasLgb = lgbHits > 0;
+      if (!raceHasLgb) {
+        for (const s of enriched) s.scoreSource = 'elo+factor';
+        return { raceHasLgb, lgbHits, lgbModelVerForRace };
+      }
+      const ms = (arr: number[]) => {
+        if (arr.length < 2) return { m: arr[0] ?? 0, s: 1 };
+        const m = arr.reduce((a, b) => a + b, 0) / arr.length;
+        const v = arr.reduce((a, b) => a + (b - m) * (b - m), 0) / (arr.length - 1);
+        return { m, s: Math.sqrt(v) || 1 };
+      };
+      const { m: lgbMean, s: lgbStd } = ms(lgbVals);
+      const { m: eloMean, s: eloStd } = ms(eloVals);
+      const aStr = alpha.toFixed(2);
+      for (const s of enriched) {
+        const lgb = (s as any).__lgb;
+        delete (s as any).__lgb;
+        const eloZ = (s.eloComposite != null && Number.isFinite(s.eloComposite))
+          ? (s.eloComposite - eloMean) / eloStd : 0;
+        const lgbZ = lgb ? (lgb.score - lgbMean) / lgbStd : 0; // impute race mean
+        const blendZ = alpha * lgbZ + (1 - alpha) * eloZ;
+        const factorTilt = (s.factorBonus || 0) / 100; // small ELO-pt nudge preserved
+        s._score = blendZ + factorTilt * 0.5;
+        s.lgbScore = lgb ? Math.round(lgb.score * 1000) / 1000 : null;
+        s.lgbModelVersion = lgb ? lgb.modelVersion : null;
+        s.ensembleAlpha = alpha;
+        s.scoreSource = lgb
+          ? `tx-oracle-v3 (ensemble α=${aStr})`
+          : `tx-oracle-v3 (lgb-imputed α=${aStr})`;
+        s.finalScore = Math.round((1500 + blendZ * 100) * 10) / 10;
+      }
+      return { raceHasLgb, lgbHits, lgbModelVerForRace };
+    }
+
     // ── computePicksFromEntries: shared helper for today-picks / picks-by-date / hit-rate ──
       async function computePicksFromEntries(
         db: D1Database,
@@ -1906,7 +1990,10 @@ analyzeRoutes.get('/factors', (c) => {
         meeting: any,
         entries: any[],
         engine: EloEngine,
+        alphaOverride?: number,
       ): Promise<any> {
+        const effectiveAlpha = (typeof alphaOverride === 'number' && Number.isFinite(alphaOverride) && alphaOverride >= 0 && alphaOverride <= 1)
+          ? alphaOverride : await getEnsembleAlpha(db);
         const prefixId = (raw: string | null | undefined, kind: 'horse' | 'jockey' | 'trainer'): string | null => {
           if (!raw) return null;
           const p = kind + '_';
@@ -1985,45 +2072,19 @@ analyzeRoutes.get('/factors', (c) => {
             const finalScore = eloComposite != null ? eloComposite + factorBonus : null;
             return { horseId, horseNumber: e.horse_number, nameCh: e.name_ch, nameEn: e.name_en, jockeyCh: e.jockey_name, trainerCh: e.trainer_name, draw: e.draw, declaredWeight: e.declared_weight, rating: e.rating, horseElo: hElo != null ? Math.round(hElo*10)/10 : null, jockeyElo: jElo != null ? Math.round(jElo*10)/10 : null, trainerElo: tElo != null ? Math.round(tElo*10)/10 : null, eloComposite: eloComposite != null ? Math.round(eloComposite*10)/10 : null, eloEngine: hRead?.engine ?? engine, horseConfidence: hRead?.confidence != null ? Math.round(hRead.confidence*100)/100 : null, horseFrozen: hRead?.isFrozen ?? false, horseRetired: hRead?.isRetired ?? false, factorBonus: Math.round(factorBonus*10)/10, factorBreakdown, finalScore: finalScore != null ? Math.round(finalScore*10)/10 : null, daysSinceLast: daysSince, _score: base + factorBonus / 100 };
           });
-          // ── Stage 7 (2026-05-21): race-level ALL-OR-NOTHING LGB override ──
-          // Mirrors runRaceDayReportCompute (L2150+). Only override when every
-          // runner has an LGB score, to avoid mixed-scale softmax distortion.
-          let raceHasLgb = false;
-          let lgbModelVerForRace: string | null = null;
-          let lgbHits = 0;
-          for (const s of enriched as any[]) {
-            const lgb = s.horseId ? lgbScoreByRaceHorse.get(`${lgbLookupRaceId}::${s.horseId}`) : undefined;
-            if (lgb && Number.isFinite(lgb.score)) {
-              (s as any).__lgb = lgb;
-              lgbHits++;
-              if (!lgbModelVerForRace) lgbModelVerForRace = lgb.modelVersion;
-            }
-          }
-          const allHaveLgb = lgbHits > 0 && lgbHits === (enriched as any[]).length;
-          if (allHaveLgb) raceHasLgb = true;
-          for (const s of enriched as any[]) {
-            const lgb = (s as any).__lgb;
-            delete (s as any).__lgb;
-            if (allHaveLgb && lgb) {
-              s._score = lgb.score;
-              s.lgbScore = Math.round(lgb.score * 1000) / 1000;
-              s.lgbModelVersion = lgb.modelVersion;
-              s.scoreSource = 'lgb';
-              s.finalScore = Math.round((1500 + lgb.score * 100) * 10) / 10;
-            } else {
-              s.scoreSource = lgb ? 'elo+factor (partial-lgb-skipped)' : 'elo+factor';
-              if (lgb) {
-                s.lgbScore = Math.round(lgb.score * 1000) / 1000;
-                s.lgbModelVersion = lgb.modelVersion;
-              }
-            }
-          }
+          // ── TX-Oracle v3 (2026-05-21): ensemble blend via shared helper ──
+          // P0 stacking: α·lgb_z + (1-α)·elo_z (default α=0.62, KV-tunable).
+          // P1 partial coverage: missing-LGB runners impute lgb_z = 0.
+          const { raceHasLgb, lgbHits, lgbModelVerForRace } = applyEnsembleBlend(
+            enriched as any[], effectiveAlpha, lgbScoreByRaceHorse, lgbLookupRaceId,
+          );
           const expScores = enriched.map((s) => Math.exp(s._score));
           const Z = expScores.reduce((a, b) => a + b, 0) || 1;
           const picks = enriched.map((s, i) => { const { _score, ...rest } = s as any; return { ...rest, pWin: Math.round((expScores[i]/Z)*1000)/1000, pTop3: Math.round(Math.min((expScores[i]/Z)*3,0.99)*1000)/1000 }; });
           picks.sort((a: any, b: any) => b.pWin - a.pWin);
           picks.forEach((p: any, i: number) => { p.rank = i + 1; });
-          return { raceId, lgbLookupRaceId, raceNumber: raceNum, title: raceTitle, class: raceClass, distance: raceDistance, going: raceGoing, track: raceTrack, course: raceCourse, picks, scoreSource: raceHasLgb ? 'lgb' : 'elo+factor', lgbCoverage: { hits: lgbHits, total: (enriched as any[]).length, applied: allHaveLgb }, lgbModelVersion: lgbModelVerForRace };
+          const _txTotal = (enriched as any[]).length;
+          return { raceId, lgbLookupRaceId, raceNumber: raceNum, title: raceTitle, class: raceClass, distance: raceDistance, going: raceGoing, track: raceTrack, course: raceCourse, picks, scoreSource: raceHasLgb ? `tx-oracle-v3 (lgb=${lgbHits}/${_txTotal}, α=${effectiveAlpha.toFixed(2)})` : 'elo+factor', lgbCoverage: { hits: lgbHits, total: _txTotal, applied: raceHasLgb }, lgbModelVersion: lgbModelVerForRace, ensembleAlpha: effectiveAlpha };
         });
         const eloReady = racePredictions.some((r) => r.picks?.some((p: any) => p.eloComposite != null));
         return { date: targetDate, venue: meeting.venue, trackCondition: meeting.track_condition, eloEngine: engine, eloWeights: ELO_WEIGHTS, eloReady, races: racePredictions, lgbModelVersion: helperLgbModelVersion, lgbCoverage: { rows: lgbScoreByRaceHorse.size }, generatedAt: new Date().toISOString() };
@@ -2145,6 +2206,7 @@ analyzeRoutes.get('/factors', (c) => {
         // the same key, so lookup works before & after results are imported.
         const { map: lgbScoreByRaceHorse, modelVersion: todayPicksLgbModelVersion } =
           await loadLgbScoresForMeeting(db, raceNumbers, racesDBMap, targetDate, meeting.venue);
+        const todayPicksAlpha = await getEnsembleAlpha(db);
 
         const racePredictions = raceNumbers.map(raceNum => {
           const raceEntries = raceMap.get(raceNum)!;
@@ -2206,45 +2268,17 @@ analyzeRoutes.get('/factors', (c) => {
             const computedConf = hRead?.confidence != null ? Math.round(hRead.confidence*100)/100 : (seedConfidence != null ? seedConfidence : null);
             return { horseId, horseNumber: e.horse_number, nameCh: e.name_ch, nameEn: e.name_en, jockeyCh: e.jockey_name, trainerCh: e.trainer_name, draw: e.draw, declaredWeight: e.declared_weight, rating: e.rating, horseElo: hElo != null ? Math.round(hElo*10)/10 : null, jockeyElo: jElo != null ? Math.round(jElo*10)/10 : null, trainerElo: tElo != null ? Math.round(tElo*10)/10 : null, eloComposite: eloComposite != null ? Math.round(eloComposite*10)/10 : null, eloEngine: hRead?.engine ?? engine, eloSource, horseConfidence: computedConf, horseConfWeightFactor: Math.round(horseConfFactor*100)/100, horseFrozen: hRead?.isFrozen ?? false, horseRetired: hRead?.isRetired ?? false, factorBonus: Math.round(factorBonus*10)/10, factorBreakdown, finalScore: finalScore != null ? Math.round(finalScore*10)/10 : null, daysSinceLast: daysSince, _score: base + factorBonus / 100 };
           });
-          // Stage 7: race-level ALL-OR-NOTHING LGB (architect review 2026-05-19).
-            // Mixed-scale softmax (LGB margin + ELO base) isn't calibrated → distorts probs.
-            // Also rewrites finalScore so qimen variant + prediction_log are consistent.
-            let raceHasLgb = false;
-            let lgbModelVerForRace: string | null = null;
-            let lgbHits = 0;
-            for (const s of enriched as any[]) {
-              const lgb = s.horseId ? lgbScoreByRaceHorse.get(`${lgbLookupRaceId}::${s.horseId}`) : undefined;
-              if (lgb && Number.isFinite(lgb.score)) {
-                (s as any).__lgb = lgb;
-                lgbHits++;
-                if (!lgbModelVerForRace) lgbModelVerForRace = lgb.modelVersion;
-              }
-            }
-            const allHaveLgb = lgbHits > 0 && lgbHits === (enriched as any[]).length;
-            if (allHaveLgb) raceHasLgb = true;
-            for (const s of enriched as any[]) {
-              const lgb = (s as any).__lgb;
-              delete (s as any).__lgb;
-              if (allHaveLgb && lgb) {
-                s._score = lgb.score;
-                s.lgbScore = Math.round(lgb.score * 1000) / 1000;
-                s.lgbModelVersion = lgb.modelVersion;
-                s.scoreSource = 'lgb';
-                s.finalScore = Math.round((1500 + lgb.score * 100) * 10) / 10;
-              } else {
-                s.scoreSource = lgb ? 'elo+factor (partial-lgb-skipped)' : 'elo+factor';
-                if (lgb) {
-                  s.lgbScore = Math.round(lgb.score * 1000) / 1000;
-                  s.lgbModelVersion = lgb.modelVersion;
-                }
-              }
-            }
+          // ── TX-Oracle v3 (2026-05-21): ensemble blend via shared helper ──
+            const { raceHasLgb, lgbHits, lgbModelVerForRace } = applyEnsembleBlend(
+              enriched as any[], todayPicksAlpha, lgbScoreByRaceHorse, lgbLookupRaceId,
+            );
             const expScores = enriched.map((s) => Math.exp(s._score));
           const Z = expScores.reduce((a, b) => a + b, 0) || 1;
           const picks = enriched.map((s, i) => { const { _score, ...rest } = s as any; return { ...rest, pWin: Math.round((expScores[i]/Z)*1000)/1000, pTop3: Math.round(Math.min((expScores[i]/Z)*3,0.99)*1000)/1000 }; });
           picks.sort((a: any, b: any) => b.pWin - a.pWin);
           picks.forEach((p: any, i: number) => { p.rank = i + 1; });
-          return { raceId, lgbLookupRaceId, raceNumber: raceNum, title: raceTitle, class: raceClass, distance: raceDistance, going: raceGoing, track: raceTrack, course: raceCourse, picks, scoreSource: raceHasLgb ? 'lgb' : 'elo+factor', lgbCoverage: { hits: lgbHits, total: (enriched as any[]).length, applied: allHaveLgb }, lgbModelVersion: lgbModelVerForRace };
+          const _txTotal2 = (enriched as any[]).length;
+          return { raceId, lgbLookupRaceId, raceNumber: raceNum, title: raceTitle, class: raceClass, distance: raceDistance, going: raceGoing, track: raceTrack, course: raceCourse, picks, scoreSource: raceHasLgb ? `tx-oracle-v3 (lgb=${lgbHits}/${_txTotal2}, α=${todayPicksAlpha.toFixed(2)})` : 'elo+factor', lgbCoverage: { hits: lgbHits, total: _txTotal2, applied: raceHasLgb }, lgbModelVersion: lgbModelVerForRace, ensembleAlpha: todayPicksAlpha };
         });
         const eloReady = racePredictions.some((r) => r.picks?.some((p: any) => p.eloComposite != null));
         const computeMs = Date.now() - t0;
@@ -3162,6 +3196,85 @@ analyzeRoutes.get('/factors', (c) => {
             });
         } catch (err: any) {
           return c.json({ error: 'hit-rate-rollup failed', detail: err?.message ?? String(err) }, 500);
+        }
+      });
+
+      // GET /api/analyze/ensemble-tune?days=30&apply=0
+      // P4: TX-Oracle v3 α grid search. Runs computeHitRateStats for α ∈
+      // {0.40, 0.50, 0.62, 0.75, 0.85} over last N days of meetings with
+      // results, aggregates top-1 / top-4 intersect, picks winner.
+      // ?apply=1 writes winner α into app_settings (key='ensemble_alpha').
+      analyzeRoutes.get('/ensemble-tune', async (c) => {
+        try {
+          const db = c.env.DB;
+          const days = Math.max(7, Math.min(180, parseInt(c.req.query('days') || '30', 10) || 30));
+          const apply = c.req.query('apply') === '1';
+          const engine: EloEngine = c.req.query('engine') === 'v11' ? 'v11' : 'v12';
+          const today = new Date().toISOString().substring(0, 10);
+          const cutoff = new Date(Date.now() - days * 86400000).toISOString().substring(0, 10);
+          const datesQ = await db.prepare(
+            "SELECT DISTINCT rm.date AS date FROM race_meetings rm " +
+            "JOIN races r ON r.meeting_id = rm.id JOIN race_results rr ON rr.race_id = r.id " +
+            "WHERE rm.date >= ? AND rm.date < ? AND rr.finishing_position IS NOT NULL " +
+            "ORDER BY rm.date DESC"
+          ).bind(cutoff, today).all<any>().catch(() => ({ results: [] as any[] }));
+          const dates: string[] = ((datesQ.results as any[]) || []).map((m: any) => m.date as string);
+          const alphas = [0.40, 0.50, 0.62, 0.75, 0.85];
+          const perAlpha: Record<string, any> = {};
+          for (const a of alphas) {
+            let races = 0, top1 = 0, top4Int = 0, top4Elig = 0;
+            for (const d of dates) {
+              try {
+                const r = await computeHitRateStats(db, d, engine, a);
+                if ('error' in r) continue;
+                const s = r.summary;
+                if (!s.racesEvaluated) continue;
+                races += s.racesEvaluated;
+                top1 += s.top1Hits || 0;
+                top4Int += s.top4SumIntersect || 0;
+                top4Elig += s.top4Eligible || 0;
+              } catch { /* skip */ }
+            }
+            perAlpha[a.toFixed(2)] = {
+              alpha: a,
+              races,
+              top1Hits: top1,
+              top1HitRate: races ? Math.round(top1 / races * 1000) / 10 : null,
+              top4SumIntersect: top4Int,
+              top4Eligible: top4Elig,
+              top4AvgIntersect: top4Elig ? Math.round(top4Int / top4Elig * 100) / 100 : null,
+            };
+          }
+          // Pick winner: rank by (top1 hit rate * 0.6 + top4 avg intersect * 0.4)
+          let winner: { alpha: number; score: number } | null = null;
+          for (const k of Object.keys(perAlpha)) {
+            const r = perAlpha[k];
+            const t1 = (r.top1HitRate || 0) / 100;
+            const t4 = (r.top4AvgIntersect || 0) / 4;
+            const score = t1 * 0.6 + t4 * 0.4;
+            r.compositeScore = Math.round(score * 1000) / 1000;
+            if (!winner || score > winner.score) winner = { alpha: r.alpha, score };
+          }
+          let applied = false;
+          if (apply && winner) {
+            await db.prepare(
+              `INSERT INTO app_settings (key, value, updated_at) VALUES ('ensemble_alpha', ?, datetime('now'))
+               ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
+            ).bind(String(winner.alpha)).run().catch(() => {});
+            applied = true;
+          }
+          const currentAlpha = await getEnsembleAlpha(db);
+          return c.json({
+            windowDays: days, from: cutoff, to: today,
+            meetingsEvaluated: dates.length,
+            alphas, perAlpha,
+            winner: winner ? { alpha: winner.alpha, compositeScore: Math.round(winner.score * 1000) / 1000 } : null,
+            currentAlpha,
+            applied,
+            generatedAt: new Date().toISOString(),
+          });
+        } catch (err: any) {
+          return c.json({ error: 'ensemble-tune failed', detail: err?.message ?? String(err) }, 500);
         }
       });
       // ── 梅花解讀 helper ───────────────────────────────────────
