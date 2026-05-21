@@ -3286,12 +3286,25 @@ analyzeRoutes.get('/factors', (c) => {
             if (!winner || score > winner.score) winner = { alpha: r.alpha, score };
           }
           let applied = false;
+          let applyDenied = false;
           if (apply && winner) {
-            await db.prepare(
-              `INSERT INTO app_settings (key, value, updated_at) VALUES ('ensemble_alpha', ?, datetime('now'))
-               ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
-            ).bind(String(winner.alpha)).run().catch(() => {});
-            applied = true;
+            // P1 fix: gate write behind ADMIN_TOKEN (Bearer header or ?token=).
+            // Route is mounted under public /api/analyze, so the apply path
+            // would otherwise allow unauthenticated model-parameter mutation.
+            const expected = (c.env as any).ADMIN_TOKEN as string | undefined;
+            const header = c.req.header('authorization') || '';
+            const bearer = header.startsWith('Bearer ') ? header.slice(7) : '';
+            const queryTok = c.req.query('token') || '';
+            const ok = !!expected && (bearer === expected || queryTok === expected);
+            if (!ok) {
+              applyDenied = true;
+            } else {
+              await db.prepare(
+                `INSERT INTO app_settings (key, value, updated_at) VALUES ('ensemble_alpha', ?, datetime('now'))
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
+              ).bind(String(winner.alpha)).run().catch(() => {});
+              applied = true;
+            }
           }
           const currentAlpha = await getEnsembleAlpha(db);
           return c.json({
@@ -3301,6 +3314,7 @@ analyzeRoutes.get('/factors', (c) => {
             winner: winner ? { alpha: winner.alpha, compositeScore: Math.round(winner.score * 1000) / 1000 } : null,
             currentAlpha,
             applied,
+            applyDenied,
             generatedAt: new Date().toISOString(),
           });
         } catch (err: any) {
