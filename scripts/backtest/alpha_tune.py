@@ -29,19 +29,33 @@ UA = ('Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 '
       '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
 
 
-def http_get(url: str, timeout: int = 60) -> tuple[int, dict | None, str]:
+def http_get(url: str, timeout: int = 60, max_retries: int = 5) -> tuple[int, dict | None, str]:
+    """GET with exponential backoff retry on 5xx and 429 (Cloudflare rate-limit)."""
     req = urllib.request.Request(url, headers={'User-Agent': UA, 'Accept': 'application/json'})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.status, json.loads(r.read()), ''
-    except urllib.error.HTTPError as e:
+    last_status, last_body = 0, ''
+    for attempt in range(max_retries):
         try:
-            body = e.read().decode()[:200]
-        except Exception:
-            body = ''
-        return e.code, None, body
-    except Exception as e:
-        return 0, None, str(e)
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return r.status, json.loads(r.read()), ''
+        except urllib.error.HTTPError as e:
+            try:
+                body = e.read().decode()[:200]
+            except Exception:
+                body = ''
+            last_status, last_body = e.code, body
+            # Retry on Cloudflare rate-limit / transient 5xx; bail on 4xx terminals.
+            if e.code in (429, 500, 502, 503, 504) and attempt < max_retries - 1:
+                backoff = min(30.0, 2.0 ** attempt + 0.5)
+                time.sleep(backoff)
+                continue
+            return e.code, None, body
+        except Exception as e:
+            last_status, last_body = 0, str(e)
+            if attempt < max_retries - 1:
+                time.sleep(min(30.0, 2.0 ** attempt + 0.5))
+                continue
+            return 0, None, str(e)
+    return last_status, None, last_body
 
 
 def http_post_json(url: str, body: dict, token: str, timeout: int = 30):
@@ -77,7 +91,7 @@ def main() -> int:
                     help='POST winner α to /api/analyze/ensemble-alpha after the sweep.')
     ap.add_argument('--min-margin', type=float, default=0.0,
                     help='Only apply if winner.compositeScore exceeds current-α score by this margin.')
-    ap.add_argument('--sleep', type=float, default=0.5,
+    ap.add_argument('--sleep', type=float, default=1.0,
                     help='Seconds to sleep between calls (rate-limit politeness).')
     args = ap.parse_args()
 
