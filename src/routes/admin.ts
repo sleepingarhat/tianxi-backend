@@ -1912,6 +1912,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
           + '<td>' + fmtElo(p.trainerElo) + '</td>'
           + '<td><strong>' + fmtElo(p.eloComposite) + '</strong></td>'
           + '<td>' + fmtBonus(p.factorBonus) + '</td>'
+          + '<td style="font-variant-numeric:tabular-nums">' + (p.lgbScore != null ? '<span style="color:'+(p.lgbScore>-2.2?'#0a7':'#666')+'">' + p.lgbScore.toFixed(2) + '</span>' : '<span class="muted-cell">—</span>') + '</td>'
           + '<td><strong>' + fmtElo(p.finalScore) + '</strong></td>'
           + '<td class="' + (p.rank === 1 ? 'ok' : '') + '">' + fmtPct(p.pWin) + '</td>'
           + '<td>' + fmtPct(p.pTop3) + '</td>'
@@ -1928,7 +1929,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
         + '<div class="tp-table-wrap"><table class="tp-table"><thead><tr>'
           + '<th>排名</th><th>馬號</th><th>馬名 / 騎師 / 練馬師</th><th>檔</th>'
           + '<th>馬ELO</th><th>騎ELO</th><th>練ELO</th><th>綜合ELO</th>'
-          + '<th>因子</th><th>最終分</th><th>勝率</th><th>前三</th>'
+          + '<th>因子</th><th title="LGB lambdarank 原始分（z-norm 前）；高 = 預測 prob 高">LGB分</th><th title="TX-Oracle v3 ensemble: 1500 + (α·lgb_z + (1-α)·elo_z + factor*0.5)·100, α=0.62">最終分</th><th>勝率</th><th>前三</th>'
         + '</tr></thead><tbody>' + rows + '</tbody></table></div></div>';
     }).join('');
     el.innerHTML = '<div style="padding:10px 12px;background:#fff;border:1px solid var(--rule);border-radius:4px;margin-bottom:8px;font-size:12px">'
@@ -2389,6 +2390,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
               + '<td>' + fmtElo(p.trainerElo) + '</td>'
               + '<td><strong>' + fmtElo(p.eloComposite) + '</strong></td>'
               + '<td>' + fmtBonus(p.factorBonus, p.factorBreakdown) + '</td>'
+              + '<td style="font-variant-numeric:tabular-nums">' + (p.lgbScore != null ? '<span style="color:'+(p.lgbScore>-2.2?'#0a7':'#666')+';font-weight:600">' + p.lgbScore.toFixed(2) + '</span>' : '<span class="muted-cell">—</span>') + '</td>'
               + '<td><strong>' + fmtElo(p.finalScore) + '</strong></td>'
               + '<td class="' + probCls + (p.rank<=2?' ok':'') + '">' + fmtPct(p.pWin) + '</td>'
               + '<td>' + fmtPct(p.pTop3) + '</td>'
@@ -2411,7 +2413,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
             + '<table class="tp-table"><thead><tr>'
               + '<th>排名</th><th>馬號</th><th>馬名 / 騎師 / 練馬師</th><th>檔</th>'
               + '<th>馬ELO</th><th>騎ELO</th><th>練ELO</th><th>綜合ELO</th>'
-              + '<th>因子調整</th><th>最終分</th><th>勝率</th><th>前三</th>'
+              + '<th>因子調整</th><th title="LGB lambdarank 原始分（z-norm 前）；越接近 0 越好">LGB分</th><th title="TX-Oracle v3 ensemble: 1500 + (α·lgb_z + (1-α)·elo_z + factor·0.5)·100, α=0.62">最終分</th><th>勝率</th><th>前三</th>'
             + '</tr></thead><tbody>' + rows + '</tbody></table>'
           + '</div>'
         + '</div>';
