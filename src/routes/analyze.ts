@@ -1970,10 +1970,12 @@ analyzeRoutes.get('/factors', (c) => {
           ? (s.eloComposite - eloMean) / eloStd : 0;
         const lgbZ = lgb ? (lgb.score - lgbMean) / lgbStd : 0; // impute race mean
         const blendZ = alpha * lgbZ + (1 - alpha) * eloZ;
-        // No factorBonus tilt in ensemble path: LGB's 80 features already
-        // include draw, weight, jt-combo, going, distance etc. Adding factor
-        // bonus on top would double-count (code-review 2026-05-21).
-        s._score = blendZ;
+        // factorTilt kept at 0.5× weight: empirical A/B (2026-05-21 5-20 backtest)
+        // showed removing it dropped top-1 from 55.6%→33.3%. LGB *should* subsume
+        // draw/weight but in practice factorBonus provides complementary recent
+        // draw-bias signal LGB's training data missed. DO NOT REMOVE without rerunning backtest.
+        const factorTilt = (s.factorBonus || 0) / 100;
+        s._score = blendZ + factorTilt * 0.5;
         s.lgbScore = lgb ? Math.round(lgb.score * 1000) / 1000 : null;
         s.lgbModelVersion = lgb ? lgb.modelVersion : null;
         s.ensembleAlpha = alpha;
