@@ -1565,6 +1565,13 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
     </style></head>
 <body>
   <h1>天喜 · 內部控制台 <span class="pulse" title="實時監控"></span></h1>
+  <div style="margin:-8px 0 14px;font-size:12px;color:var(--mut);line-height:1.5">
+    生產模型：<strong style="color:var(--fg)">天喜預測模型 TX-Oracle v3</strong>
+    · <span style="font-family:monospace">LightGBM ensemble + ELO complementary stacking</span>
+    · α=0.62 (LGB lean, P4 auto-tunable)
+    · <a href="/api/analyze/ensemble-tune?days=30" target="_blank" style="color:var(--accent)">[P4 α grid search]</a>
+    <a href="/api/analyze/ensemble-tune?days=30&apply=1" target="_blank" style="color:var(--accent);margin-left:6px">[grid search + apply]</a>
+  </div>
   <div class="bar">伺服器端渲染 · 每 60 秒自動刷新<span class="refresh" id="refreshClock"></span></div>
 
   <div id="alertbar"></div>
@@ -1616,7 +1623,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
     <th>資料源</th><th>歷史齊全</th><th>自動更新</th><th>最新運行</th><th>最後成功</th><th>數量 / 最新</th><th>負責工作流</th>
   </tr></thead><tbody></tbody></table>
 
-  <h2>預測因子覆蓋（資料源監控 · R5 計分：檔位 + 負磅）<span id="factorCovPct" style="font-size:11px;font-weight:600;color:var(--green);margin-left:6px"></span></h2>
+  <h2>預測因子覆蓋（資料源監控 · 天喜預測模型 TX-Oracle v3：LightGBM ensemble + ELO complementary stacking）<span id="factorCovPct" style="font-size:11px;font-weight:600;color:var(--green);margin-left:6px"></span></h2>
   <table id="coverFac"><thead><tr>
     <th>因子</th><th>目前使用</th><th>權重</th><th>歷史齊全</th><th>自動更新</th><th>資料來源</th><th>備註</th>
   </tr></thead><tbody></tbody></table>
@@ -1634,9 +1641,9 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
   </tr></thead><tbody></tbody></table>
   <div id="meetingPanel" style="margin-top:14px"></div>
 
-    <h2>即日賽事 R5 預測</h2>
+    <h2>即日 天喜預測模型 TX-Oracle v3 預測 <span style="font-size:11px;font-weight:500;color:var(--mut);margin-left:8px">LightGBM ensemble + ELO complementary stacking · α=0.62 (P4 tunable)</span></h2>
     <div class="actions-row">
-      <button class="tp-run" id="btnTodayPredict" onclick="loadTodayPredictions(false)">▶ 載入即日賽事預測報告（LGB lambdarank · ELO + 檔位 + 負磅）</button>
+      <button class="tp-run" id="btnTodayPredict" onclick="loadTodayPredictions(false)">▶ 載入即日 TX-Oracle v3 預測（ensemble: LGB lambdarank ⊕ ELO + 檔位/負磅）</button>
       <span id="todayPredictStatus" style="font-size:12px;color:var(--mut)"></span>
     </div>
     <div id="todayPredictResults"></div>
@@ -1705,7 +1712,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
     const totalCount=(D.coverage?.factors||[]).length;
     const pct=totalCount>0?Math.round(usedCount/totalCount*100):0;
     const pctEl=document.getElementById('factorCovPct');
-    if(pctEl)pctEl.textContent='R5 計分 2 項 · '+usedCount+'/'+totalCount+' 監控項就緒 · '+pct+'% 資料齊備';
+    if(pctEl)pctEl.textContent='TX-Oracle v3 因子層 · '+usedCount+'/'+totalCount+' 監控項就緒 · '+pct+'% 資料齊備';
   }
 
   function renderStatus() {
