@@ -150,26 +150,26 @@ jobs:
           DATES: ${{ inputs.dates }}
         run: |
           set +e
+          cat > /tmp/parse_hr.py <<'PYEOF'
+          import json, sys
+          try:
+              d = json.load(open('/tmp/hr.json'))
+              s = d.get('summary') or {}
+              print('    ensembleAvailable=' + str(s.get('ensembleAvailable')) +
+                    ' coverage=' + str(s.get('ensembleCoveragePct')) + '%' +
+                    ' breakdown=' + str(s.get('scoreSourceBreakdown')) +
+                    ' top1=' + str(s.get('top1HitRate')) + '%')
+          except Exception as e:
+              print('    parse failed: ' + str(e))
+          PYEOF
           IFS=',' read -ra ARR <<< "$DATES"
           for d in "${ARR[@]}"; do
             d=$(echo "$d" | xargs)
             echo "Refreshing hit-rate for $d ..."
             HTTP_CODE=$(curl -s -o /tmp/hr.json -w '%{http_code}' --max-time 90 \
               "https://tianxi.racing/api/analyze/hit-rate?date=$d&refresh=1")
-            echo "  HTTP $HTTP_CODE · size $(stat -c%s /tmp/hr.json 2>/dev/null || echo 0)B"
-            # Extract just the source/coverage flags for at-a-glance verification
-            python3 -c "
-import json,sys
-try:
-    d=json.load(open('/tmp/hr.json'))
-    s=d.get('summary') or {}
-    print(f'    ensembleAvailable={s.get(\"ensembleAvailable\")} '
-          f'coverage={s.get(\"ensembleCoveragePct\")}% '
-          f'breakdown={s.get(\"scoreSourceBreakdown\")} '
-          f'top1={s.get(\"top1HitRate\")}%')
-except Exception as e:
-    print(f'    parse failed: {e}')
-" 2>/dev/null
+            echo "  HTTP $HTTP_CODE  size $(stat -c%s /tmp/hr.json 2>/dev/null || echo 0)B"
+            python3 /tmp/parse_hr.py 2>/dev/null
             sleep 2
           done
 
