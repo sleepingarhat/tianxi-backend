@@ -1,0 +1,74 @@
+name: TX-Oracle Ensemble α Tune (P3-C)
+
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: 'Lookback window in days (probes for race meetings within this range)'
+        required: false
+        default: '60'
+      alphas:
+        description: 'Comma-separated α candidates to sweep'
+        required: false
+        default: '0.40,0.50,0.62,0.75,0.85'
+      engine:
+        description: 'ELO engine (v11 or v12)'
+        required: false
+        default: 'v12'
+      apply:
+        description: 'Apply winner α to production app_settings (true/false)'
+        required: false
+        default: 'false'
+      min_margin:
+        description: 'Minimum composite-score margin over baseline α=0.62 required for apply'
+        required: false
+        default: '0.0'
+
+permissions:
+  contents: read
+
+jobs:
+  tune:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run α tune
+        env:
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          DAYS: ${{ inputs.days }}
+          ALPHAS: ${{ inputs.alphas }}
+          ENGINE: ${{ inputs.engine }}
+          APPLY: ${{ inputs.apply }}
+          MIN_MARGIN: ${{ inputs.min_margin }}
+        run: |
+          set -euo pipefail
+          APPLY_FLAG=""
+          if [ "$APPLY" = "true" ]; then APPLY_FLAG="--apply"; fi
+          python3 scripts/backtest/alpha_tune.py \
+            --base-url=https://tianxi.racing \
+            --token="$ADMIN_TOKEN" \
+            --days="$DAYS" \
+            --alphas="$ALPHAS" \
+            --engine="$ENGINE" \
+            --min-margin="$MIN_MARGIN" \
+            $APPLY_FLAG \
+            | tee alpha_tune.log
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: alpha-tune-report
+          path: |
+            alpha_tune_report.json
+            alpha_tune.log
+          if-no-files-found: warn
+          retention-days: 30

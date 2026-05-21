@@ -3114,8 +3114,16 @@ analyzeRoutes.get('/factors', (c) => {
             if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return c.json({ error: '請提供 YYYY-MM-DD 格式日期' }, 400);
             const engine: EloEngine = c.req.query('engine') === 'v11' ? 'v11' : 'v12';
             const refresh = c.req.query('refresh') === '1';
+            // P3-C: ?alpha=0.62 lets offline tuner sweep candidates without
+            // mutating production α. When provided, bypass cache (read+write)
+            // so each α gets a fresh per-race blend.
+            const alphaRaw = c.req.query('alpha');
+            const alphaOverride = alphaRaw != null && alphaRaw !== ''
+              ? Number(alphaRaw) : undefined;
+            const hasAlpha = typeof alphaOverride === 'number'
+              && Number.isFinite(alphaOverride) && alphaOverride >= 0 && alphaOverride <= 1;
 
-            if (!refresh) {
+            if (!refresh && !hasAlpha) {
               const cached = await readHitRateCache(c.env.DB, date, engine);
               if (cached) {
                 return c.json({
@@ -3132,14 +3140,17 @@ analyzeRoutes.get('/factors', (c) => {
             }
 
             await ensureHitRateCacheTable(c.env.DB).catch(() => {});
-            const result = await computeHitRateStats(c.env.DB, date, engine);
+            const result = await computeHitRateStats(c.env.DB, date, engine, hasAlpha ? alphaOverride : undefined);
             if ('error' in result) return c.json({ error: result.error }, result.status as any);
-            await writeHitRateCache(c.env.DB, date, engine, result).catch(() => {});
+            if (!hasAlpha) {
+              await writeHitRateCache(c.env.DB, date, engine, result).catch(() => {});
+            }
             return c.json({
               date,
               venue: result.meeting.venue,
               trackCondition: result.meeting.track_condition,
               engine,
+              alphaUsed: hasAlpha ? alphaOverride : undefined,
               summary: result.summary,
               races: result.races,
               generatedAt: new Date().toISOString(),
@@ -3147,6 +3158,35 @@ analyzeRoutes.get('/factors', (c) => {
             });
           } catch (err: any) {
             return c.json({ error: 'hit-rate failed', detail: err?.message ?? String(err) }, 500);
+          }
+        });
+
+        // POST /api/analyze/ensemble-alpha {alpha}
+        // P3-C: admin-gated endpoint for offline α tuner to apply a chosen α
+        // after running the sweep outside CF Worker wall-time. Separates write
+        // from the heavy compute path.
+        analyzeRoutes.post('/ensemble-alpha', async (c) => {
+          try {
+            const expected = (c.env as any).ADMIN_TOKEN as string | undefined;
+            const header = c.req.header('authorization') || '';
+            const bearer = header.startsWith('Bearer ') ? header.slice(7) : '';
+            const queryTok = c.req.query('token') || '';
+            const ok = !!expected && (bearer === expected || queryTok === expected);
+            if (!ok) return c.json({ error: 'unauthorized' }, 401);
+
+            const body = await c.req.json().catch(() => ({} as any));
+            const alpha = Number((body as any)?.alpha);
+            if (!Number.isFinite(alpha) || alpha < 0 || alpha > 1) {
+              return c.json({ error: 'alpha must be a number in [0,1]' }, 400);
+            }
+            await c.env.DB.prepare(
+              `INSERT INTO app_settings (key, value, updated_at) VALUES ('ensemble_alpha', ?, datetime('now'))
+               ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
+            ).bind(String(alpha)).run();
+            const currentAlpha = await getEnsembleAlpha(c.env.DB);
+            return c.json({ applied: true, alpha, currentAlpha, appliedAt: new Date().toISOString() });
+          } catch (err: any) {
+            return c.json({ error: 'ensemble-alpha failed', detail: err?.message ?? String(err) }, 500);
           }
         });
 
