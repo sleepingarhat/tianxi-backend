@@ -2438,16 +2438,25 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
   scheduleReload();
         // ── 預測與賽果 (PREDICTION VS RESULT) ──────────────────────────────
         var _cmpToken = 0, _cmpCache = {};
-          var _CMP_LS_KEY = 'tx_cmp_cache_v2';
+          // 2026-05-21 (Stage 7 LGB rollout to hit-rate): bump key v2→v3 to
+          // one-shot evict pre-LGB ELO-only cached payloads from user browsers.
+          // Also add 60-min TTL so future model upgrades don't require key bump.
+          var _CMP_LS_KEY = 'tx_cmp_cache_v3';
           var _CMP_LS_MAX = 3; // 保留近 3 個賽事日比對資料
+          var _CMP_LS_TTL_MS = 60 * 60 * 1000; // 1 hour
           try {
+            // Best-effort: clear old v2 cache so storage doesn't bloat
+            try { localStorage.removeItem('tx_cmp_cache_v2'); } catch(_) {}
             var _raw = localStorage.getItem(_CMP_LS_KEY);
             if (_raw) {
               var _parsed = JSON.parse(_raw);
               if (_parsed && typeof _parsed === 'object') {
+                var _now = Date.now();
                 Object.keys(_parsed).forEach(function(k){
                   var v = _parsed[k];
-                  if (v && v.data) _cmpCache[k] = v.data;
+                  if (v && v.data && v.ts && (_now - v.ts) < _CMP_LS_TTL_MS) {
+                    _cmpCache[k] = v.data;
+                  }
                 });
               }
             }
