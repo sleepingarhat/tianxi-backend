@@ -1894,11 +1894,40 @@ analyzeRoutes.get('/factors', (c) => {
         const raceMap = new Map<number, any[]>();
         for (const e of entries) { const rn = e.race_number ?? 0; if (!raceMap.has(rn)) raceMap.set(rn, []); raceMap.get(rn)!.push(e); }
         const raceNumbers = Array.from(raceMap.keys()).sort((a, b) => a - b);
+        // ── Stage 7 (2026-05-21): batch-load LGB pre-computed scores ──
+        // Mirrors runRaceDayReportCompute logic so hit-rate (post-race compare)
+        // uses the same LGB-ranked picks as today-picks. Previously this helper
+        // returned ELO-only picks → admin "預測與賽果" face never reflected LGB.
+        // All-or-nothing per race (no mixed-scale softmax).
+        const lgbScoreByRaceHorse = new Map<string, { score: number; pWin: number | null; modelVersion: string | null }>();
+        let helperLgbModelVersion: string | null = null;
+        try {
+          const synthRaceIds = raceNumbers
+            .filter(rn => rn > 0)
+            .map(rn => racesDBMap.get(rn)?.id ?? `race_${targetDate}_${meeting.venue}_${rn}`);
+          if (synthRaceIds.length) {
+            const ph = synthRaceIds.map(() => '?').join(',');
+            const { results: lgbRows } = await db.prepare(
+              `SELECT race_id, horse_id, lgb_score, p_win, model_version
+                 FROM lgb_predictions WHERE race_id IN (${ph})`
+            ).bind(...synthRaceIds).all<any>().catch(() => ({ results: [] as any[] }));
+            for (const r of (lgbRows ?? [])) {
+              lgbScoreByRaceHorse.set(`${r.race_id}::${r.horse_id}`, {
+                score: Number(r.lgb_score),
+                pWin: r.p_win != null ? Number(r.p_win) : null,
+                modelVersion: r.model_version ?? null,
+              });
+              if (!helperLgbModelVersion && r.model_version) helperLgbModelVersion = r.model_version;
+            }
+          }
+        } catch { /* table may not exist on cold envs */ }
+
         const racePredictions = raceNumbers.map(raceNum => {
           const raceEntries = raceMap.get(raceNum)!;
           const firstE = raceEntries[0];
           const raceDB = racesDBMap.get(raceNum);
           const raceId = raceDB?.id ?? null;
+          const lgbLookupRaceId: string = raceDB?.id ?? `race_${targetDate}_${meeting.venue}_${raceNum}`;
           const raceTitle = raceDB?.title ?? (raceNum > 0 ? `第 ${raceNum} 場` : `${targetDate} 排位`);
           const raceDistance: number | null = firstE.distance ?? null;
           const raceGoing: string | null = raceDB?.going ?? meeting.track_condition ?? null;
@@ -1938,15 +1967,48 @@ analyzeRoutes.get('/factors', (c) => {
             const finalScore = eloComposite != null ? eloComposite + factorBonus : null;
             return { horseId, horseNumber: e.horse_number, nameCh: e.name_ch, nameEn: e.name_en, jockeyCh: e.jockey_name, trainerCh: e.trainer_name, draw: e.draw, declaredWeight: e.declared_weight, rating: e.rating, horseElo: hElo != null ? Math.round(hElo*10)/10 : null, jockeyElo: jElo != null ? Math.round(jElo*10)/10 : null, trainerElo: tElo != null ? Math.round(tElo*10)/10 : null, eloComposite: eloComposite != null ? Math.round(eloComposite*10)/10 : null, eloEngine: hRead?.engine ?? engine, horseConfidence: hRead?.confidence != null ? Math.round(hRead.confidence*100)/100 : null, horseFrozen: hRead?.isFrozen ?? false, horseRetired: hRead?.isRetired ?? false, factorBonus: Math.round(factorBonus*10)/10, factorBreakdown, finalScore: finalScore != null ? Math.round(finalScore*10)/10 : null, daysSinceLast: daysSince, _score: base + factorBonus / 100 };
           });
+          // ── Stage 7 (2026-05-21): race-level ALL-OR-NOTHING LGB override ──
+          // Mirrors runRaceDayReportCompute (L2150+). Only override when every
+          // runner has an LGB score, to avoid mixed-scale softmax distortion.
+          let raceHasLgb = false;
+          let lgbModelVerForRace: string | null = null;
+          let lgbHits = 0;
+          for (const s of enriched as any[]) {
+            const lgb = s.horseId ? lgbScoreByRaceHorse.get(`${lgbLookupRaceId}::${s.horseId}`) : undefined;
+            if (lgb && Number.isFinite(lgb.score)) {
+              (s as any).__lgb = lgb;
+              lgbHits++;
+              if (!lgbModelVerForRace) lgbModelVerForRace = lgb.modelVersion;
+            }
+          }
+          const allHaveLgb = lgbHits > 0 && lgbHits === (enriched as any[]).length;
+          if (allHaveLgb) raceHasLgb = true;
+          for (const s of enriched as any[]) {
+            const lgb = (s as any).__lgb;
+            delete (s as any).__lgb;
+            if (allHaveLgb && lgb) {
+              s._score = lgb.score;
+              s.lgbScore = Math.round(lgb.score * 1000) / 1000;
+              s.lgbModelVersion = lgb.modelVersion;
+              s.scoreSource = 'lgb';
+              s.finalScore = Math.round((1500 + lgb.score * 100) * 10) / 10;
+            } else {
+              s.scoreSource = lgb ? 'elo+factor (partial-lgb-skipped)' : 'elo+factor';
+              if (lgb) {
+                s.lgbScore = Math.round(lgb.score * 1000) / 1000;
+                s.lgbModelVersion = lgb.modelVersion;
+              }
+            }
+          }
           const expScores = enriched.map((s) => Math.exp(s._score));
           const Z = expScores.reduce((a, b) => a + b, 0) || 1;
           const picks = enriched.map((s, i) => { const { _score, ...rest } = s as any; return { ...rest, pWin: Math.round((expScores[i]/Z)*1000)/1000, pTop3: Math.round(Math.min((expScores[i]/Z)*3,0.99)*1000)/1000 }; });
           picks.sort((a: any, b: any) => b.pWin - a.pWin);
           picks.forEach((p: any, i: number) => { p.rank = i + 1; });
-          return { raceId, raceNumber: raceNum, title: raceTitle, class: raceClass, distance: raceDistance, going: raceGoing, track: raceTrack, course: raceCourse, picks };
+          return { raceId, lgbLookupRaceId, raceNumber: raceNum, title: raceTitle, class: raceClass, distance: raceDistance, going: raceGoing, track: raceTrack, course: raceCourse, picks, scoreSource: raceHasLgb ? 'lgb' : 'elo+factor', lgbCoverage: { hits: lgbHits, total: (enriched as any[]).length, applied: allHaveLgb }, lgbModelVersion: lgbModelVerForRace };
         });
         const eloReady = racePredictions.some((r) => r.picks?.some((p: any) => p.eloComposite != null));
-        return { date: targetDate, venue: meeting.venue, trackCondition: meeting.track_condition, eloEngine: engine, eloWeights: ELO_WEIGHTS, eloReady, races: racePredictions, generatedAt: new Date().toISOString() };
+        return { date: targetDate, venue: meeting.venue, trackCondition: meeting.track_condition, eloEngine: engine, eloWeights: ELO_WEIGHTS, eloReady, races: racePredictions, lgbModelVersion: helperLgbModelVersion, lgbCoverage: { rows: lgbScoreByRaceHorse.size }, generatedAt: new Date().toISOString() };
       }
 
       // GET /api/analyze/today-picks — 即日排位全因子預測 (batch-query version; ~20 D1 queries)
