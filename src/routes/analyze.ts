@@ -1970,8 +1970,10 @@ analyzeRoutes.get('/factors', (c) => {
           ? (s.eloComposite - eloMean) / eloStd : 0;
         const lgbZ = lgb ? (lgb.score - lgbMean) / lgbStd : 0; // impute race mean
         const blendZ = alpha * lgbZ + (1 - alpha) * eloZ;
-        const factorTilt = (s.factorBonus || 0) / 100; // small ELO-pt nudge preserved
-        s._score = blendZ + factorTilt * 0.5;
+        // No factorBonus tilt in ensemble path: LGB's 80 features already
+        // include draw, weight, jt-combo, going, distance etc. Adding factor
+        // bonus on top would double-count (code-review 2026-05-21).
+        s._score = blendZ;
         s.lgbScore = lgb ? Math.round(lgb.score * 1000) / 1000 : null;
         s.lgbModelVersion = lgb ? lgb.modelVersion : null;
         s.ensembleAlpha = alpha;
