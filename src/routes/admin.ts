@@ -1032,24 +1032,6 @@ adminRoutes.post('/api/migrate-prediction-log-lgb', async (c) => {
   // For each date with multiple race_meetings rows, keeps the one with the most
   // linked races (canonical) and deletes the rest. Cascades to remove orphan
   // races/race_results via the FK (assumed ON DELETE CASCADE). Idempotent.
-  // ── /api/cleanup-2026-05-20-phantom — one-shot phantom row scrub ───────────
-  // Deletes the dirty 2026-05-20_ST meeting row (HKJC sent a stray 1-race ST event
-  // for a date where only HV was racing), its 1 orphan races row, and the
-  // race_number=0 "reserve pool" in entries_upcoming for 2026-05-20 HV (125 horses
-  // that aren't real race entries — inflated COUNT(DISTINCT race_number) from 9 to 10).
-  // Idempotent: re-running just returns 0 deleted on each table.
-  // ── /api/cleanup-2026-05-20-phantom — RETIRED 2026-05-19 ───────────────────
-// One-shot phantom-row scrub. Executed successfully against prod on 2026-05-19
-// (cleaned 14 race_results + 9 dividends + 1 races + 1 race_meetings + 125
-// reserve-pool entries_upcoming for 2026-05-20_ST). Endpoint kept as a 410
-// Gone stub to shrink admin attack surface; remove entirely in a later cleanup.
-adminRoutes.post('/api/cleanup-2026-05-20-phantom', async (c) => {
-    return c.json({
-      error: 'retired',
-      message: 'one-shot endpoint already executed on 2026-05-19; see reports/decision-log.md',
-    }, 410);
-  });
-
   adminRoutes.post('/api/cleanup-duplicate-meetings', async (c) => {
     const dryRun = c.req.query('dry') === '1';
     try {
