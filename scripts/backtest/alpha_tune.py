@@ -108,7 +108,7 @@ def main() -> int:
     skipped = 0
     probe_alpha = alphas[0]
     for d in candidates:
-        url = f'{args.base_url}/api/analyze/hit-rate?date={d}&alpha={probe_alpha}&engine={args.engine}&refresh=1'
+        url = f'{args.base_url}/api/analyze/hit-rate?date={d}&alpha={probe_alpha}&engine={args.engine}'
         status, body, err = http_get(url, timeout=60)
         if status == 200 and isinstance(body, dict) and body.get('summary'):
             race_dates.append(d)
@@ -145,7 +145,7 @@ def main() -> int:
                 summary = probe_cache[d]
             else:
                 url = (f'{args.base_url}/api/analyze/hit-rate?date={d}'
-                       f'&alpha={a}&engine={args.engine}&refresh=1')
+                       f'&alpha={a}&engine={args.engine}')
                 status, body, err = http_get(url, timeout=60)
                 if status != 200 or not isinstance(body, dict):
                     print(f'  ! α={a} {d} HTTP {status} {err[:80]}')
