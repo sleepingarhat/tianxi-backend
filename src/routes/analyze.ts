@@ -67,6 +67,47 @@ export const analyzeRoutes = new Hono<{ Bindings: Env }>();
     ).run();
   }
 
+  // === Per-α hit-rate cache (P3-C+ tuner accelerator) ====================
+  // /api/analyze/hit-rate?alpha=N bypasses the default cache so the offline
+  // tuner can probe arbitrary α values, but rapid sweeps across many dates
+  // were tripping Cloudflare 503s. This dedicated table caches results keyed
+  // by (date, engine_versioned, alpha_x100) so each (date, α) is computed at
+  // most once. Cleared automatically when HIT_RATE_CACHE_VERSION bumps.
+  export async function ensureHitRateAlphaCacheTable(db: D1Database): Promise<void> {
+    await db.prepare(
+      `CREATE TABLE IF NOT EXISTS meeting_hit_rate_alpha_cache (
+         date TEXT NOT NULL,
+         engine TEXT NOT NULL,
+         alpha_x100 INTEGER NOT NULL,
+         payload_json TEXT NOT NULL,
+         computed_at TEXT NOT NULL,
+         PRIMARY KEY (date, engine, alpha_x100)
+       )`
+    ).run();
+  }
+  function _alphaKey(alpha: number): number { return Math.round(alpha * 100); }
+  export async function readHitRateAlphaCache(db: D1Database, date: string, engine: string, alpha: number): Promise<any | null> {
+    try {
+      const row = await db.prepare(
+        `SELECT payload_json, computed_at FROM meeting_hit_rate_alpha_cache WHERE date=? AND engine=? AND alpha_x100=?`
+      ).bind(date, _engineKey(engine), _alphaKey(alpha)).first<{ payload_json: string; computed_at: string }>();
+      if (!row?.payload_json) return null;
+      const parsed = JSON.parse(row.payload_json);
+      parsed.cachedAt = row.computed_at;
+      return parsed;
+    } catch { return null; }
+  }
+  export async function writeHitRateAlphaCache(db: D1Database, date: string, engine: string, alpha: number, payload: any): Promise<void> {
+    await db.prepare(
+      `INSERT OR REPLACE INTO meeting_hit_rate_alpha_cache (date, engine, alpha_x100, payload_json, computed_at)
+       VALUES (?, ?, ?, ?, ?)`
+    ).bind(
+      date, _engineKey(engine), _alphaKey(alpha),
+      JSON.stringify({ summary: payload.summary, races: payload.races, meeting: payload.meeting }),
+      new Date().toISOString(),
+    ).run();
+  }
+
   // === Race-day report cache (Stage 8: scheduled pre-compute) ===========
   // Avoids running the full today-picks compute on every admin page hit.
   // Rebuilt by cron triggers in src/index.ts at HKT 06:00 / 11:00 / 18:00.
@@ -3123,26 +3164,46 @@ analyzeRoutes.get('/factors', (c) => {
             const hasAlpha = typeof alphaOverride === 'number'
               && Number.isFinite(alphaOverride) && alphaOverride >= 0 && alphaOverride <= 1;
 
-            if (!refresh && !hasAlpha) {
-              const cached = await readHitRateCache(c.env.DB, date, engine);
-              if (cached) {
-                return c.json({
-                  date,
-                  venue: cached.meeting?.venue,
-                  trackCondition: cached.meeting?.track_condition,
-                  engine,
-                  summary: cached.summary,
-                  races: cached.races,
-                  generatedAt: cached.cachedAt,
-                  fromCache: true,
-                });
+            if (!refresh) {
+              if (hasAlpha) {
+                const cachedA = await readHitRateAlphaCache(c.env.DB, date, engine, alphaOverride as number);
+                if (cachedA) {
+                  return c.json({
+                    date,
+                    venue: cachedA.meeting?.venue,
+                    trackCondition: cachedA.meeting?.track_condition,
+                    engine,
+                    alphaUsed: alphaOverride,
+                    summary: cachedA.summary,
+                    races: cachedA.races,
+                    generatedAt: cachedA.cachedAt,
+                    fromCache: true,
+                  });
+                }
+              } else {
+                const cached = await readHitRateCache(c.env.DB, date, engine);
+                if (cached) {
+                  return c.json({
+                    date,
+                    venue: cached.meeting?.venue,
+                    trackCondition: cached.meeting?.track_condition,
+                    engine,
+                    summary: cached.summary,
+                    races: cached.races,
+                    generatedAt: cached.cachedAt,
+                    fromCache: true,
+                  });
+                }
               }
             }
 
             await ensureHitRateCacheTable(c.env.DB).catch(() => {});
+            if (hasAlpha) await ensureHitRateAlphaCacheTable(c.env.DB).catch(() => {});
             const result = await computeHitRateStats(c.env.DB, date, engine, hasAlpha ? alphaOverride : undefined);
             if ('error' in result) return c.json({ error: result.error }, result.status as any);
-            if (!hasAlpha) {
+            if (hasAlpha) {
+              await writeHitRateAlphaCache(c.env.DB, date, engine, alphaOverride as number, result).catch(() => {});
+            } else {
               await writeHitRateCache(c.env.DB, date, engine, result).catch(() => {});
             }
             return c.json({
