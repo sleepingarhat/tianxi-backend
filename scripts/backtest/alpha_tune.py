@@ -86,7 +86,7 @@ def main() -> int:
                     help='ADMIN_TOKEN for --apply (not needed for sweep-only).')
     ap.add_argument('--days', type=int, default=60)
     ap.add_argument('--alphas', default='0.40,0.50,0.62,0.75,0.85')
-    ap.add_argument('--engine', default='v12', choices=['v11', 'v12'])
+    ap.add_argument('--engine', default='v12', choices=['v12'])
     ap.add_argument('--apply', action='store_true',
                     help='POST winner α to /api/analyze/ensemble-alpha after the sweep.')
     ap.add_argument('--min-margin', type=float, default=0.0,

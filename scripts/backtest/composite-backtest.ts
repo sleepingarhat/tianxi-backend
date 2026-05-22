@@ -61,7 +61,7 @@ function argBool(name: string): boolean {
 const DB_PATH = arg('db', 'bulk-local.db');
 const FROM = arg('from', '2025-09-01');
 const TO = arg('to', '2026-04-15');
-const ENGINE = (arg('engine', 'v12') === 'v11' ? 'v11' : 'v12') as 'v11' | 'v12';
+const ENGINE = 'v12' as const;
 const W_HORSE = argNum('w-horse', 0.7);
 const W_JOCKEY = argNum('w-jockey', 0.2);
 const W_TRAINER = argNum('w-trainer', 0.1);
@@ -119,9 +119,9 @@ db.pragma('synchronous = OFF');
 // (qELO dead block removed 2026-05-12 — was throwing SqliteError: no such table __TBL__ at module load; readElo via eloStmtCache below is the live path)
 // Reusable per-entity prepared statements keyed by (entity, engine).
 const eloStmtCache = new Map<string, Database.Statement>();
-function eloStmt(entity: 'horse' | 'jockey' | 'trainer', _engine: 'v11' | 'v12'): Database.Statement {
+function eloStmt(entity: 'horse' | 'jockey' | 'trainer'): Database.Statement {
   // 2026-05-12 fix: drop axis_key for jockey/trainer (column doesn't exist on those
-  // tables) and drop v12/v11 id-prefix split (compute_v11 wipes & rewrites all
+  // tables) and drop v12/v11 id-prefix split (compute.ts wipes & rewrites all
   // snapshots, no prefix used). Previous code threw at prepare() and was silently
   // caught → eloJ/eloT always null → eloComposite null → 0 valid races.
   const k = entity;
@@ -135,7 +135,7 @@ function eloStmt(entity: 'horse' | 'jockey' | 'trainer', _engine: 'v11' | 'v12')
   eloStmtCache.set(k, s);
   return s;
 }
-// 2026-05-12: axis-keyed horse rating (multi-axis ELO from compute_v11).
+// 2026-05-12: axis-keyed horse rating (multi-axis ELO from compute.ts).
 // Query takes BOTH possible surfaces for the bucket and returns the most-recent.
 const horseAxisStmt = db.prepare(
   `SELECT rating, axis_key FROM horse_elo_snapshots
@@ -167,11 +167,11 @@ function readHorseEloByMode(horseId: string | null, asOf: string, distance: numb
 function readElo(entity: 'horse' | 'jockey' | 'trainer', id: string | null, asOf: string): number | null {
   if (!id) return null;
   // 2026-05-12 fix: race_results.horse_id has 'horse_' prefix (e.g. 'horse_A001')
-  // but compute_v11 strips it when writing horse_elo_snapshots (stored as 'A001').
+  // but compute.ts strips it when writing horse_elo_snapshots (stored as 'A001').
   // Normalize before lookup so the join key matches.
   const lookupId = entity === 'horse' && id.startsWith('horse_') ? id.slice(6) : id;
   try {
-    const row = eloStmt(entity, ENGINE).get(lookupId, asOf) as { rating: number } | undefined;
+    const row = eloStmt(entity).get(lookupId, asOf) as { rating: number } | undefined;
     return row?.rating ?? null;
   } catch (e) {
     if (!(globalThis as any).__readEloErrLogged) {
@@ -407,7 +407,7 @@ for (const meta of races) {
 
   const scored: ScoredRunner[] = runners.map(r => {
     const eloH = readHorseEloByMode(r.horse_id, meta.date, meta.distance);
-    // 2026-05-12 fix: compute_v11 stores jockey/trainer snapshots keyed by NAME (not id);
+    // 2026-05-12 fix: compute.ts stores jockey/trainer snapshots keyed by NAME (not id);
     // looking them up by id returned null → all races unscorable. Use *_name + rescale.
     const eloJ = readElo('jockey', r.jockey_name, meta.date);
     const eloT = readElo('trainer', r.trainer_name, meta.date);

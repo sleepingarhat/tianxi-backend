@@ -43,7 +43,7 @@
   const DB_PATH = arg('db', 'bulk-local.db');
   const FROM = arg('from', '2024-09-01');
   const TO = arg('to', '2026-04-30');
-  const ENGINE = (arg('engine', 'v12') === 'v11' ? 'v11' : 'v12') as 'v11' | 'v12';
+  const ENGINE = 'v12' as const;
   const W_HORSE = argNum('w-horse', 0.7);
   const W_JOCKEY = argNum('w-jockey', 0.2);
   const W_TRAINER = argNum('w-trainer', 0.1);
@@ -63,8 +63,7 @@
     //      (only horse_elo_snapshots does — see src/db/schema_v2.sql L255 vs L273/L288).
     //      The old WHERE axis_key='overall' threw a SQL error → caught → null.
     //   2) Old WHERE id LIKE 'v12:%' never matched: compute.ts builds horse snap
-    //      ids as `${id}|overall|${date}|...` and compute_v11.ts uses
-    //      `${entityId}|${axisKey}|...` — neither uses any v12: / v11: prefix.
+    //      ids as `${id}|overall|${date}|...` — no engine prefix.
     // Result: feature_importance for h_elo / j_elo / t_elo was 0.0 in Stage 3
     // because every value in the column was null.
     //
