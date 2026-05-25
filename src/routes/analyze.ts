@@ -1933,13 +1933,19 @@ analyzeRoutes.get('/factors', (c) => {
         const fresh = opts.fresh === true;
         const forceVenue = opts.venue;
         const todayStr = new Date().toISOString().split('T')[0];
+        // Date picker: use race_meetings (persisted by Capy D1 Sync immediately) as
+        // the authoritative source, NOT entries_upcoming (lags Capy Racecard
+        // enrichment by minutes-to-hours). Previously picked MAX(entries_upcoming)
+        // = latest PAST race day when next meeting's entries weren't enriched yet,
+        // causing "排位表無資料" for already-raced dates. Now picks next upcoming
+        // meeting and lets the entries-empty fallback below give a clearer message.
         let targetDate: string | null = await db.prepare(
-          `SELECT MIN(race_date) FROM entries_upcoming WHERE race_date >= ?`
-        ).bind(todayStr).first<string>('MIN(race_date)').catch(() => null);
+          `SELECT MIN(date) FROM race_meetings WHERE date >= ?`
+        ).bind(todayStr).first<string>('MIN(date)').catch(() => null);
         if (!targetDate) {
-          targetDate = await db.prepare(`SELECT MAX(race_date) FROM entries_upcoming`).first<string>('MAX(race_date)').catch(() => null);
+          targetDate = await db.prepare(`SELECT MAX(date) FROM race_meetings`).first<string>('MAX(date)').catch(() => null);
         }
-        if (!targetDate) return { error: '排位表未有資料', status: 404 };
+        if (!targetDate) return { error: '賽馬日記錄不存在', status: 404 };
 
         if (!fresh) {
           const cached = await readRaceDayReportCache(db, targetDate, engine);
@@ -1997,7 +2003,7 @@ analyzeRoutes.get('/factors', (c) => {
         };
         let entries = await loadEntries(true);
         if (!entries.length) entries = await loadEntries(false);
-        if (!entries.length) return { error: `${targetDate} 排位表無資料`, status: 404 };
+        if (!entries.length) return { error: `${targetDate} ${meeting.venue} 排位表更新中，請稍候`, status: 404, targetDate, venue: meeting.venue };
         const prefixId = (raw: string | null | undefined, kind: 'horse' | 'jockey' | 'trainer'): string | null => {
           if (!raw) return null;
           const p = kind + '_';
@@ -2760,4 +2766,5 @@ analyzeRoutes.get('/factors', (c) => {
         }
       });
   
+
 
