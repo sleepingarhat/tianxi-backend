@@ -1504,9 +1504,13 @@ analyzeRoutes.get('/top-picks', async (c) => {
   if (!race) return c.json({ error: '找不到該場賽事' }, 404);
 
   let picks: any[] = [];
+  let _debugComputeErr: string | null = null;
+  let _debugComputeStack: string | null = null;
   try {
     picks = await computeComposite(c.env.DB, raceId, race.date, engine);
   } catch (err: any) {
+    _debugComputeErr = err?.message ?? String(err);
+    _debugComputeStack = err?.stack ? String(err.stack).split('\n').slice(0, 6).join(' | ') : null;
     // Legacy fallback (no ELO / factor engine available)
     const { results } = await c.env.DB.prepare(`
       SELECT rr.horse_id, rr.horse_number, rr.draw, rr.win_odds,
@@ -1557,6 +1561,8 @@ analyzeRoutes.get('/top-picks', async (c) => {
     const eloReady = picks.some((p: any) => p.eloComposite != null);
   const engineInUse = picks.find((p: any) => p.eloEngine)?.eloEngine ?? engine;
   return c.json({
+    _debugComputeErr,
+    _debugComputeStack,
     raceId,
     raceNumber: race.race_number,
     date: race.date,
