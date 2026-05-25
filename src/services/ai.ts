@@ -4,7 +4,6 @@ import {
   RACING_AI_SYSTEM_PROMPT,
   buildRaceContext,
   buildHorseFormContext,
-  buildTimesFMContext,
 } from '../prompts/racing-ai';
 
 interface ChatMessage {
@@ -65,10 +64,6 @@ export async function racingChat(
     for (const form of horseFormData) {
       systemContent += buildHorseFormContext(form);
     }
-  }
-
-  if (timesfmPredictions && timesfmPredictions.length > 0) {
-    systemContent += buildTimesFMContext(timesfmPredictions);
   }
 
   const messages: ChatMessage[] = [
@@ -151,10 +146,9 @@ export async function generateAnalysisSummary(
 }> {
   let context = RACING_AI_SYSTEM_PROMPT;
   context += buildRaceContext(raceData);
-  context += buildTimesFMContext(timesfmResults);
   context += `\n\n用戶選擇了以下分析因子：${selectedFactors.join('、')}`;
 
-  const prompt = `根據以上所有數據和 TimesFM 趨勢預測結果，請提供：
+  const prompt = `根據以上所有數據，請提供：
 1. 綜合分析總結（200字以內）
 2. 三個投注建議（主膽推薦、單T組合、四重彩），每個包含選馬和理由
 
@@ -191,3 +185,4 @@ export async function generateAnalysisSummary(
     recommendations: [],
   };
 }
+

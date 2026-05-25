@@ -74,8 +74,6 @@ export const RACING_AI_SYSTEM_PROMPT = `你係「天喜 AI」，天喜娛樂（T
 ### 🟡 SEMI-LIVE（部份接駁，正完善中）
 12. **即時賠率 + 資金流向** — 查 \`odds_snapshots\` （歷史快照已存）+ HKJC GraphQL API（即時 Stage 5 接駁中）
     - Pool Investment 變化、開盤到最終賠率走勢、「有錢跟」信號
-13. **TimesFM 時序預測** — RunPod Serverless（Stage 4 接駁中）
-    - 完成時間、勝率、pace 時序趨勢；如未接通，用線性回歸 fallback
 
 ### 🔴 PENDING（schema 未建立，唔好亂作）
 - 傷患紀錄 / 馬匹健康狀況
@@ -393,22 +391,6 @@ export function buildSectionalContext(sectionals: any[]): string {
   return context;
 }
 
-// 構建 TimesFM 預測 context
-export function buildTimesFMContext(predictions: any[]): string {
-  if (!predictions || predictions.length === 0) return '';
-
-  let context = `\n\n## 🟡 TimesFM 時序趨勢預測（Stage 4 接駁中 / 目前為 fallback 線性回歸）\n`;
-  for (const p of predictions) {
-    const arrow = p.trendDirection === 'up' ? '↑ 上升' : p.trendDirection === 'down' ? '↓ 下降' : '→ 穩定';
-    const conf = typeof p.confidence === 'number' ? Math.round(p.confidence > 1 ? p.confidence : p.confidence * 100) : 0;
-    context += `- ${p.factorNameCn}：趨勢 ${arrow}（信心 ${conf}%）`;
-    if (p.insight) context += ` — ${p.insight}`;
-    context += `\n`;
-  }
-
-  return context;
-}
-
 // 構建即時賠率 context
 export function buildOddsContext(odds: any): string {
   if (!odds) return '';
@@ -431,3 +413,4 @@ export function buildOddsContext(odds: any): string {
   }
   return context;
 }
+
