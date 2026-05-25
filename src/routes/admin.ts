@@ -663,7 +663,9 @@ adminRoutes.get('/api/alerts', async (c) => {
     if (days > 14) alerts.push({ level: 'red', msg: `賽馬日已 ${days} 日冇更新（${meetLatest}）` });
   }
 
-  const runs = await fetchRuns(c.env, 20);
+  // 2026-05-25: bumped from 20 → 50; busy days (URGENT-fix cascades) had 19/20
+  // runs in 3h window, which made dedupe vulnerable to truncation false-negatives.
+  const runs = await fetchRuns(c.env, 50);
   const cutoff = now.getTime() - 3 * 3600000;
   // 2026-05-25: dedupe by workflow name — only flag if the LATEST run per workflow
   // (within the cutoff window) is a failure. Previous logic alerted on every failed
@@ -2449,6 +2451,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
           var _CMP_LS_TTL_MS = 60 * 60 * 1000; // 1 hour
           try {
             // Best-effort: clear old v2/v3 cache so storage doesn't bloat
+            try { localStorage.removeItem('tx_cmp_cache_v1'); } catch(_) {}
             try { localStorage.removeItem('tx_cmp_cache_v2'); } catch(_) {}
             try { localStorage.removeItem('tx_cmp_cache_v3'); } catch(_) {}
             var _raw = localStorage.getItem(_CMP_LS_KEY);
