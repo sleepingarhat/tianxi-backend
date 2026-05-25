@@ -3013,6 +3013,88 @@ analyzeRoutes.get('/factors', (c) => {
           }
         });
 
+        // GET /api/analyze/d1-inspect?table=horse_elo_snapshots&horseId=horse_K152&limit=5
+        // P4-debug: admin-gated read-only D1 sample for diagnosing query
+        // mismatches (e.g. /top-picks returning null while leaderboard works).
+        // Whitelisted tables only; no arbitrary SQL.
+        analyzeRoutes.get('/d1-inspect', async (c) => {
+          try {
+            const expected = (c.env as any).ADMIN_TOKEN as string | undefined;
+            const header = c.req.header('authorization') || '';
+            const bearer = header.startsWith('Bearer ') ? header.slice(7) : '';
+            const queryTok = c.req.query('token') || '';
+            const ok = !!expected && (bearer === expected || queryTok === expected);
+            if (!ok) return c.json({ error: 'unauthorized' }, 401);
+
+            const ALLOWED: Record<string, { entityCol?: string; dateCol?: string }> = {
+              horse_elo_snapshots:   { entityCol: 'horse_id',   dateCol: 'as_of_date' },
+              jockey_elo_snapshots:  { entityCol: 'jockey_id',  dateCol: 'as_of_date' },
+              trainer_elo_snapshots: { entityCol: 'trainer_id', dateCol: 'as_of_date' },
+              race_meetings:         { dateCol: 'date' },
+              races:                 {},
+              app_settings:          {},
+              lgb_predictions:       { dateCol: 'race_date' },
+            };
+            const table = c.req.query('table') || '';
+            const spec = ALLOWED[table];
+            if (!spec) {
+              return c.json({ error: 'table not whitelisted', allowed: Object.keys(ALLOWED) }, 400);
+            }
+            const limit = Math.min(Math.max(parseInt(c.req.query('limit') || '5', 10) || 5, 1), 50);
+
+            const wheres: string[] = [];
+            const binds: any[] = [];
+            const entityId = c.req.query('entityId') || c.req.query('horseId') || c.req.query('jockeyId') || c.req.query('trainerId');
+            if (entityId && spec.entityCol) {
+              wheres.push(`${spec.entityCol} = ?`); binds.push(entityId);
+            }
+            const since = c.req.query('since');
+            if (since && spec.dateCol) { wheres.push(`${spec.dateCol} >= ?`); binds.push(since); }
+            const until = c.req.query('until');
+            if (until && spec.dateCol) { wheres.push(`${spec.dateCol} <= ?`); binds.push(until); }
+            const idLike = c.req.query('idLike');
+            if (idLike) { wheres.push(`id LIKE ?`); binds.push(idLike); }
+            const axisKey = c.req.query('axisKey');
+            if (axisKey) { wheres.push(`axis_key = ?`); binds.push(axisKey); }
+
+            const whereSql = wheres.length ? `WHERE ${wheres.join(' AND ')}` : '';
+            const orderSql = spec.dateCol ? `ORDER BY ${spec.dateCol} DESC` : '';
+
+            const { results: schema } = await c.env.DB.prepare(
+              `SELECT name, type, "notnull" AS notnull, dflt_value FROM pragma_table_info(?)`
+            ).bind(table).all<any>();
+
+            const { results: rows } = await c.env.DB.prepare(
+              `SELECT * FROM ${table} ${whereSql} ${orderSql} LIMIT ?`
+            ).bind(...binds, limit).all<any>();
+
+            const facts: any = { rowCount: rows?.length ?? 0 };
+            if (spec.dateCol) {
+              const { results: dr } = await c.env.DB.prepare(
+                `SELECT MIN(${spec.dateCol}) AS minDate, MAX(${spec.dateCol}) AS maxDate, COUNT(*) AS total FROM ${table} ${whereSql}`
+              ).bind(...binds).all<any>();
+              facts.dateRange = dr?.[0] ?? null;
+            }
+            const colNames = new Set((schema ?? []).map((r: any) => r.name));
+            if (colNames.has('axis_key')) {
+              const { results: ak } = await c.env.DB.prepare(
+                `SELECT axis_key, COUNT(*) AS n FROM ${table} ${whereSql} GROUP BY axis_key ORDER BY n DESC LIMIT 10`
+              ).bind(...binds).all<any>();
+              facts.axisKeyDistribution = ak;
+            }
+            if (colNames.has('id')) {
+              const { results: ip } = await c.env.DB.prepare(
+                `SELECT SUBSTR(id, 1, 8) AS idPrefix, COUNT(*) AS n FROM ${table} ${whereSql} GROUP BY idPrefix ORDER BY n DESC LIMIT 10`
+              ).bind(...binds).all<any>();
+              facts.idPrefixDistribution = ip;
+            }
+
+            return c.json({ table, filters: { entityId, since, until, idLike, axisKey, limit }, schema, facts, rows });
+          } catch (err: any) {
+            return c.json({ error: 'd1-inspect failed', detail: err?.message ?? String(err) }, 500);
+          }
+        });
+
         // GET /api/analyze/hit-rate-rollup?days=30 — 滾動窗口整體命中率彙總
       analyzeRoutes.get('/hit-rate-rollup', async (c) => {
         try {
