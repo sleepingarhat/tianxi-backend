@@ -665,7 +665,19 @@ adminRoutes.get('/api/alerts', async (c) => {
 
   const runs = await fetchRuns(c.env, 20);
   const cutoff = now.getTime() - 3 * 3600000;
-  const failures = runs.filter((x: any) => x.conclusion === 'failure' && new Date(x.updated_at).getTime() > cutoff);
+  // 2026-05-25: dedupe by workflow name — only flag if the LATEST run per workflow
+  // (within the cutoff window) is a failure. Previous logic alerted on every failed
+  // run in window, so manual re-runs that succeeded still showed stale red cards.
+  const recentByName = new Map<string, any>();
+  for (const r of runs) {
+    if (!r || !r.name) continue;
+    if (new Date(r.updated_at).getTime() <= cutoff) continue;
+    const prev = recentByName.get(r.name);
+    if (!prev || new Date(r.updated_at).getTime() > new Date(prev.updated_at).getTime()) {
+      recentByName.set(r.name, r);
+    }
+  }
+  const failures = [...recentByName.values()].filter((x: any) => x.conclusion === 'failure');
   for (const f of failures.slice(0, 3)) {
     alerts.push({ level: 'red', msg: `工作流失敗：${f.name}（#${f.id}）` });
   }
@@ -2429,15 +2441,16 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
   scheduleReload();
         // ── 預測與賽果 (PREDICTION VS RESULT) ──────────────────────────────
         var _cmpToken = 0, _cmpCache = {};
-          // 2026-05-21 (Stage 7 LGB rollout to hit-rate): bump key v2→v3 to
-          // one-shot evict pre-LGB ELO-only cached payloads from user browsers.
-          // Also add 60-min TTL so future model upgrades don't require key bump.
-          var _CMP_LS_KEY = 'tx_cmp_cache_v3';
+          // 2026-05-25 (URGENT-#4 aftermath): bump key v3→v4 to one-shot evict
+          // morning broken payloads captured during the eloReady=false window
+          // (computeComposite D1 column crash). Previous v3 bump was 2026-05-21.
+          var _CMP_LS_KEY = 'tx_cmp_cache_v4';
           var _CMP_LS_MAX = 3; // 保留近 3 個賽事日比對資料
           var _CMP_LS_TTL_MS = 60 * 60 * 1000; // 1 hour
           try {
-            // Best-effort: clear old v2 cache so storage doesn't bloat
+            // Best-effort: clear old v2/v3 cache so storage doesn't bloat
             try { localStorage.removeItem('tx_cmp_cache_v2'); } catch(_) {}
+            try { localStorage.removeItem('tx_cmp_cache_v3'); } catch(_) {}
             var _raw = localStorage.getItem(_CMP_LS_KEY);
             if (_raw) {
               var _parsed = JSON.parse(_raw);
