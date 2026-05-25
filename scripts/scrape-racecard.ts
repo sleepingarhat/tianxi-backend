@@ -164,17 +164,13 @@
     let deleted = 0;
     let inserted = 0;
 
-    // Guard against phantom meetings: only persist race_meetings row if there is
-    // evidence (entries_upcoming row OR existing race_meetings row). HKJC racecard
-    // endpoints occasionally returned stale/wrong venues, which created rows like
-    // 2026-05-20_ST when only HV was actually racing that day.
-    const hasEvidence = db.prepare(
-      `SELECT 1 FROM entries_upcoming WHERE race_date = ? AND venue = ?
-         UNION ALL
-       SELECT 1 FROM race_meetings    WHERE date      = ? AND venue = ?`,
-    ).get(meetingDate, venueCode, meetingDate, venueCode);
-    if (!hasEvidence) {
-      console.warn(`[scrape-racecard] SKIP phantom meeting ${meetingDate}_${venueCode} — no entries_upcoming or existing race_meetings row`);
+    // Guard against phantom meetings: skip only if HKJC returned no actual runners.
+    // Previously checked local bulk-local.db evidence, but the local DB lags fresh
+    // entries-sync (Capy Entries txt → entries-sync → D1) and falsely blocked valid
+    // meetings like 2026-05-27_HV with 122 runners. If runners scraped > 0, it's real.
+    const totalRunners = races.reduce((s: number, r: any) => s + (r.runners?.length ?? 0), 0);
+    if (totalRunners === 0) {
+      console.warn(`[scrape-racecard] SKIP empty meeting ${meetingDate}_${venueCode} — 0 runners scraped`);
       return;
     }
 
