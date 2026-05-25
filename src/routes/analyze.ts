@@ -1947,10 +1947,11 @@ analyzeRoutes.get('/factors', (c) => {
         }
         if (!targetDate) return { error: '賽馬日記錄不存在', status: 404 };
 
-        if (!fresh) {
-          const cached = await readRaceDayReportCache(db, targetDate, engine);
-          if (cached) return cached;
-        }
+        // NOTE: early non-venue cache read removed (architect 2026-05-25). Writes use
+        // venue-scoped key (cacheKey = `${engine}::${venue}`) at the bottom of this fn,
+        // so bare-`engine` reads were dead code at best, and could return stale
+        // wrong-venue payloads at worst if pre-venue-scoping cache rows survived.
+        // Venue-scoped cache read happens after meeting resolution below.
         const t0 = Date.now();
 
         // Pick meeting: prefer one with entries_upcoming rows for that date
