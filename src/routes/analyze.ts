@@ -941,9 +941,10 @@ analyzeRoutes.post('/', async (c) => {
 // Weight split confirmed by user 2026-04-28.
 const ELO_WEIGHTS = { horse: 0.7, jockey: 0.2, trainer: 0.1 } as const;
 
-// ELO engine version (v1.2 = time-weighted multi-axis, user-endorsed 2026-04-28).
-// v11 fallback removed 2026-05-22 — production D1 is fully migrated to v12.
-type EloEngine = 'v12';
+// ELO engine version selector (v1.2 = time-weighted multi-axis, user-endorsed 2026-04-28).
+// Rows in snapshot tables co-exist; v1.2 rows have id prefix 'v12:', v1.1 rows don't.
+// Defaults to v12; reads can opt into v11 via ?engine=v11 query param or env override.
+type EloEngine = 'v11' | 'v12';
 
 type EloReading = {
   rating: number;
@@ -963,24 +964,41 @@ async function fetchAxisEloReading(
 ): Promise<EloReading | null> {
   const table = `${entityTable}_elo_snapshots`;
   const col = `${entityTable}_id`;
-  // v1.2 snapshots carry confidence / is_frozen / is_retired / is_provisional.
-  try {
-    const row = await db.prepare(
-      `SELECT rating, confidence, is_frozen, is_retired, is_provisional
-         FROM ${table}
-        WHERE ${col} = ? AND axis_key = 'overall' AND as_of_date < ?
-          AND id LIKE 'v12:%'
-        ORDER BY as_of_date DESC LIMIT 1`
-    ).bind(entityId, asOf).first<any>();
-    return row?.rating != null
-      ? {
+  // v1.2 snapshots carry extra columns (confidence / is_frozen / is_retired / is_provisional);
+  // v1.1 rows don't have them. Try the richer query for v12; if schema lacks columns (e.g. D1
+  // hasn't had v12 migration applied yet) or no v12 rows exist, fall back to v11.
+  if (engine === 'v12') {
+    try {
+      const row = await db.prepare(
+        `SELECT rating, confidence, is_frozen, is_retired, is_provisional
+           FROM ${table}
+          WHERE ${col} = ? AND axis_key = 'overall' AND as_of_date < ?
+            AND id LIKE 'v12:%'
+          ORDER BY as_of_date DESC LIMIT 1`
+      ).bind(entityId, asOf).first<any>();
+      if (row?.rating != null) {
+        return {
           rating: row.rating,
           confidence: row.confidence ?? null,
           isFrozen: !!row.is_frozen,
           isRetired: !!row.is_retired,
           isProvisional: !!row.is_provisional,
           engine: 'v12',
-        }
+        };
+      }
+    } catch {
+      // v12 columns missing (pre-migration D1) — fall through to v11
+    }
+  }
+  try {
+    const row = await db.prepare(
+      `SELECT rating FROM ${table}
+        WHERE ${col} = ? AND axis_key = 'overall' AND as_of_date < ?
+          AND id NOT LIKE 'v12:%'
+        ORDER BY as_of_date DESC LIMIT 1`
+    ).bind(entityId, asOf).first<any>();
+    return row?.rating != null
+      ? { rating: row.rating, confidence: null, isFrozen: false, isRetired: false, isProvisional: false, engine: 'v11' }
       : null;
   } catch {
     return null;
@@ -1471,12 +1489,12 @@ async function computeComposite(
   return withProb;
 }
 
-// GET /api/analyze/top-picks?raceId=:id — composite ELO + 7 factors
-// Uses v12 ELO (time-weighted multi-axis, user-endorsed 2026-04-28)
+// GET /api/analyze/top-picks?raceId=:id&engine=v11|v12 — composite ELO + 7 factors
+// engine defaults to v12 (time-weighted multi-axis, user-endorsed 2026-04-28)
 analyzeRoutes.get('/top-picks', async (c) => {
   const raceId = c.req.query('raceId');
   if (!raceId) return c.json({ error: '請提供 raceId' }, 400);
-  const engine: EloEngine = 'v12' as const;
+  const engine: EloEngine = c.req.query('engine') === 'v11' ? 'v11' : 'v12';
 
   const race = await c.env.DB.prepare(`
     SELECT r.*, rm.date, rm.venue, rm.track_condition
@@ -1563,7 +1581,7 @@ analyzeRoutes.get('/explain', async (c) => {
   `).bind(raceId).first<any>();
   if (!race) return c.json({ error: '找不到該場賽事' }, 404);
 
-  const engine: EloEngine = 'v12' as const;
+  const engine: EloEngine = c.req.query('engine') === 'v11' ? 'v11' : 'v12';
   let picks: any[] = [];
   try {
     picks = await computeComposite(c.env.DB, raceId, race.date, engine);
@@ -1725,7 +1743,26 @@ analyzeRoutes.get('/factors', (c) => {
           for (const row of (results ?? [])) {
             if (!map.has(row[col])) map.set(row[col], { rating: row.rating, confidence: row.confidence ?? null, isFrozen: !!row.is_frozen, isRetired: !!row.is_retired, isProvisional: !!row.is_provisional, engine: 'v12' });
           }
-        } catch { /* v12 query error — entity excluded from map */ }
+        } catch { /* v12 columns missing or query error — try v11 fallback below */ }
+      }
+    }
+    const missing = ids.filter(id => !map.has(id));
+    if (missing.length) {
+      const chunks2: string[][] = [];
+      for (let i = 0; i < missing.length; i += CHUNK) chunks2.push(missing.slice(i, i + CHUNK));
+      for (const chunk of chunks2) {
+        try {
+          const ph2 = chunk.map(() => '?').join(', ');
+          const { results } = await db.prepare(
+            `SELECT ${col}, rating
+             FROM ${table}
+             WHERE ${col} IN (${ph2})${entityTable === 'horse' ? " AND axis_key = 'overall'" : ''} AND as_of_date <= ? AND id NOT LIKE 'v12:%'
+             ORDER BY ${col}, as_of_date DESC`
+          ).bind(...chunk, asOf).all<any>();
+          for (const row of (results ?? [])) {
+            if (!map.has(row[col])) map.set(row[col], { rating: row.rating, confidence: null, isFrozen: false, isRetired: false, isProvisional: false, engine: 'v11' });
+          }
+        } catch { /* skip */ }
       }
     }
     return map;
@@ -2395,7 +2432,7 @@ analyzeRoutes.get('/factors', (c) => {
 
       analyzeRoutes.get('/today-picks', async (c) => {
         try {
-          const engine: EloEngine = 'v12' as const;
+          const engine: EloEngine = c.req.query('engine') === 'v11' ? 'v11' : 'v12';
           const fresh = c.req.query('fresh') === '1';
           const venue = c.req.query('venue') || undefined;
           const result = await runRaceDayReportCompute(c.env.DB, engine, { fresh, venue });
@@ -2409,7 +2446,7 @@ analyzeRoutes.get('/factors', (c) => {
       // POST /admin/api/refresh-race-day-report — manual rebuild trigger (admin only via token gate upstream)
       analyzeRoutes.post('/refresh-race-day-report', async (c) => {
         try {
-          const engine: EloEngine = 'v12' as const;
+          const engine: EloEngine = c.req.query('engine') === 'v11' ? 'v11' : 'v12';
           const result = await runRaceDayReportCompute(c.env.DB, engine, { fresh: true });
           if (result?.error) return c.json({ error: result.error }, (result.status ?? 500) as any);
           return c.json({ ok: true, date: result.date, venue: result.venue, races: result.races?.length ?? 0, computeMs: result.computeMs, seedSummary: result.seedSummary, predictionLog: result.predictionLog, generatedAt: result.generatedAt });
@@ -2520,7 +2557,7 @@ analyzeRoutes.get('/factors', (c) => {
             const dateParam = c.req.query('date') ?? null;
             const minOdds = Math.max(1.01, Number(c.req.query('min') ?? '3'));
             const maxOdds = Math.max(minOdds, Number(c.req.query('max') ?? '8'));
-            const engine: EloEngine = 'v12' as const;
+            const engine: EloEngine = c.req.query('engine') === 'v11' ? 'v11' : 'v12';
             const report = await runRaceDayReportCompute(c.env.DB, engine, { fresh: false });
             if (report?.error) return c.json({ error: report.error }, (report.status ?? 500) as any);
             const date = dateParam ?? report.date;
@@ -2582,7 +2619,7 @@ analyzeRoutes.get('/factors', (c) => {
       analyzeRoutes.all('/start-backtest-bg', async (c) => {
         try {
           const days = Math.max(1, Math.min(365, Number(c.req.query('days') ?? '90')));
-          const engine = 'v12' as const;
+          const engine = c.req.query('engine') === 'v11' ? 'v11' : 'v12';
           // Mark start so status endpoint can show progress
           c.executionCtx.waitUntil(
             (async () => {
@@ -2824,7 +2861,7 @@ analyzeRoutes.get('/factors', (c) => {
           const db = c.env.DB;
           const date = c.req.query('date');
           if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return c.json({ error: '請提供 YYYY-MM-DD 格式日期' }, 400);
-          const engine: EloEngine = 'v12' as const;
+          const engine: EloEngine = c.req.query('engine') === 'v11' ? 'v11' : 'v12';
           const meeting = await db.prepare(`SELECT m.* FROM race_meetings m WHERE m.date = ? ORDER BY (SELECT COUNT(*) FROM races r WHERE r.meeting_id = m.id) DESC, m.id LIMIT 1`).bind(date).first<any>().catch(() => null);
           if (!meeting) return c.json({ error: `${date} 賽馬日記錄不存在` }, 404);
           // Try entries_upcoming first (works for upcoming dates)
@@ -2878,7 +2915,7 @@ analyzeRoutes.get('/factors', (c) => {
           try {
             const date = c.req.query('date');
             if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return c.json({ error: '請提供 YYYY-MM-DD 格式日期' }, 400);
-            const engine: EloEngine = 'v12' as const;
+            const engine: EloEngine = c.req.query('engine') === 'v11' ? 'v11' : 'v12';
             const refresh = c.req.query('refresh') === '1';
             // P3-C: ?alpha=0.62 lets offline tuner sweep candidates without
             // mutating production α. When provided, bypass cache (read+write)
@@ -2982,7 +3019,7 @@ analyzeRoutes.get('/factors', (c) => {
           const db = c.env.DB;
           const daysParam = c.req.query('days');
           const days = Math.max(1, Math.min(180, parseInt(daysParam || '30', 10) || 30));
-          const engine: EloEngine = 'v12' as const;
+          const engine: EloEngine = c.req.query('engine') === 'v11' ? 'v11' : 'v12';
           const today = new Date().toISOString().substring(0, 10);
           const cutoff = new Date(Date.now() - days * 86400000).toISOString().substring(0, 10);
           const datesQ = await db.prepare(
@@ -3065,7 +3102,7 @@ analyzeRoutes.get('/factors', (c) => {
           const db = c.env.DB;
           const days = Math.max(7, Math.min(180, parseInt(c.req.query('days') || '30', 10) || 30));
           const apply = c.req.query('apply') === '1';
-          const engine: EloEngine = 'v12' as const;
+          const engine: EloEngine = c.req.query('engine') === 'v11' ? 'v11' : 'v12';
           const today = new Date().toISOString().substring(0, 10);
           const cutoff = new Date(Date.now() - days * 86400000).toISOString().substring(0, 10);
           const datesQ = await db.prepare(

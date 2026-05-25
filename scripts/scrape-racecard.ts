@@ -169,9 +169,9 @@
     // endpoints occasionally returned stale/wrong venues, which created rows like
     // 2026-05-20_ST when only HV was actually racing that day.
     const hasEvidence = db.prepare(
-      `SELECT 1 FROM entries_upcoming WHERE race_date = ? AND venue = ? LIMIT 1
+      `SELECT 1 FROM entries_upcoming WHERE race_date = ? AND venue = ?
          UNION ALL
-       SELECT 1 FROM race_meetings    WHERE date      = ? AND venue = ? LIMIT 1`,
+       SELECT 1 FROM race_meetings    WHERE date      = ? AND venue = ?`,
     ).get(meetingDate, venueCode, meetingDate, venueCode);
     if (!hasEvidence) {
       console.warn(`[scrape-racecard] SKIP phantom meeting ${meetingDate}_${venueCode} — no entries_upcoming or existing race_meetings row`);

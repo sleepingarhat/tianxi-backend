@@ -26,6 +26,15 @@ meetingsRoutes.get('/', async (c) => {
     'AND ( ' +
     '  m.total_races IS NOT NULL ' +
     '  OR EXISTS (SELECT 1 FROM entries_upcoming WHERE race_date = m.date AND venue = m.venue AND race_number > 0) ' +
+    ') ' +
+    // Anti-ghost: filter rows where total_races < 4 AND a sibling meeting on same
+    // date has more races. HK race days always have >=6 races; a "1 場" / "2 場"
+    // row alongside an 11-race row is a phantom from stale HKJC scrapes (see
+    // 2026-05-24_HV vs 2026-05-24_ST). Mirrors the detail endpoint's dedupe.
+    'AND NOT ( ' +
+    '  COALESCE(m.total_races, 0) < 4 ' +
+    '  AND EXISTS (SELECT 1 FROM race_meetings m2 WHERE m2.date = m.date AND m2.venue != m.venue ' +
+    '              AND COALESCE(m2.total_races, 0) > COALESCE(m.total_races, 0)) ' +
     ')';
   const params: unknown[] = [];
 
