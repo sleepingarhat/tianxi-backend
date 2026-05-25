@@ -37,7 +37,7 @@ elo_z      = (eloScore − μ_elo) / σ_elo     ← per race
 
 // 3. Probability-level blend
 finalScore = 1500 + (α·lgb_z + (1−α)·elo_z + factor·0.5) · 100
-             ↑ α = 0.62 (val-tuned, 2026-05-22 reconfirmed)
+             ↑ α 由 app_settings.ensemble_alpha 管理（offline tuner 寫入）
 
 P(勝)      = softmax(finalScore / 200)
 ```
@@ -71,75 +71,21 @@ factorBonus  = fDraw.bonus + fWeight.bonus
 
 ---
 
-## ❌ 試過但唔用嘅 approach（歷史）
+## 內部管理 / 診斷 endpoint
 
-| Approach | 結果 |
-|---|---|
-| **R5（純 ELO + 2 factor）** | 2026-05-10 production，被 TX-Oracle v3 取代 |
-| **Multi-axis horse ELO**（surface × distance bucket） | 2026-05-12 backtest：C/E variants 12.9% Top1 < A (overall) 14.3% Top1，唔 productionize |
-| **奇門遁甲 / 梅花易數 score** | 88 日 backtest 同純 ELO 一樣，無 alpha |
-| **R0 (8-factor 全入分) / R1 / R2** | 全部 underperform R5 |
-| **v11 ELO（pre time-weighting）** | 2026-04-28 起被 v12 取代，2026-05-22 fallback 完全移除 |
-
-完整決議歷史見 [`reports/decision-log.md`](./reports/decision-log.md)。
-
----
-
-## API 端點
-
-### 公開 API
-
-| 端點 | 說明 |
-|------|------|
-| `GET /api/meetings/smart/current` | 當前/最近賽馬日 |
-| `GET /api/meetings/next` | 下一個賽馬日 |
-| `GET /api/races/:id/entries` | 排位表 + 兄弟場次導航 |
-| `GET /api/horses/:id/detail` | 馬匹詳情（前端 horse 頁用） |
-| `GET /api/horses/leaderboard?by=elo` | ELO 排行（百科用） |
-| `GET /api/horses/search/query?q=` | 馬匹搜尋 |
-| `GET /api/analyze/top-picks?raceId=` | **TX-Oracle v3 預測**（race 頁用） |
-| `GET /api/analyze/explain?raceId=&horseId=` | 單匹因子分解 + 解釋（horse 頁用） |
-| `GET /api/analyze/factors` | 17-因子 catalog（predictor 頁，純探索，非生產公式） |
-| `GET /api/analyze/picks-by-date?date=YYYY-MM-DD` | 指定日全因子預測（支援未來/過去） |
-| `GET /api/analyze/hit-rate?date=YYYY-MM-DD[&alpha=N]` | 單日命中率 + ensemble breakdown + per-(date,alpha) cache |
-| `GET /api/silks/:code.gif` | 騎師衫色代理 |
-| `GET /api/lounge/chat` · `POST /api/lounge/chat` | 全局聊天室 |
-
-### 管理 API（Bearer / `?token=`）
-
-| 端點 | 說明 |
-|------|------|
-| `GET /admin` | 內部控制台 HTML |
-| `GET /admin/api/coverage` | 14 個數據源覆蓋狀態 |
-| `GET /admin/api/status` | D1 即時計數 |
-| `GET /admin/api/alerts` | 系統告警 |
-| `GET /admin/api/runs` | GHA 工作流運行記錄 |
-| `POST /admin/api/dispatch` | 觸發 GHA 工作流 |
-| `POST /admin/api/refresh-hit-cache` | 重 build hit-rate cache |
-| `POST /admin/api/refresh-race-day-report` | 重 build race day report |
-| `POST /api/analyze/ensemble-alpha` | 寫入 production α（α tuner --apply 用） |
-
-> 2026-05-22 cleanup 移除：`/api/analyze/{prediction-accuracy, r5-comparison, run-backtest, run-backtest-day, qimen-only-day/range, meihua-only-day/range}` 同 retired `/api/cleanup-2026-05-20-phantom`。
+| Method | Path | 用途 |
+|---|---|---|
+| GET | `/api/analyze/top-picks?raceId=` | 生產預測 (TX-Oracle v3) |
+| GET | `/api/analyze/today-picks` | 全日預測 cache |
+| GET | `/api/analyze/hit-rate?date=&alpha=` | meeting 命中率（per-α 快取） |
+| GET | `/api/analyze/backtest-dates?days=` | 列出有 race_results 嘅 race day |
+| GET | `/api/analyze/d1-inspect?table=&limit=` | ADMIN — D1 schema + sample row 探查 |
+| POST | `/api/analyze/ensemble-alpha {alpha}` | ADMIN — 切換生產 α |
 
 ---
 
-## 本地開發
+## 歷史清理紀錄
 
-```bash
-npm install
-npm run dev           # wrangler dev
-npm run deploy        # wrangler deploy
-```
-
-## Worker Secrets（必須）
-
-```bash
-wrangler secret put ADMIN_TOKEN
-wrangler secret put GITHUB_TOKEN
-wrangler secret put GITHUB_REPO   # sleepingarhat/tianxi-database
-```
-
-## D1 資料庫
-
-- **綁定**: `DB` · **ID**: `aad1636e-869a-43f5-aa95-4a19e3aa5517`
-- **Schema**: `src/db/schema.sql` + `schema_v2.sql`（multi-axis snapshot 表）+ 各擴充 SQL
+- **2026-05-22**: v11 ELO 引擎完全 strip（D1 100% v12）
+- **2026-05-25**: qimen / meihua / TimesFM 探索代碼 strip（從未進入生產）
+- **2026-05-25**: backtest A/B 報告 routes（start-backtest-bg / backtest-report / backtest-diff / backtest-status / ensemble-only-range）連同 `prediction_log` 嘅 `qimen-bt` / `baseline-bt` / `qimen` variant strip。剩 `baseline` variant（TX-Oracle v3 生產輸出）
