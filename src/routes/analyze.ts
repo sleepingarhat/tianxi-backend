@@ -3061,7 +3061,7 @@ analyzeRoutes.get('/factors', (c) => {
             const orderSql = spec.dateCol ? `ORDER BY ${spec.dateCol} DESC` : '';
 
             const { results: schema } = await c.env.DB.prepare(
-              `SELECT name, type, "notnull" AS notnull, dflt_value FROM pragma_table_info(?)`
+              `SELECT name, type, [notnull] AS not_null, dflt_value FROM pragma_table_info(?)`
             ).bind(table).all<any>();
 
             const { results: rows } = await c.env.DB.prepare(
