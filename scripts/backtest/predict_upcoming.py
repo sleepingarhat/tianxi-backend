@@ -51,6 +51,16 @@ FEAT_COLS = [
     'horse_pace_n', 'horse_pace_early', 'horse_pace_style',
     'race_n_leaders', 'race_n_closers', 'horse_pace_clash',
     'class_now_num', 'last_class_num', 'class_delta',
+    # Stage 8 (NEW v3.2 2026-05-25): real sectional times + distance interactions.
+    # Target: improve top-3 ORDERING (current 30d eval: top3_any=80% but
+    # tierce=0%, quinella=3.3%). Sectionals capture early-speed vs late-kick
+    # patterns; distance-band × draw/pace interactions let LGB learn that
+    # interior draws matter most in sprints, and pace clashes hurt more
+    # at distance. NOTE: 'beaten_lengths' deliberately NOT a feature —
+    # it's a future regression-head LABEL (would be lookahead if used).
+    'sect_n', 'sect_early_avg', 'sect_late_kick',
+    'is_sprint', 'is_middle', 'is_distance',
+    'draw_x_sprint', 'paceclash_x_distance',
 ]
 
 

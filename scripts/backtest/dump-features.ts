@@ -275,6 +275,30 @@
          AND rr.running_position IS NOT NULL AND rr.running_position != ''
        ORDER BY rm.date DESC LIMIT 8`);
 
+    // ── Stage 8 (NEW 2026-05-25, v3.2): real sectional times from
+    // horse_sectional_times (populated by scripts/import-csv.ts from
+    // sectional_times_YYYY-MM-DD.csv in tianxi-database, 87 days/year
+    // back to 2017). Goal: improve ORDERING of top-3 by capturing
+    // early speed vs late kick — the dominant factor differentiating
+    // similarly-rated horses for trio/tierce/QP positions.
+    //
+    // Schema: (race_id, horse_id, section_number 1..6,
+    //          section_time REAL, position_at_section INTEGER).
+    // Fetch last 60 sectional rows for this horse (≈10 races worth)
+    // and aggregate in JS over the most recent 6 races.
+    const qSectionals = db.prepare(`
+      SELECT hst.race_id AS rid,
+             hst.section_number AS sec,
+             hst.section_time AS t,
+             hst.position_at_section AS pos,
+             rm.date AS dt
+        FROM horse_sectional_times hst
+        JOIN races r ON r.id = hst.race_id
+        JOIN race_meetings rm ON rm.id = r.meeting_id
+       WHERE hst.horse_id = ? AND rm.date < ?
+       ORDER BY rm.date DESC, hst.section_number ASC
+       LIMIT 60`);
+
     // ── Stage 6 (NEW): class change — last race_class for horse ────────────
     // horse_form_records.race_class is text. Format varies:
     //   - bare digit "4"  (from form_records CSV col 9)
@@ -328,6 +352,64 @@
   function parseRP(rp: string): number[] {
     return rp.split('-').map(s => parseInt(s.trim(), 10)).filter(n => Number.isFinite(n) && n > 0);
   }
+
+  // ── Stage 8 (NEW v3.2): parse HKJC lengths-behind-winner text ──────────
+  // Format examples (HK convention): 'N' (nose, ~0.05L), 'SH' (short head, 0.1),
+  // 'HD' (head, 0.2), 'NK' (neck, 0.3), '1/2', '3/4', '1-1/4', '5', '12-3/4'.
+  // Returns numeric lengths or null if unparseable. Winner row has empty/null lbw → 0.
+  function parseLbw(s: string | null | undefined): number | null {
+    if (s == null) return 0;  // winner: stored as null/empty
+    const t = String(s).trim().toUpperCase();
+    if (t === '' || t === '-') return 0;  // treated as winner / no separation
+    const abbrev: Record<string, number> = { 'N': 0.05, 'SH': 0.1, 'HD': 0.2, 'NK': 0.3 };
+    if (t in abbrev) return abbrev[t];
+    // "1-1/4" → 1.25 ; "3/4" → 0.75 ; "5" → 5
+    const mix = t.match(/^(\d+)\s*[-\s]\s*(\d+)\/(\d+)$/);
+    if (mix) return Number(mix[1]) + Number(mix[2]) / Number(mix[3]);
+    const frac = t.match(/^(\d+)\/(\d+)$/);
+    if (frac) return Number(frac[1]) / Number(frac[2]);
+    const num = t.match(/^(\d+(?:\.\d+)?)$/);
+    if (num) return Number(num[1]);
+    return null;
+  }
+
+  // ── Stage 8 (NEW v3.2): aggregate sectional rows from qSectionals ──────
+  // Input: rows ORDER BY date DESC, section_number ASC (so each race's
+  // sections are contiguous). Takes the most-recent 6 races' worth.
+  // Outputs:
+  //   sect_n         — races used (0..6)
+  //   sect_early_avg — avg position at first section across races (lower=closer-to-front early)
+  //   sect_late_kick — avg (position_at_first_section - position_at_last_section).
+  //                    Positive = passed horses in late stages (closer style).
+  //                    Negative = was passed late (front-runner who faded).
+  function sectionalProfile(rows: { rid: string; sec: number; pos: number | null; t: number | null }[]):
+    { n: number; early_avg: number | null; late_kick: number | null } {
+    if (!rows.length) return { n: 0, early_avg: null, late_kick: null };
+    const byRace: Map<string, { pos: number; sec: number }[]> = new Map();
+    for (const r of rows) {
+      if (r.pos == null || !Number.isFinite(r.pos)) continue;
+      const arr = byRace.get(r.rid) || [];
+      arr.push({ pos: r.pos, sec: r.sec });
+      byRace.set(r.rid, arr);
+    }
+    // qSectionals returns rows already ordered by date DESC; Map preserves insertion order.
+    const races = Array.from(byRace.values()).slice(0, 6);
+    const earlies: number[] = [];
+    const kicks: number[] = [];
+    for (const segs of races) {
+      segs.sort((a, b) => a.sec - b.sec);
+      if (segs.length === 0) continue;
+      earlies.push(segs[0].pos);
+      if (segs.length >= 2) {
+        kicks.push(segs[0].pos - segs[segs.length - 1].pos);
+      }
+    }
+    return {
+      n: races.length,
+      early_avg: earlies.length ? Math.round((earlies.reduce((a, b) => a + b, 0) / earlies.length) * 100) / 100 : null,
+      late_kick: kicks.length ? Math.round((kicks.reduce((a, b) => a + b, 0) / kicks.length) * 100) / 100 : null,
+    };
+  }
   // From last-N running_positions: { early: mean first-sectional position, style: 1=leader/2=stalker/3=closer/0=unknown }
   function paceProfile(rps: string[]): { early: number | null; style: number } {
     const earlies: number[] = [];
@@ -375,6 +457,7 @@
   type RunnerRow = {
     race_id: string; horse_id: string; jockey_id: string | null; trainer_id: string | null;
     finishing_position: number; draw: number | null; actual_weight: number | null; win_odds: number | null;
+    lbw: string | null;
   };
 
   // ── Race + runner source ────────────────────────────────────────────────
@@ -427,6 +510,7 @@
         draw: e.draw != null ? Number(e.draw) : null,
         actual_weight: e.actual_weight != null ? Number(e.actual_weight) : null,
         win_odds: null,
+        lbw: null,  // unknown — race hasn't run
       });
       runnersByRace.set(raceId, list);
     }
@@ -445,7 +529,7 @@
 
     qRunners = db.prepare(`
       SELECT race_id, horse_id, jockey_id, trainer_id, finishing_position,
-             draw, actual_weight, win_odds
+             draw, actual_weight, win_odds, lbw
         FROM race_results
        WHERE race_id = ?
          AND finishing_position BETWEEN 1 AND 98`);
@@ -472,6 +556,14 @@
       'race_n_leaders','race_n_closers','horse_pace_clash',
       // Stage 6 (NEW): class change (current vs horse's last race_class)
       'class_now_num','last_class_num','class_delta',
+      // Stage 8 (NEW v3.2): real sectional times (last 6 races aggregated)
+      'sect_n','sect_early_avg','sect_late_kick',
+      // Stage 8 (NEW v3.2): distance-band features + interactions
+      'is_sprint','is_middle','is_distance',
+      'draw_x_sprint','paceclash_x_distance',
+      // Stage 8 (NEW v3.2): margin-regression target (lbw parsed → lengths).
+      // FEATURE: not used (would be lookahead). LABEL: for future aux head.
+      'beaten_lengths',
       'finishing_position','is_top1','is_top3',
     ];
   writeFileSync(OUT, HEADER.join(',') + '\n');
@@ -503,10 +595,14 @@
 
     // Stage 6: pre-pass to collect each runner's pace style → race-level counts
     const paceByHorse: Map<string, { early: number | null; style: number; n: number }> = new Map();
+    // Stage 8 (NEW v3.2): pre-pass sectional profiles too
+    const sectByHorse: Map<string, { n: number; early_avg: number | null; late_kick: number | null }> = new Map();
     for (const r of runners) {
       const rps = (qHorsePace.all(r.horse_id, meta.date) as { rp: string }[]).map(x => x.rp);
       const pp = paceProfile(rps);
       paceByHorse.set(r.horse_id, { early: pp.early, style: pp.style, n: rps.length });
+      const sectRows = qSectionals.all(r.horse_id, meta.date) as { rid: string; sec: number; t: number | null; pos: number | null; dt: string }[];
+      sectByHorse.set(r.horse_id, sectionalProfile(sectRows));
     }
     let raceNLeaders = 0, raceNClosers = 0;
     for (const v of paceByHorse.values()) {
@@ -514,6 +610,12 @@
       if (v.style === 3) raceNClosers++;
     }
     const classNowNum = classToNum(meta.class);
+
+    // Stage 8 (NEW v3.2): distance-band indicators (race-level, constant per row in race)
+    const dist = meta.distance || 0;
+    const isSprint = dist > 0 && dist <= 1200 ? 1 : 0;
+    const isMiddle = dist >= 1400 && dist <= 1600 ? 1 : 0;
+    const isDistance = dist >= 1800 ? 1 : 0;
 
     for (const r of runners) {
       const hElo = readElo('horse', r.horse_id, meta.date);
@@ -600,6 +702,14 @@
       const lastClassNum = classToNum(lastClassRaw);
       const classDelta = (classNowNum != null && lastClassNum != null) ? (lastClassNum - classNowNum) : null;
 
+      // Stage 8 (NEW v3.2): sectional + distance interactions + margin label
+      const sect = sectByHorse.get(r.horse_id)!;
+      const drawX = (r.draw != null && isSprint) ? r.draw : null;
+      const paceX = (paceClash != null && isDistance) ? paceClash : null;
+      const beatenLengths = r.finishing_position === 1
+        ? 0
+        : parseLbw(r.lbw);
+
       const row = [
           meta.id, meta.date, meta.venue, meta.race_number, meta.distance, meta.going, fieldSize,
           r.horse_id, r.jockey_id, r.trainer_id, r.draw, r.actual_weight, r.win_odds,
@@ -613,6 +723,10 @@
           pace.n, pace.early, pace.style,
           raceNLeaders, raceNClosers, paceClash,
           classNowNum, lastClassNum, classDelta,
+          sect.n, sect.early_avg, sect.late_kick,
+          isSprint, isMiddle, isDistance,
+          drawX, paceX,
+          beatenLengths,
           r.finishing_position,
           r.horse_id === top1Id ? 1 : 0,
           top3Set.has(r.horse_id) ? 1 : 0,

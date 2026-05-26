@@ -54,6 +54,12 @@ FEATURE_COLS = [
       "race_n_leaders", "race_n_closers", "horse_pace_clash",
       # Stage 6 (NEW): class change
       "class_now_num", "last_class_num", "class_delta",
+      # Stage 8 (NEW v3.2 2026-05-25): real sectional aggregates + distance bands
+      # See predict_upcoming.py FEAT_COLS comment for rationale. beaten_lengths
+      # excluded — it's a future regression-head label, not a feature.
+      "sect_n", "sect_early_avg", "sect_late_kick",
+      "is_sprint", "is_middle", "is_distance",
+      "draw_x_sprint", "paceclash_x_distance",
       # going_code is appended below as a categorical feature.
   ]
 
