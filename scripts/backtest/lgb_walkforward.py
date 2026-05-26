@@ -107,6 +107,12 @@ def train_booster(train_df: pd.DataFrame, args: argparse.Namespace, feat_cols: l
             "objective": "lambdarank",
             "metric": "ndcg",
             "ndcg_eval_at": [1, 3],
+            # 2026-05-25 (v3.1): truncate gradient to top-4 + exponential gains
+            # to focus learning on positions that decide trio/tierce/QP.
+            # Must mirror predict_upcoming.py so backtest reflects production.
+            "lambdarank_truncation_level": 4,
+            "label_gain": [0, 1, 7, 31, 127, 127, 127, 127, 127, 127, 127, 127,
+                           127, 127, 127, 127, 127, 127, 127, 127],
             "learning_rate": args.learning_rate,
             "num_leaves": args.num_leaves,
             "min_data_in_leaf": args.min_data_in_leaf,

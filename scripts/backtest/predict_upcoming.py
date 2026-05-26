@@ -178,10 +178,22 @@ def main() -> int:
     params = {
         'objective': 'lambdarank',
         'metric': 'ndcg',
-        # NDCG@5: averaged signal over wider band → more stable early-stopping
-        # decisions than NDCG@1 / NDCG@3 alone with only 90 val races.
-        'ndcg_eval_at': [1, 3, 5],
-        'first_metric_only': True,  # early-stop reads the first (NDCG@1) for parity with v1
+        # 2026-05-25 (TX-Oracle v3.1): NDCG@3 retrain.
+        # Previously eval_at=[1,3,5] with default truncation_level=30 meant
+        # gradients were computed across ranks 1-30 → 80% of signal was wasted
+        # on positions we don't bet on (we only care about top 3-4 for trio/QP).
+        # Truncating to 4 focuses learning on ordering of top 4 ranks.
+        # Diagnosis: 30d tierce hit rate = 0% with strong top3 anyHit (80.2%) →
+        # model identifies top-3 set but cannot order them. Fix: focus gradient
+        # on positions that determine trio/tierce/QP outcomes.
+        'ndcg_eval_at': [1, 3],
+        'first_metric_only': True,  # early-stop reads NDCG@1
+        'lambdarank_truncation_level': 4,
+        # Sharper graded label gain ([0,1,3,7,15,31,...] is LGB default).
+        # Bigger jumps between rank 4 (winner+) → rank 1 (last in top4) make
+        # the optimizer prioritize correct ordering at the head.
+        'label_gain': [0, 1, 7, 31, 127, 127, 127, 127, 127, 127, 127, 127,
+                       127, 127, 127, 127, 127, 127, 127, 127],
         'learning_rate': args.learning_rate,
         'num_leaves': args.num_leaves,
         'min_data_in_leaf': args.min_data_in_leaf,
