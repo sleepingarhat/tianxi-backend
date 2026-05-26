@@ -702,10 +702,12 @@
       const lastClassNum = classToNum(lastClassRaw);
       const classDelta = (classNowNum != null && lastClassNum != null) ? (lastClassNum - classNowNum) : null;
 
-      // Stage 8 (NEW v3.2): sectional + distance interactions + margin label
+      // Stage 8 (NEW v3.2): sectional + distance interactions + margin label.
+      // Interaction semantics: emit 0 (not null) when band indicator is 0 so
+      // LGB sees "no interaction effect" rather than "missing → -1.0 sentinel".
       const sect = sectByHorse.get(r.horse_id)!;
-      const drawX = (r.draw != null && isSprint) ? r.draw : null;
-      const paceX = (paceClash != null && isDistance) ? paceClash : null;
+      const drawX = (r.draw != null && isSprint) ? r.draw : 0;
+      const paceX = (paceClash != null && isDistance) ? paceClash : 0;
       const beatenLengths = r.finishing_position === 1
         ? 0
         : parseLbw(r.lbw);
