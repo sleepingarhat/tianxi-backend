@@ -610,6 +610,100 @@ adminRoutes.get('/api/lgb-predictions', async (c) => {
   return c.json({ summary: cnt || {}, byModelVersion: ver.results || [] });
 });
 
+// ── /api/d1-maintenance ─ size inspection + pruning (added 2026-05-27) ───
+// Prod hit "D1_ERROR: Exceeded maximum DB size" blocking all writes.
+// GET  ?probe=all → row counts for every known table (probes sqlite_master).
+// POST {action,...} → execute a specific pruning task. Always returns
+// before/after counts so caller can audit. Auth via existing requireAdminToken.
+adminRoutes.get('/api/d1-maintenance', async (c) => {
+  const tables = await c.env.DB.prepare(
+    "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' ORDER BY name"
+  ).all<{ name: string }>();
+  const counts: Record<string, number | string> = {};
+  for (const row of tables.results ?? []) {
+    try {
+      const r = await c.env.DB.prepare(`SELECT COUNT(*) AS c FROM "${row.name}"`).first<{ c: number }>();
+      counts[row.name] = r?.c ?? 0;
+    } catch (e) {
+      counts[row.name] = `ERR: ${(e as Error).message}`;
+    }
+  }
+  // Per-model-version breakdown for lgb_predictions (likely growth source)
+  const lgbByVersion = await c.env.DB.prepare(
+    `SELECT model_version, COUNT(*) AS c FROM lgb_predictions
+     GROUP BY model_version ORDER BY c DESC LIMIT 30`
+  ).all<{ model_version: string; c: number }>().catch(() => ({ results: [] as any[] }));
+  return c.json({ ok: true, tableCounts: counts, lgbByVersion: lgbByVersion.results ?? [] });
+});
+
+adminRoutes.post('/api/d1-maintenance', async (c) => {
+  const body = await c.req.json<{ action: string; [k: string]: unknown }>().catch(() => null);
+  if (!body?.action) return c.json({ error: 'action required' }, 400);
+  const action = String(body.action);
+  const dryRun = body.dryRun === true;
+
+  if (action === 'prune-lgb-keep-latest-per-race') {
+    // Keep only newest model_version per race_id; delete older rows for that race.
+    const before = (await c.env.DB.prepare('SELECT COUNT(*) AS c FROM lgb_predictions').first<{ c: number }>())?.c ?? 0;
+    if (dryRun) return c.json({ ok: true, dryRun: true, before });
+    await c.env.DB.prepare(
+      `DELETE FROM lgb_predictions WHERE rowid IN (
+         SELECT lp.rowid FROM lgb_predictions lp
+         JOIN (
+           SELECT race_id, MAX(created_at) AS latest FROM lgb_predictions GROUP BY race_id
+         ) m ON m.race_id = lp.race_id
+         WHERE lp.created_at < m.latest
+       )`
+    ).run();
+    const after = (await c.env.DB.prepare('SELECT COUNT(*) AS c FROM lgb_predictions').first<{ c: number }>())?.c ?? 0;
+    return c.json({ ok: true, action, before, after, deleted: before - after });
+  }
+
+  if (action === 'prune-prediction-log-older-than') {
+    // Drop prediction_log rows older than `beforeDate` (YYYY-MM-DD).
+    const beforeDate = String(body.beforeDate || '');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(beforeDate)) return c.json({ error: 'beforeDate YYYY-MM-DD required' }, 400);
+    const before = (await c.env.DB.prepare(`SELECT COUNT(*) AS c FROM prediction_log WHERE race_date < ?`).bind(beforeDate).first<{ c: number }>().catch(() => ({ c: 0 })))?.c ?? 0;
+    if (dryRun) return c.json({ ok: true, dryRun: true, beforeDate, wouldDelete: before });
+    await c.env.DB.prepare(`DELETE FROM prediction_log WHERE race_date < ?`).bind(beforeDate).run();
+    const after = (await c.env.DB.prepare(`SELECT COUNT(*) AS c FROM prediction_log WHERE race_date < ?`).bind(beforeDate).first<{ c: number }>())?.c ?? 0;
+    return c.json({ ok: true, action, beforeDate, before, after, deleted: before - after });
+  }
+
+  if (action === 'prune-elo-snapshots-older-than') {
+    const beforeDate = String(body.beforeDate || '');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(beforeDate)) return c.json({ error: 'beforeDate YYYY-MM-DD required' }, 400);
+    const tables = ['horse_elo_snapshots', 'jockey_elo_snapshots', 'trainer_elo_snapshots'];
+    const result: Record<string, unknown> = {};
+    for (const t of tables) {
+      const beforeC = (await c.env.DB.prepare(`SELECT COUNT(*) AS c FROM "${t}" WHERE snapshot_date < ?`).bind(beforeDate).first<{ c: number }>().catch(() => ({ c: 0 })))?.c ?? 0;
+      if (dryRun) { result[t] = { wouldDelete: beforeC }; continue; }
+      await c.env.DB.prepare(`DELETE FROM "${t}" WHERE snapshot_date < ?`).bind(beforeDate).run().catch(() => {});
+      const afterC = (await c.env.DB.prepare(`SELECT COUNT(*) AS c FROM "${t}" WHERE snapshot_date < ?`).bind(beforeDate).first<{ c: number }>())?.c ?? 0;
+      result[t] = { before: beforeC, after: afterC, deleted: beforeC - afterC };
+    }
+    return c.json({ ok: true, action, beforeDate, ...result });
+  }
+
+  if (action === 'drop-table') {
+    // Only allow dropping non-essential tables (safety guard).
+    const tname = String(body.table || '');
+    const allowed = new Set(['schema_odds_legacy', 'odds_snapshots_legacy', 'entries_upcoming_old', 'prediction_log_v1']);
+    if (!allowed.has(tname)) return c.json({ error: `table not in safe-drop allowlist`, allowed: [...allowed] }, 400);
+    if (dryRun) return c.json({ ok: true, dryRun: true, table: tname });
+    await c.env.DB.prepare(`DROP TABLE IF EXISTS "${tname}"`).run();
+    return c.json({ ok: true, action, table: tname, dropped: true });
+  }
+
+  return c.json({ error: `unknown action: ${action}`, knownActions: [
+    'prune-lgb-keep-latest-per-race',
+    'prune-prediction-log-older-than',
+    'prune-elo-snapshots-older-than',
+    'drop-table',
+  ]}, 400);
+});
+
+
 // ── /api/entries-upcoming-export ─ feed for GH Actions predict pipeline ──
 adminRoutes.get('/api/entries-upcoming-export', async (c) => {
   const today = new Date().toISOString().slice(0, 10);
