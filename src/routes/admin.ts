@@ -761,6 +761,47 @@ adminRoutes.post('/api/d1-maintenance', async (c) => {
 });
 
 
+// ── /api/set-alpha ─ manual ensemble α override (admin-token gated) ──
+// 2026-05-27: needed for emergency α=0 (kill ensemble, pure ELO+factor) when
+// LGB model is degraded. Writes app_settings(key='ensemble_alpha'); read by
+// analyze.ts getEnsembleAlpha() at every today-picks request.
+// Usage: curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
+//   "https://tianxi.racing/admin/api/set-alpha?value=0"
+adminRoutes.post('/api/set-alpha', async (c) => {
+  const expected = c.env.ADMIN_TOKEN;
+  const header = c.req.header('authorization') || '';
+  const bearer = header.startsWith('Bearer ') ? header.slice(7) : '';
+  const queryTok = c.req.query('token') || '';
+  if (!expected || (bearer !== expected && queryTok !== expected)) {
+    return c.json({ error: 'unauthorized' }, 401);
+  }
+  const raw = c.req.query('value');
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0 || n > 1) {
+    return c.json({ error: 'value must be a number in [0, 1]', got: raw }, 400);
+  }
+  await c.env.DB.prepare(
+    `CREATE TABLE IF NOT EXISTS app_settings (
+       key TEXT PRIMARY KEY,
+       value TEXT NOT NULL,
+       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+     )`
+  ).run().catch(() => {});
+  await c.env.DB.prepare(
+    `INSERT INTO app_settings (key, value, updated_at) VALUES ('ensemble_alpha', ?, datetime('now'))
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
+  ).bind(String(n)).run();
+  const row = await c.env.DB.prepare(
+    `SELECT value, updated_at FROM app_settings WHERE key = 'ensemble_alpha'`
+  ).first<{ value: string; updated_at: string }>();
+  return c.json({
+    ok: true,
+    ensemble_alpha: row ? Number(row.value) : n,
+    updated_at: row?.updated_at ?? null,
+    setAt: new Date().toISOString(),
+  });
+});
+
 // ── /api/entries-upcoming-export ─ feed for GH Actions predict pipeline ──
 adminRoutes.get('/api/entries-upcoming-export', async (c) => {
   const today = new Date().toISOString().slice(0, 10);

@@ -103,9 +103,15 @@ def load(path: str) -> pd.DataFrame:
 def train_booster(train_df: pd.DataFrame, args: argparse.Namespace, feat_cols: list[str]) -> lgb.Booster:
     X = train_df[feat_cols].astype(float).fillna(-1.0).to_numpy()
     if args.objective == "lambdarank":
-        # higher label = better. Flip finishing_position so winner has highest.
-        max_pos = int(train_df["finishing_position"].max())
-        label = (max_pos - train_df["finishing_position"]).clip(lower=0).astype(int).to_numpy()
+        # higher label = better. Clipped to top-5 grades (0..4) to align with
+        # label_gain=[0,1,7,31,127] and lambdarank_truncation_level=4.
+        # FIX 2026-05-27: see predict_upcoming.py make_graded_label for full
+        # rationale. Old `max_pos - pos` produced labels 0..13 → label_gain
+        # saturated 127 for labels 4-13 → 1-tree saturation. Mapping:
+        # 1st→4, 2nd→3, 3rd→2, 4th→1, 5th+→0. Mirror of predict_upcoming.py
+        # so backtest reflects production training signal.
+        pos = train_df["finishing_position"].astype(int).clip(lower=1, upper=5)
+        label = (5 - pos).clip(lower=0).astype(int).to_numpy()
         groups = train_df.groupby("race_id", sort=False).size().to_numpy()
         ds = lgb.Dataset(X, label=label, group=groups,
                          categorical_feature=[feat_cols.index("going_code")])

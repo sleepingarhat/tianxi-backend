@@ -126,9 +126,15 @@ def fit_alpha(p_lgb: np.ndarray, p_elo: np.ndarray, race_ids: np.ndarray, is_top
 
 
 def make_graded_label(df: pd.DataFrame) -> np.ndarray:
-    """Graded lambdarank label: higher = better. max_pos - finishing_position, clipped ≥0."""
-    max_pos = max(int(df['finishing_position'].max()), 1)
-    return (max_pos - df['finishing_position'].astype(int)).clip(lower=0).to_numpy()
+    """Graded lambdarank label: higher = better. Clipped to top-5 grades (0..4)
+    to align with label_gain=[0,1,7,31,127] and lambdarank_truncation_level=4.
+    FIX 2026-05-27: previously used `max_pos - finishing_position` which produced
+    labels 0..13 in a 14-horse race. With label_gain saturated at 127 for index
+    >= 4, this made winner..10th-place all share gain=127, so the model couldn't
+    differentiate the top half of the field → 1-tree saturation (best_iter=1).
+    Mapping: 1st→4, 2nd→3, 3rd→2, 4th→1, 5th+→0."""
+    pos = df['finishing_position'].astype(int).clip(lower=1, upper=5)
+    return (5 - pos).clip(lower=0).to_numpy()
 
 
 def main() -> int:
@@ -197,7 +203,7 @@ def main() -> int:
         # model identifies top-3 set but cannot order them. Fix: focus gradient
         # on positions that determine trio/tierce/QP outcomes.
         'ndcg_eval_at': [1, 3],
-        'first_metric_only': True,  # early-stop reads NDCG@1
+        'first_metric_only': False, # early-stop watches BOTH NDCG@1 and @3 (less noise on small val sets)
         'lambdarank_truncation_level': 4,
         # Sharper graded label gain ([0,1,3,7,15,31,...] is LGB default).
         # Bigger jumps between rank 4 (winner+) → rank 1 (last in top4) make
