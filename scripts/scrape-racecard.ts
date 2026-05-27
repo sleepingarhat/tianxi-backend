@@ -168,7 +168,7 @@
     // Previously checked local bulk-local.db evidence, but the local DB lags fresh
     // entries-sync (Capy Entries txt → entries-sync → D1) and falsely blocked valid
     // meetings like 2026-05-27_HV with 122 runners. If runners scraped > 0, it's real.
-    const totalRunners = races.reduce((s: number, r: any) => s + (r.runners?.length ?? 0), 0);
+    // totalRunners already computed at function top (line 69) — reuse it for guard
     if (totalRunners === 0) {
       console.warn(`[scrape-racecard] SKIP empty meeting ${meetingDate}_${venueCode} — 0 runners scraped`);
       return;
