@@ -44,7 +44,14 @@ FEAT_COLS = [
     'h_elo', 'j_elo', 't_elo', 'days_since_last',
     'dist_starts', 'dist_top3', 'going_starts', 'going_top3',
     'draw_starts', 'draw_top3', 'combo_starts', 'combo_top3', 'weight_avg5',
-    'elo_composite', 'factor_bonus', 'baseline_score',
+    # 2026-05-27 FIX: dropped 'elo_composite' + 'baseline_score' (both are
+    # additive aggregates of h_elo/j_elo/t_elo + factor_bonus). Their inclusion
+    # let tree #1 split directly on the ELO output → val NDCG saturated → all
+    # subsequent trees noise → best_iteration=1. Match walkforward FEATURE_COLS:
+    # keep only the raw ELOs + factor_bonus so LGB must learn non-linear
+    # interactions ELO misses, producing signal orthogonal to the ensemble's
+    # ELO half. baseline_score column is still read at L325 for p_elo blend.
+    'factor_bonus',
     'form_n', 'form_avgpos_w', 'form_top3rate_w', 'form_pos_slope',
     'tv_starts', 'tv_top3', 'jv_starts', 'jv_top3', 'jdb_starts', 'jdb_top3',
     'jg_starts', 'jg_top3', 'tg_starts', 'tg_top3',
