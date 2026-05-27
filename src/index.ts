@@ -53,6 +53,20 @@ app.notFound((c) => {
 // Error handler
 app.onError((err, c) => {
   console.error('Unhandled error:', err);
+  // Diagnostic: surface error details to authenticated admin/api callers to
+  // help debug prod crashes without needing CF tail. Public routes still get
+  // generic 500. Triggered 2026-05-27 to debug lgb-predictions POST crash.
+  const path = new URL(c.req.url).pathname;
+  const isAdmin = path.startsWith('/admin/') || path.startsWith('/api/analyze/');
+  if (isAdmin) {
+    const e = err as Error;
+    return c.json({
+      error: 'Internal Server Error',
+      message: e?.message ?? String(err),
+      stack: (e?.stack ?? '').split('\n').slice(0, 6).join('\n'),
+      path,
+    }, 500);
+  }
   return c.json({ error: 'Internal Server Error' }, 500);
 });
 
