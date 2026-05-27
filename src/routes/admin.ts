@@ -685,6 +685,62 @@ adminRoutes.post('/api/d1-maintenance', async (c) => {
     return c.json({ ok: true, action, beforeDate, ...result });
   }
 
+  if (action === 'drop-and-recreate-odds-snapshots') {
+    // 2026-05-27: D1 exceeded max size; user approved A) drop + recreate.
+    // History (~775K rows) discarded; next scrape-odds cron repopulates today.
+    // Schema mirrors src/db/schema_odds.sql exactly.
+    const beforeOdds = (await c.env.DB.prepare('SELECT COUNT(*) AS c FROM odds_snapshots').first<{ c: number }>().catch(() => ({ c: -1 })))?.c ?? -1;
+    const beforePT = (await c.env.DB.prepare('SELECT COUNT(*) AS c FROM pool_totals').first<{ c: number }>().catch(() => ({ c: -1 })))?.c ?? -1;
+    if (dryRun) return c.json({ ok: true, dryRun: true, beforeOdds, beforePT });
+    // Drop indexes first (D1 doesn't auto-drop FK-less indexes always)
+    const dropStmts = [
+      'DROP INDEX IF EXISTS idx_odds_race',
+      'DROP INDEX IF EXISTS idx_odds_lookup',
+      'DROP INDEX IF EXISTS idx_odds_snapshot_at',
+      'DROP INDEX IF EXISTS idx_pool_totals_race',
+      'DROP INDEX IF EXISTS idx_pool_totals_lookup',
+      'DROP TABLE IF EXISTS odds_snapshots',
+      'DROP TABLE IF EXISTS pool_totals',
+    ];
+    for (const s of dropStmts) {
+      await c.env.DB.prepare(s).run().catch((e: unknown) => { console.error('drop stmt failed:', s, e); });
+    }
+    const createStmts = [
+      `CREATE TABLE IF NOT EXISTS odds_snapshots (
+         id TEXT PRIMARY KEY,
+         race_date TEXT NOT NULL,
+         venue TEXT NOT NULL,
+         race_number INTEGER NOT NULL,
+         pool_type TEXT NOT NULL,
+         combination TEXT NOT NULL,
+         odds REAL,
+         snapshot_at TEXT NOT NULL,
+         source_commit TEXT
+       )`,
+      `CREATE INDEX IF NOT EXISTS idx_odds_race ON odds_snapshots (race_date, venue, race_number)`,
+      `CREATE INDEX IF NOT EXISTS idx_odds_lookup ON odds_snapshots (race_date, venue, race_number, pool_type, combination, snapshot_at)`,
+      `CREATE INDEX IF NOT EXISTS idx_odds_snapshot_at ON odds_snapshots (snapshot_at)`,
+      `CREATE TABLE IF NOT EXISTS pool_totals (
+         id TEXT PRIMARY KEY,
+         race_date TEXT NOT NULL,
+         venue TEXT NOT NULL,
+         race_number INTEGER NOT NULL,
+         pool_type TEXT NOT NULL,
+         total_investment REAL,
+         snapshot_at TEXT NOT NULL,
+         source_commit TEXT
+       )`,
+      `CREATE INDEX IF NOT EXISTS idx_pool_totals_race ON pool_totals (race_date, venue, race_number)`,
+      `CREATE INDEX IF NOT EXISTS idx_pool_totals_lookup ON pool_totals (race_date, venue, race_number, pool_type, snapshot_at)`,
+    ];
+    for (const s of createStmts) {
+      await c.env.DB.prepare(s).run();
+    }
+    const afterOdds = (await c.env.DB.prepare('SELECT COUNT(*) AS c FROM odds_snapshots').first<{ c: number }>())?.c ?? -1;
+    const afterPT = (await c.env.DB.prepare('SELECT COUNT(*) AS c FROM pool_totals').first<{ c: number }>())?.c ?? -1;
+    return c.json({ ok: true, action, beforeOdds, beforePT, afterOdds, afterPT });
+  }
+
   if (action === 'drop-table') {
     // Only allow dropping non-essential tables (safety guard).
     const tname = String(body.table || '');
@@ -700,6 +756,7 @@ adminRoutes.post('/api/d1-maintenance', async (c) => {
     'prune-prediction-log-older-than',
     'prune-elo-snapshots-older-than',
     'drop-table',
+    'drop-and-recreate-odds-snapshots',
   ]}, 400);
 });
 
