@@ -135,6 +135,52 @@ app.onError((err, c) => {
     return c.json({ ...out, ranAt: new Date().toISOString() });
   });
 
+  // ── Odds retention (2026-05-27): keep ONLY the latest race day ──────
+  // Engine does NOT use odds; they are reference/record-only. After each
+  // race day's predictions + results are persisted, older odds are
+  // expendable. Runs daily via cron AFTER hit-rate + prediction backfill,
+  // so any same-day join is already done.
+  // Policy: DELETE odds_snapshots / pool_totals rows WHERE race_date <
+  // (SELECT MAX(race_date) ...). Single-day retention prevents D1 from
+  // re-hitting the 10GB cap that wedged 5/27.
+  async function pruneOddsToLatestDay(env: Env): Promise<{
+    ok: boolean;
+    keptDate: string | null;
+    snapshotsDeleted: number;
+    poolTotalsDeleted: number;
+    error?: string;
+  }> {
+    try {
+      const latest = await env.DB.prepare(
+        `SELECT MAX(race_date) AS d FROM odds_snapshots`
+      ).first<{ d: string | null }>();
+      const keptDate = latest?.d ?? null;
+      if (!keptDate) {
+        return { ok: true, keptDate: null, snapshotsDeleted: 0, poolTotalsDeleted: 0 };
+      }
+      const r1 = await env.DB.prepare(
+        `DELETE FROM odds_snapshots WHERE race_date < ?`
+      ).bind(keptDate).run();
+      const r2 = await env.DB.prepare(
+        `DELETE FROM pool_totals WHERE race_date < ?`
+      ).bind(keptDate).run().catch(() => ({ meta: { changes: 0 } } as any));
+      return {
+        ok: true,
+        keptDate,
+        snapshotsDeleted: (r1 as any)?.meta?.changes ?? 0,
+        poolTotalsDeleted: (r2 as any)?.meta?.changes ?? 0,
+      };
+    } catch (e: any) {
+      return { ok: false, keptDate: null, snapshotsDeleted: 0, poolTotalsDeleted: 0, error: e?.message ?? String(e) };
+    }
+  }
+
+  // Manual trigger for admin verification.
+  app.post('/admin/api/prune-odds', async (c) => {
+    const out = await pruneOddsToLatestDay(c.env);
+    return c.json({ ...out, ranAt: new Date().toISOString() });
+  });
+
   export default {
     fetch: app.fetch,
     async scheduled(_event: any, env: Env, ctx: any): Promise<void> {
@@ -146,6 +192,11 @@ app.onError((err, c) => {
       );
       ctx.waitUntil(
         backfillPredictionResults(env).then((r) => console.log('[cron] prediction backfill', r)),
+      );
+      // Run odds prune LAST so any same-day join in the above tasks has
+      // already executed. Single-day retention; engine doesn't need odds.
+      ctx.waitUntil(
+        pruneOddsToLatestDay(env).then((r) => console.log('[cron] odds prune', r)),
       );
     },
   };
