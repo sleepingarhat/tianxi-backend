@@ -160,7 +160,9 @@ def main() -> int:
     #   - early_stopping_rounds 20 → 80 (more patience on noisy small val)
     ap.add_argument('--num-leaves', type=int, default=8)
     ap.add_argument('--learning-rate', type=float, default=0.01)
-    ap.add_argument('--max-n-estimators', type=int, default=500,
+    # 2026-05-28 architect review: with lr=0.01, 500 trees ≈ 10 lr=0.05-equivalent
+    # trees — caps capacity before slow Plan B fit can accumulate. Raise to 2000.
+    ap.add_argument('--max-n-estimators', type=int, default=2000,
                     help='Upper bound for early-stopping search (was n_estimators in v1).')
     ap.add_argument('--min-data-in-leaf', type=int, default=20)
     ap.add_argument('--early-stopping-rounds', type=int, default=80)
