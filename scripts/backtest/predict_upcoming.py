@@ -151,12 +151,19 @@ def main() -> int:
     ap.add_argument('--admin-url', required=True)
     ap.add_argument('--token', required=True)
     ap.add_argument('--model-version', default='lgb-ensemble-v2')
-    ap.add_argument('--num-leaves', type=int, default=15)
-    ap.add_argument('--learning-rate', type=float, default=0.05)
+    # 2026-05-27 Plan B: prev runs collapsed to best_iteration=1 even after
+    # dropping baseline_score/elo_composite from FEAT_COLS. Root cause: NDCG@3
+    # saturates after a single 15-leaf tree on a 90-race val set. Force a
+    # slower, deeper fit:
+    #   - num_leaves 15 → 8  (less single-feature dominance per tree)
+    #   - learning_rate 0.05 → 0.01 (each tree contributes less)
+    #   - early_stopping_rounds 20 → 80 (more patience on noisy small val)
+    ap.add_argument('--num-leaves', type=int, default=8)
+    ap.add_argument('--learning-rate', type=float, default=0.01)
     ap.add_argument('--max-n-estimators', type=int, default=500,
                     help='Upper bound for early-stopping search (was n_estimators in v1).')
     ap.add_argument('--min-data-in-leaf', type=int, default=20)
-    ap.add_argument('--early-stopping-rounds', type=int, default=20)
+    ap.add_argument('--early-stopping-rounds', type=int, default=80)
     ap.add_argument('--val-days', type=int, default=30,
                     help='Last N days held out for early-stopping, τ and α tuning. '
                          '0 disables validation (v1 legacy mode).')
