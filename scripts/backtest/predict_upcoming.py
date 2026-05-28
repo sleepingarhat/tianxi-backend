@@ -263,15 +263,36 @@ def main() -> int:
             ll = race_log_loss(probs, val_top1_np, val_rid_np)
             return ('race_logloss', ll, False)  # is_higher_better=False
         print(f'[predict] training with validation: train_rows={len(Xtr)} val_rows={len(Xv)} val_races={val_part["race_id"].nunique()}', flush=True)
+        eval_hist: dict = {}
         booster = lgb.train(
             params, ds_tr,
             num_boost_round=args.max_n_estimators,
             valid_sets=[ds_v], valid_names=['val'],
             feval=feval_race_ll,
-            callbacks=[lgb.early_stopping(args.early_stopping_rounds, verbose=False)],
+            callbacks=[lgb.early_stopping(args.early_stopping_rounds, verbose=False),
+                       lgb.record_evaluation(eval_hist)],
         )
         best_iter = booster.best_iteration or args.max_n_estimators
         print(f'[predict] early stopping picked best_iteration={best_iter}', flush=True)
+        # Diagnostic: race_logloss curve summary (architect 2026-05-28 review).
+        # If best_iter is small AND iter1 ≈ best ≈ final, early-stop metric is
+        # saturating — flag for investigation (Plan A regression check).
+        if 'val' in eval_hist and 'race_logloss' in eval_hist['val']:
+            rl = eval_hist['val']['race_logloss']
+            rl_iter1 = rl[0]
+            rl_best = rl[best_iter - 1] if best_iter <= len(rl) else rl[-1]
+            rl_final = rl[-1]
+            print(f'[predict] val race_logloss: iter1={rl_iter1:.4f} best={rl_best:.4f} '
+                  f'final={rl_final:.4f} (curve_len={len(rl)})', flush=True)
+            if best_iter < 10 and abs(rl_iter1 - rl_best) < 0.001:
+                print(f'[predict] WARNING: best_iter={best_iter} with flat race_logloss '
+                      f'(Δ={rl_iter1 - rl_best:+.4f}) — early-stop metric may have '
+                      f'regressed to NDCG-style saturation; do NOT raise ensemble_alpha',
+                      flush=True)
+            diag['race_logloss_curve'] = {'iter1': float(rl_iter1),
+                                          'best': float(rl_best),
+                                          'final': float(rl_final),
+                                          'len': len(rl)}
         diag['best_iteration'] = int(best_iter)
         diag['val_races'] = int(val_part['race_id'].nunique())
 
@@ -304,6 +325,20 @@ def main() -> int:
             diag['tau_elo'] = tau_elo
             print(f'[predict] τ_lgb={tau_lgb:.3f} (val log loss {diag["val_log_loss"]["lgb_calibrated"]:.4f})', flush=True)
             print(f'[predict] τ_elo={tau_elo:.3f} (val log loss {diag["val_log_loss"]["elo_calibrated"]:.4f})', flush=True)
+            # Diagnostic: Pearson corr(p_lgb_val, p_elo_val) — high (≥0.95) means
+            # LGB is just echoing ELO and ensemble blend cannot add orthogonal
+            # signal (was the 2026-05-27 hypothesis when baseline_score was in
+            # FEAT_COLS). Architect 2026-05-28 review asked for ongoing visibility.
+            try:
+                corr_le = float(np.corrcoef(p_lgb_val, p_elo_val)[0, 1])
+            except Exception:
+                corr_le = float('nan')
+            diag['corr_lgb_elo'] = corr_le
+            print(f'[predict] corr(p_lgb_val, p_elo_val)={corr_le:.3f}', flush=True)
+            if corr_le > 0.95:
+                print(f'[predict] WARNING: corr≥0.95 — LGB output near-duplicate of ELO '
+                      f'on val; ensemble blend has no orthogonal signal to combine',
+                      flush=True)
             # Warn if optimizer hit a bound — signals model/data mis-spec.
             for name, val in (('τ_lgb', tau_lgb), ('τ_elo', tau_elo)):
                 if val < 0.02 or val > 50.0:
