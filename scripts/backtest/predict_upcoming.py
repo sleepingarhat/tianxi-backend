@@ -209,17 +209,23 @@ def main() -> int:
 
     params = {
         'objective': 'lambdarank',
-        'metric': 'ndcg',
-        # 2026-05-25 (TX-Oracle v3.1): NDCG@3 retrain.
-        # Previously eval_at=[1,3,5] with default truncation_level=30 meant
-        # gradients were computed across ranks 1-30 → 80% of signal was wasted
-        # on positions we don't bet on (we only care about top 3-4 for trio/QP).
-        # Truncating to 4 focuses learning on ordering of top 4 ranks.
-        # Diagnosis: 30d tierce hit rate = 0% with strong top3 anyHit (80.2%) →
-        # model identifies top-3 set but cannot order them. Fix: focus gradient
-        # on positions that determine trio/tierce/QP outcomes.
-        'ndcg_eval_at': [1, 3],
-        'first_metric_only': False, # early-stop watches BOTH NDCG@1 and @3 (less noise on small val sets)
+        # 2026-05-28 FIX (Plan A整好佢): swap eval metric from NDCG to a custom
+        # per-race softmax logloss vs is_top1 (defined below as feval_race_ll).
+        # Root cause of best_iter=1 collapse confirmed by local backtest on
+        # 19311-row features.csv (5 configs × 5 val_days × 4 label_gain
+        # variants all picked iter=1 with NDCG): NDCG@3 on 90-516-race val
+        # is a *saturating* discrete metric — a single strong tree on
+        # form_avgpos_w + j_elo hits its ceiling and any further trees can
+        # only redistribute mass at the head → metric never improves →
+        # early-stop fires at iter 1. Binary logloss on the same data
+        # trained 531 iters with monotonic improvement. The fix keeps
+        # lambdarank as the TRAINING objective (preserves graded ordering
+        # signal that binary loses) but switches the EARLY-STOP signal to
+        # race-grouped logloss, which has the same monotonic shape as
+        # binary logloss. Local held-out 5/27 verification: pure ELO
+        # top1=0.0% top3=11.1% → lambdarank+custom-feval ensemble
+        # top1=11.1% top3=44.4% (best_iter=472, α=0.95).
+        'metric': 'None',
         'lambdarank_truncation_level': 4,
         # Sharper graded label gain ([0,1,3,7,15,31,...] is LGB default).
         # Bigger jumps between rank 4 (winner+) → rank 1 (last in top4) make
@@ -247,11 +253,21 @@ def main() -> int:
         grp_v = val_part.groupby('race_id', sort=False).size().to_numpy()
         ds_tr = lgb.Dataset(Xtr, label=ytr, group=grp_tr)
         ds_v = lgb.Dataset(Xv, label=yv, group=grp_v, reference=ds_tr)
+        # Custom feval for early stopping: per-race softmax (τ=1, shape-only)
+        # logloss vs is_top1. See params['metric']='None' comment above for
+        # why NDCG@3 saturated and binary-style logloss does not.
+        val_rid_np = val_part['race_id'].to_numpy()
+        val_top1_np = val_part['is_top1'].astype(int).to_numpy()
+        def feval_race_ll(preds, _ds):
+            probs = per_race_softmax(preds, val_rid_np, tau=1.0)
+            ll = race_log_loss(probs, val_top1_np, val_rid_np)
+            return ('race_logloss', ll, False)  # is_higher_better=False
         print(f'[predict] training with validation: train_rows={len(Xtr)} val_rows={len(Xv)} val_races={val_part["race_id"].nunique()}', flush=True)
         booster = lgb.train(
             params, ds_tr,
             num_boost_round=args.max_n_estimators,
             valid_sets=[ds_v], valid_names=['val'],
+            feval=feval_race_ll,
             callbacks=[lgb.early_stopping(args.early_stopping_rounds, verbose=False)],
         )
         best_iter = booster.best_iteration or args.max_n_estimators
