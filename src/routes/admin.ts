@@ -2584,8 +2584,12 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
         var mv = data.lgbModelVersion || '(none)';
         var cov = data.lgbCoverage || {};
         var covTxt = (cov.rows != null) ? (cov.rows + ' rows') : 'no coverage';
-        var anyLgb = (data.races || []).some(function(r){ return r.scoreSource === 'lgb'; });
-        var allLgb = (data.races || []).length > 0 && (data.races || []).every(function(r){ return r.scoreSource === 'lgb'; });
+        // Authoritative per-race flag from analyze.ts (lgbCoverage.applied). The
+        // scoreSource string changed to "tx-oracle-v3 (lgb=.., α=..)" so the old
+        // `=== 'lgb'` equality silently never matched → false fallback banner.
+        var lgbApplied = function(r){ return !!(r.lgbCoverage && r.lgbCoverage.applied) || (typeof r.scoreSource === 'string' && r.scoreSource.indexOf('lgb') !== -1 && r.scoreSource.indexOf('lgb-imputed') === -1); };
+        var anyLgb = (data.races || []).some(lgbApplied);
+        var allLgb = (data.races || []).length > 0 && (data.races || []).every(lgbApplied);
         var badge = allLgb ? '✓ LGB applied to ALL races'
                 : anyLgb ? '◑ LGB applied to SOME races (fallback elsewhere)'
                 : '○ LGB fallback — using ELO + factor only';
