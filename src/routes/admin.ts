@@ -963,6 +963,11 @@ adminRoutes.get('/api/meetings', async (c) => {
     FROM race_meetings m
     LEFT JOIN races r ON r.meeting_id = m.id
     WHERE m.venue IN ('ST','HV')
+      AND NOT (
+        COALESCE(m.total_races, 0) < 4
+        AND EXISTS (SELECT 1 FROM race_meetings m2 WHERE m2.date = m.date AND m2.venue != m.venue
+                    AND COALESCE(m2.total_races, 0) > COALESCE(m.total_races, 0))
+      )
     GROUP BY m.id
     ORDER BY m.date DESC
     LIMIT ?
@@ -1319,12 +1324,19 @@ adminRoutes.post('/api/migrate-prediction-log-lgb', async (c) => {
         const childTables = [
           'race_results', 'sectional_times', 'horse_sectional_times',
           'running_comments', 'dividends', 'odds_snapshots_legacy', 'race_videos',
+          'lgb_predictions', 'prediction_log',
         ];
         for (const t of childTables) {
-          const r = await c.env.DB.prepare(
-            `DELETE FROM ${t} WHERE race_id IN (${rIn})`
-          ).bind(...raceIds).run();
-          counts[t] = r.meta.changes ?? 0;
+          // Resilient: a missing table (e.g. odds_snapshots_legacy on some D1s)
+          // must NOT abort the whole cascade and leave the meeting half-deleted.
+          try {
+            const r = await c.env.DB.prepare(
+              `DELETE FROM ${t} WHERE race_id IN (${rIn})`
+            ).bind(...raceIds).run();
+            counts[t] = r.meta.changes ?? 0;
+          } catch (e: any) {
+            counts[`${t}_err`] = String(e?.message ?? e);
+          }
         }
         // Null-out nullable race_id FKs (preserve data)
         const nullable = [
