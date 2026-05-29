@@ -158,7 +158,9 @@ jobs:
             --upcoming=upcoming-features.csv \
             --admin-url=https://tianxi.racing/admin/api/lgb-predictions \
             --token="$ADMIN_TOKEN" \
-            --model-version="$MODEL_VER"
+            --model-version="$MODEL_VER" \
+            --auto-alpha \
+            --alpha-pass=0.62
 
       - name: Upload artifacts
         if: always()
