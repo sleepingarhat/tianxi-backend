@@ -2587,7 +2587,11 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
         // Authoritative per-race flag from analyze.ts (lgbCoverage.applied). The
         // scoreSource string changed to tx-oracle-v3 (lgb=.., alpha=..) so the old
         // strict-equality lgb check silently never matched (false fallback banner).
-        var lgbApplied = function(r){ return !!(r.lgbCoverage && r.lgbCoverage.applied) || (typeof r.scoreSource === 'string' && r.scoreSource.indexOf('lgb') !== -1 && r.scoreSource.indexOf('lgb-imputed') === -1); };
+        var lgbApplied = function(r){
+          if (r.lgbCoverage && typeof r.lgbCoverage.applied === 'boolean') return r.lgbCoverage.applied; // authoritative
+          var m = typeof r.scoreSource === 'string' ? r.scoreSource.match(/lgb=(\d+)\/\d+/) : null; // legacy fallback: lgb=N/T with N>0
+          return !!(m && Number(m[1]) > 0);
+        };
         var anyLgb = (data.races || []).some(lgbApplied);
         var allLgb = (data.races || []).length > 0 && (data.races || []).every(lgbApplied);
         var badge = allLgb ? '✓ LGB applied to ALL races'
