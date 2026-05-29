@@ -32,7 +32,7 @@ CLI flags --no-calibrate / --no-ensemble / --val-days=0 fall back step-by-step
 to the v1 behaviour if anything in the pipeline misbehaves.
 """
 from __future__ import annotations
-import argparse, json, sys, math
+import argparse, json, sys, math, time
 import numpy as np
 import pandas as pd
 import lightgbm as lgb
@@ -234,6 +234,9 @@ def check_coverage(upc) -> tuple:
 
 
 def main() -> int:
+    # Captured at run start; passed to set-alpha as &asof so a stale/parallel
+    # run cannot clobber a newer α decision (later-initiated run wins).
+    run_asof_ms = int(time.time() * 1000)
     ap = argparse.ArgumentParser()
     ap.add_argument('--train', required=True)
     ap.add_argument('--upcoming', required=True)
@@ -564,7 +567,7 @@ def main() -> int:
             print(f'[gate] gates FAILED → ensemble_alpha=0 (pure-ELO fallback). '
                   f'reasons: {"; ".join(reasons)}', flush=True)
         base = args.admin_url.rsplit('/', 1)[0]
-        ok_a = post_admin(f'{base}/set-alpha?value={target}', args.token,
+        ok_a = post_admin(f'{base}/set-alpha?value={target}&asof={run_asof_ms}', args.token,
                           f'set-alpha={target}')
         ok_r = post_admin(f'{base}/refresh-race-day-report', args.token,
                           'refresh-race-day-report')
