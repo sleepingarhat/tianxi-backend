@@ -2585,8 +2585,8 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
         var cov = data.lgbCoverage || {};
         var covTxt = (cov.rows != null) ? (cov.rows + ' rows') : 'no coverage';
         // Authoritative per-race flag from analyze.ts (lgbCoverage.applied). The
-        // scoreSource string changed to "tx-oracle-v3 (lgb=.., α=..)" so the old
-        // `=== 'lgb'` equality silently never matched → false fallback banner.
+        // scoreSource string changed to tx-oracle-v3 (lgb=.., alpha=..) so the old
+        // strict-equality lgb check silently never matched (false fallback banner).
         var lgbApplied = function(r){ return !!(r.lgbCoverage && r.lgbCoverage.applied) || (typeof r.scoreSource === 'string' && r.scoreSource.indexOf('lgb') !== -1 && r.scoreSource.indexOf('lgb-imputed') === -1); };
         var anyLgb = (data.races || []).some(lgbApplied);
         var allLgb = (data.races || []).length > 0 && (data.races || []).every(lgbApplied);
