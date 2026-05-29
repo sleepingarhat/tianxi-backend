@@ -2589,7 +2589,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
         // strict-equality lgb check silently never matched (false fallback banner).
         var lgbApplied = function(r){
           if (r.lgbCoverage && typeof r.lgbCoverage.applied === 'boolean') return r.lgbCoverage.applied; // authoritative
-          var m = typeof r.scoreSource === 'string' ? r.scoreSource.match(/lgb=(\d+)\/\d+/) : null; // legacy fallback: lgb=N/T with N>0
+          var m = typeof r.scoreSource === 'string' ? r.scoreSource.match(/lgb=([0-9]+)/) : null; // legacy fallback: numerator>0 (no backslash — survives template literal)
           return !!(m && Number(m[1]) > 0);
         };
         var anyLgb = (data.races || []).some(lgbApplied);
