@@ -1324,7 +1324,7 @@ adminRoutes.post('/api/migrate-prediction-log-lgb', async (c) => {
         const childTables = [
           'race_results', 'sectional_times', 'horse_sectional_times',
           'running_comments', 'dividends', 'odds_snapshots_legacy', 'race_videos',
-          'lgb_predictions', 'prediction_log',
+          'lgb_predictions',
         ];
         for (const t of childTables) {
           // Resilient: a missing table (e.g. odds_snapshots_legacy on some D1s)
@@ -1346,10 +1346,16 @@ adminRoutes.post('/api/migrate-prediction-log-lgb', async (c) => {
           { tbl: 'trainer_elo_snapshots', col: 'as_of_race_id' },
         ];
         for (const { tbl, col } of nullable) {
-          const r = await c.env.DB.prepare(
-            `UPDATE ${tbl} SET ${col} = NULL WHERE ${col} IN (${rIn})`
-          ).bind(...raceIds).run();
-          counts[`${tbl}_nulled`] = r.meta.changes ?? 0;
+          // Resilient (same rationale as child DELETEs): one failing UPDATE must
+          // not abort before the final DELETE races/race_meetings (half-delete).
+          try {
+            const r = await c.env.DB.prepare(
+              `UPDATE ${tbl} SET ${col} = NULL WHERE ${col} IN (${rIn})`
+            ).bind(...raceIds).run();
+            counts[`${tbl}_nulled`] = r.meta.changes ?? 0;
+          } catch (e: any) {
+            counts[`${tbl}_nulled_err`] = String(e?.message ?? e);
+          }
         }
       }
 
