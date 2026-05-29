@@ -788,47 +788,53 @@ adminRoutes.post('/api/set-alpha', async (c) => {
        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
      )`
   ).run().catch(() => {});
-  // Freshness guard (2026-05-29): prevent a stale/parallel run from clobbering
-  // a newer decision. `asof` = caller's run-start epoch ms. Manual calls omit
-  // it → treated as now() so a human override always wins over an older cron.
-  // Stored separately in key='ensemble_alpha_asof'; integer compare (no
-  // timestamp-format parsing). Only an explicit asof can be rejected as stale.
+  // Freshness guard (2026-05-29, hardened): prevent a stale/parallel run from
+  // clobbering a newer α decision. `asof` = caller's run-start epoch ms, stored
+  // in key='ensemble_alpha_asof' (integer compare — no timestamp parsing).
+  // - explicit but non-finite asof → 400 (don't silently promote to now()).
+  // - missing asof → now() so a human manual override always wins + refreshes.
   const asofRaw = c.req.query('asof');
-  const hasAsof = asofRaw != null && Number.isFinite(Number(asofRaw));
-  const asof = hasAsof ? Number(asofRaw) : Date.now();
-  const prevAsofRow = await c.env.DB.prepare(
-    `SELECT value FROM app_settings WHERE key = 'ensemble_alpha_asof'`
-  ).first<{ value: string }>();
-  const prevAsof = prevAsofRow ? Number(prevAsofRow.value) : 0;
-  if (hasAsof && Number.isFinite(prevAsof) && asof < prevAsof) {
-    const cur = await c.env.DB.prepare(
-      `SELECT value, updated_at FROM app_settings WHERE key = 'ensemble_alpha'`
-    ).first<{ value: string; updated_at: string }>();
-    return c.json({
-      ok: true,
-      skipped: true,
-      reason: 'stale asof — a newer decision already applied',
-      asof,
-      prevAsof,
-      ensemble_alpha: cur ? Number(cur.value) : null,
-    });
+  if (asofRaw != null && !Number.isFinite(Number(asofRaw))) {
+    return c.json({ error: 'asof must be epoch milliseconds (integer)', got: asofRaw }, 400);
   }
-  await c.env.DB.prepare(
-    `INSERT INTO app_settings (key, value, updated_at) VALUES ('ensemble_alpha', ?, datetime('now'))
-     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
-  ).bind(String(n)).run();
-  await c.env.DB.prepare(
-    `INSERT INTO app_settings (key, value, updated_at) VALUES ('ensemble_alpha_asof', ?, datetime('now'))
-     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
-  ).bind(String(asof)).run();
-  const row = await c.env.DB.prepare(
-    `SELECT value, updated_at FROM app_settings WHERE key = 'ensemble_alpha'`
-  ).first<{ value: string; updated_at: string }>();
+  const asof = asofRaw != null ? Math.trunc(Number(asofRaw)) : Date.now();
+  // Atomic compare-and-set: both writes run in ONE D1 transaction (batch),
+  // each gated in-SQL on the stored asof, so an older decision can never
+  // overwrite a newer one even under concurrent runs (no TOCTOU window).
+  // Fresh insert (no prior row) always applies (WHERE only gates the UPDATE).
+  const asofGuard = `(SELECT value FROM app_settings WHERE key = 'ensemble_alpha_asof')`;
+  await c.env.DB.batch([
+    c.env.DB.prepare(
+      `INSERT INTO app_settings (key, value, updated_at)
+         VALUES ('ensemble_alpha', ?, datetime('now'))
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+       WHERE COALESCE(CAST(${asofGuard} AS INTEGER), -1) <= ?`
+    ).bind(String(n), asof),
+    c.env.DB.prepare(
+      `INSERT INTO app_settings (key, value, updated_at)
+         VALUES ('ensemble_alpha_asof', ?, datetime('now'))
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+       WHERE CAST(app_settings.value AS INTEGER) <= ?`
+    ).bind(String(asof), asof),
+  ]);
+  const [aRow, asRow] = await Promise.all([
+    c.env.DB.prepare(
+      `SELECT value, updated_at FROM app_settings WHERE key = 'ensemble_alpha'`
+    ).first<{ value: string; updated_at: string }>(),
+    c.env.DB.prepare(
+      `SELECT value FROM app_settings WHERE key = 'ensemble_alpha_asof'`
+    ).first<{ value: string }>(),
+  ]);
+  const storedAsof = asRow ? Number(asRow.value) : null;
+  const applied = storedAsof === asof;
   return c.json({
     ok: true,
-    ensemble_alpha: row ? Number(row.value) : n,
-    updated_at: row?.updated_at ?? null,
+    skipped: !applied,
+    ...(applied ? {} : { reason: 'stale asof — a newer decision already applied' }),
+    ensemble_alpha: aRow ? Number(aRow.value) : applied ? n : null,
+    updated_at: aRow?.updated_at ?? null,
     asof,
+    storedAsof,
     setAt: new Date().toISOString(),
   });
 });
