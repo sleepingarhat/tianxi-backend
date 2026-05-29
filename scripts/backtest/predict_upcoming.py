@@ -144,6 +144,64 @@ def make_graded_label(df: pd.DataFrame) -> np.ndarray:
     return (5 - pos).clip(lower=0).to_numpy()
 
 
+def evaluate_gates(diag: dict) -> tuple:
+    """Plan A health gates. Returns (passed: bool, reasons: list[str]).
+    Mirrors the manual α-reset checklist. NOTE: α≈1 is EXPECTED (LGB dominates
+    ELO on validation) and is NOT a failure — only α≈0 (LGB carries no weight)
+    fails, since that means the LGB signal is useless and the blend should stay
+    on pure ELO."""
+    reasons = []
+    bi = diag.get('best_iteration', 0)
+    if bi < 50:
+        reasons.append(f'best_iteration={bi} < 50 (early-stop saturation)')
+    rl = diag.get('race_logloss_curve')
+    if not rl:
+        reasons.append('no race_logloss_curve (legacy/no-val mode)')
+    else:
+        delta = rl['iter1'] - rl['best']
+        if delta < 0.05:
+            reasons.append(f'race_logloss Δ={delta:+.4f} < 0.05 (no learning)')
+    corr = diag.get('corr_lgb_elo')
+    if corr is None or corr != corr:  # None or NaN
+        reasons.append('corr_lgb_elo missing/NaN')
+    elif corr >= 0.95:
+        reasons.append(f'corr_lgb_elo={corr:.3f} >= 0.95 (LGB echoes ELO)')
+    for nm in ('tau_lgb', 'tau_elo'):
+        v = diag.get(nm)
+        if v is None:
+            reasons.append(f'{nm} missing')
+        elif v < 0.02 or v > 50.0:
+            reasons.append(f'{nm}={v:.4f} outside (0.02, 50)')
+    a = diag.get('alpha')
+    if a is None:
+        reasons.append('alpha missing (ensemble disabled)')
+    elif a < 0.05:
+        reasons.append(f'alpha={a:.3f} < 0.05 (LGB has no weight)')
+    return (len(reasons) == 0, reasons)
+
+
+def post_admin(url: str, token: str, label: str) -> bool:
+    """POST to an admin endpoint (empty body). Returns True on 2xx."""
+    req = urllib.request.Request(
+        url, data=b'', method='POST',
+        headers={'Authorization': f'Bearer {token}',
+                 'User-Agent': 'tianxi-lgb-predict/2.0 (+github-actions)',
+                 'Accept': 'application/json'},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            body = resp.read().decode('utf-8')
+            print(f'[gate] {label} → {resp.status}: {body}', flush=True)
+            return resp.status < 300
+    except urllib.error.HTTPError as e:
+        print(f'[gate] {label} FAILED: {e.code} {e.reason} — '
+              f'{e.read().decode("utf-8", "ignore")}', flush=True)
+        return False
+    except Exception as e:
+        print(f'[gate] {label} FAILED: {e}', flush=True)
+        return False
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument('--train', required=True)
@@ -172,6 +230,12 @@ def main() -> int:
     ap.add_argument('--no-calibrate', action='store_true')
     ap.add_argument('--no-ensemble', action='store_true')
     ap.add_argument('--dry', action='store_true')
+    # 2026-05-29: self-healing ensemble switch — honors 全自動 (no manual α-flip).
+    # After predictions land, evaluate Plan A health gates; PASS → set ensemble_alpha
+    # to --alpha-pass (LGB+ELO live), FAIL → set 0 (pure-ELO fallback). Either way
+    # bust the race-day report cache. URLs derived from --admin-url's base path.
+    ap.add_argument('--auto-alpha', action='store_true')
+    ap.add_argument('--alpha-pass', type=float, default=0.62)
     args = ap.parse_args()
 
     print(f'[predict] loading train={args.train}, upcoming={args.upcoming}', flush=True)
@@ -441,6 +505,36 @@ def main() -> int:
     except urllib.error.HTTPError as e:
         print(f'[predict] POST failed: {e.code} {e.reason} — {e.read().decode("utf-8", "ignore")}', flush=True)
         return 3
+
+    # ── Auto-alpha gate (2026-05-29): self-healing ensemble switch ──────
+    # Reaching here means predictions posted OK. Honors 全自動 — no manual
+    # α-flip. PASS all Plan A health gates → ensemble_alpha=--alpha-pass
+    # (LGB+ELO blend LIVE). FAIL (e.g. best_iter=1 collapse like 5/27) →
+    # ensemble_alpha=0 (pure-ELO fallback). Cache busted either way so
+    # analyze.ts recomputes finalScore on the next today-picks request.
+    if args.auto_alpha:
+        passed, reasons = evaluate_gates(diag)
+        target = args.alpha_pass if passed else 0.0
+        if passed:
+            print(f'[gate] ALL Plan A health gates PASS → ensemble_alpha={target} '
+                  f'(LGB+ELO ensemble LIVE)', flush=True)
+        else:
+            print(f'[gate] gates FAILED → ensemble_alpha=0 (pure-ELO fallback). '
+                  f'reasons: {"; ".join(reasons)}', flush=True)
+        base = args.admin_url.rsplit('/', 1)[0]
+        ok_a = post_admin(f'{base}/set-alpha?value={target}', args.token,
+                          f'set-alpha={target}')
+        ok_r = post_admin(f'{base}/refresh-race-day-report', args.token,
+                          'refresh-race-day-report')
+        if not ok_a:
+            # set-alpha is the safety-critical write; surface failures loudly
+            # so the workflow goes red and gets human attention.
+            print('[gate] ERROR: set-alpha POST failed — α NOT updated; '
+                  'check prod manually', flush=True)
+            return 4
+        if not ok_r:
+            print('[gate] WARNING: refresh-race-day-report failed — α updated '
+                  'but cache may be stale until the next request', flush=True)
     return 0
 
 
