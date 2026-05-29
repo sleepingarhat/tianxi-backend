@@ -158,9 +158,13 @@ def evaluate_gates(diag: dict) -> tuple:
     if not rl:
         reasons.append('no race_logloss_curve (legacy/no-val mode)')
     else:
-        delta = rl['iter1'] - rl['best']
-        if delta < 0.05:
-            reasons.append(f'race_logloss Δ={delta:+.4f} < 0.05 (no learning)')
+        i1, bst = rl.get('iter1'), rl.get('best')
+        if i1 is None or bst is None:
+            reasons.append('race_logloss_curve missing iter1/best')
+        else:
+            delta = i1 - bst
+            if delta < 0.05:
+                reasons.append(f'race_logloss Δ={delta:+.4f} < 0.05 (no learning)')
     corr = diag.get('corr_lgb_elo')
     if corr is None or corr != corr:  # None or NaN
         reasons.append('corr_lgb_elo missing/NaN')
@@ -200,6 +204,33 @@ def post_admin(url: str, token: str, label: str) -> bool:
     except Exception as e:
         print(f'[gate] {label} FAILED: {e}', flush=True)
         return False
+
+
+def check_coverage(upc) -> tuple:
+    """Coverage gate: a model can pass training gates yet score a sparse field
+    (feature dump dropped runners); enabling the blend then leaves many runners
+    on fallback. Require uploaded predictions to cover each race's declared
+    field_size. Returns (ok, reason). Never blocks on its own error — the
+    primary health gates already passed; coverage is a secondary net."""
+    try:
+        if 'field_size' not in upc.columns:
+            return (True, '')  # cannot assess; do not block
+        n_races, poor = 0, []
+        for rid, grp in upc.groupby('race_id'):
+            field = float(grp['field_size'].max())
+            if not (field > 0):
+                continue
+            n_races += 1
+            if (len(grp) / field) < 0.8:
+                poor.append(f'{rid}={len(grp)}/{int(field)}')
+        if n_races == 0:
+            return (True, '')
+        if len(poor) > max(1, int(0.2 * n_races)):
+            return (False, f'coverage poor in {len(poor)}/{n_races} races: '
+                           f'{", ".join(poor[:5])}')
+        return (True, '')
+    except Exception as e:
+        return (True, f'coverage check skipped ({type(e).__name__})')
 
 
 def main() -> int:
@@ -513,7 +544,18 @@ def main() -> int:
     # ensemble_alpha=0 (pure-ELO fallback). Cache busted either way so
     # analyze.ts recomputes finalScore on the next today-picks request.
     if args.auto_alpha:
-        passed, reasons = evaluate_gates(diag)
+        try:
+            passed, reasons = evaluate_gates(diag)
+        except Exception as e:
+            # Never let a malformed diag crash the pipeline after predictions
+            # posted — fail closed to pure ELO.
+            passed, reasons = False, [f'gate eval raised {type(e).__name__}: {e}']
+        cov_ok, cov_reason = check_coverage(upc)
+        if not cov_ok:
+            passed = False
+            reasons = reasons + [cov_reason]
+        elif cov_reason:
+            print(f'[gate] coverage note: {cov_reason}', flush=True)
         target = args.alpha_pass if passed else 0.0
         if passed:
             print(f'[gate] ALL Plan A health gates PASS → ensemble_alpha={target} '
