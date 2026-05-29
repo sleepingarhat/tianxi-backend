@@ -768,12 +768,13 @@ adminRoutes.post('/api/d1-maintenance', async (c) => {
 // Usage: curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
 //   "https://tianxi.racing/admin/api/set-alpha?value=0"
 adminRoutes.post('/api/set-alpha', async (c) => {
+  // 2026-05-29: Bearer-only (dropped ?token= query acceptance) — α is a
+  // safety-critical write; query tokens leak via logs/history/referrers.
   const expected = c.env.ADMIN_TOKEN;
   const header = c.req.header('authorization') || '';
   const bearer = header.startsWith('Bearer ') ? header.slice(7) : '';
-  const queryTok = c.req.query('token') || '';
-  if (!expected || (bearer !== expected && queryTok !== expected)) {
-    return c.json({ error: 'unauthorized' }, 401);
+  if (!expected || bearer !== expected) {
+    return c.json({ error: 'unauthorized (Bearer required)' }, 401);
   }
   const raw = c.req.query('value');
   const n = Number(raw);
@@ -787,10 +788,39 @@ adminRoutes.post('/api/set-alpha', async (c) => {
        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
      )`
   ).run().catch(() => {});
+  // Freshness guard (2026-05-29): prevent a stale/parallel run from clobbering
+  // a newer decision. `asof` = caller's run-start epoch ms. Manual calls omit
+  // it → treated as now() so a human override always wins over an older cron.
+  // Stored separately in key='ensemble_alpha_asof'; integer compare (no
+  // timestamp-format parsing). Only an explicit asof can be rejected as stale.
+  const asofRaw = c.req.query('asof');
+  const hasAsof = asofRaw != null && Number.isFinite(Number(asofRaw));
+  const asof = hasAsof ? Number(asofRaw) : Date.now();
+  const prevAsofRow = await c.env.DB.prepare(
+    `SELECT value FROM app_settings WHERE key = 'ensemble_alpha_asof'`
+  ).first<{ value: string }>();
+  const prevAsof = prevAsofRow ? Number(prevAsofRow.value) : 0;
+  if (hasAsof && Number.isFinite(prevAsof) && asof < prevAsof) {
+    const cur = await c.env.DB.prepare(
+      `SELECT value, updated_at FROM app_settings WHERE key = 'ensemble_alpha'`
+    ).first<{ value: string; updated_at: string }>();
+    return c.json({
+      ok: true,
+      skipped: true,
+      reason: 'stale asof — a newer decision already applied',
+      asof,
+      prevAsof,
+      ensemble_alpha: cur ? Number(cur.value) : null,
+    });
+  }
   await c.env.DB.prepare(
     `INSERT INTO app_settings (key, value, updated_at) VALUES ('ensemble_alpha', ?, datetime('now'))
      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
   ).bind(String(n)).run();
+  await c.env.DB.prepare(
+    `INSERT INTO app_settings (key, value, updated_at) VALUES ('ensemble_alpha_asof', ?, datetime('now'))
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
+  ).bind(String(asof)).run();
   const row = await c.env.DB.prepare(
     `SELECT value, updated_at FROM app_settings WHERE key = 'ensemble_alpha'`
   ).first<{ value: string; updated_at: string }>();
@@ -798,6 +828,7 @@ adminRoutes.post('/api/set-alpha', async (c) => {
     ok: true,
     ensemble_alpha: row ? Number(row.value) : n,
     updated_at: row?.updated_at ?? null,
+    asof,
     setAt: new Date().toISOString(),
   });
 });
