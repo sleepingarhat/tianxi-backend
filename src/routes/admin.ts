@@ -1406,7 +1406,14 @@ adminRoutes.post('/api/migrate-prediction-log-lgb', async (c) => {
         const r = await c.env.DB.prepare(`UPDATE race_meetings SET total_races = (SELECT COUNT(*) FROM races WHERE meeting_id = race_meetings.id) WHERE total_races IS NULL AND (SELECT COUNT(*) FROM races WHERE meeting_id = race_meetings.id) > 0`).run();
         out.totalRacesBackfilled = r.meta.changes ?? 0;
       }
-      const { results: ghosts } = await c.env.DB.prepare(`SELECT id, date, venue, track_condition FROM race_meetings WHERE venue NOT IN ('ST','HV') OR (total_races IS NOT NULL AND total_races > 0 AND total_races < 4)`).all<any>();
+      // Ghost detection: (a) non-HK venue (S1 etc) = always ghost; OR (b) a
+      // declared total_races of 1-3 BUT guarded by two extra signals so a real
+      // meeting transiently mis-written with a small total_races is NOT deleted:
+      //   - actual linked races count must also be < 4, AND
+      //   - no upcoming entries exist for that date+venue.
+      // (A real completed meeting has many races rows; a real upcoming one has
+      // entries_upcoming; the 2026-05-31 ghost HV had 1 race + 0 entries.)
+      const { results: ghosts } = await c.env.DB.prepare(`SELECT id, date, venue, track_condition FROM race_meetings m WHERE m.venue NOT IN ('ST','HV') OR (m.total_races IS NOT NULL AND m.total_races > 0 AND m.total_races < 4 AND (SELECT COUNT(*) FROM races r WHERE r.meeting_id = m.id) < 4 AND NOT EXISTS (SELECT 1 FROM entries_upcoming e WHERE e.race_date = m.date AND e.venue = m.venue AND e.race_number > 0))`).all<any>();
       const ghostRows = ghosts ?? [];
       if (dryRun) {
         out.nonRaceVenuesWouldDelete = ghostRows;
@@ -1625,6 +1632,10 @@ async function fetchAdminPageData(env: AdminEnv): Promise<Record<string, any>> {
       LEFT JOIN races r ON r.meeting_id = m.id
       LEFT JOIN meeting_hit_rate_cache c ON c.date = m.date AND c.engine = 'v12'
       WHERE m.venue IN ('ST','HV')
+        -- Anti-ghost (mirror /api/meetings): a real HK race day ALWAYS has >=8
+        -- races, so a declared total_races of 1-3 is always a stale-scrape phantom.
+        -- This SSR query (not /api/meetings) is what renders the /admin page.
+        AND NOT (m.total_races IS NOT NULL AND m.total_races > 0 AND m.total_races < 4)
       GROUP BY m.id ORDER BY m.date DESC LIMIT 10
     `).all().catch(() => ({ results: [] as any[] }));
 
