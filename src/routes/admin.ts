@@ -963,11 +963,12 @@ adminRoutes.get('/api/meetings', async (c) => {
     FROM race_meetings m
     LEFT JOIN races r ON r.meeting_id = m.id
     WHERE m.venue IN ('ST','HV')
-      AND NOT (
-        COALESCE(m.total_races, 0) < 4
-        AND EXISTS (SELECT 1 FROM race_meetings m2 WHERE m2.date = m.date AND m2.venue != m.venue
-                    AND COALESCE(m2.total_races, 0) > COALESCE(m.total_races, 0))
-      )
+      -- Anti-ghost: a real HK race day ALWAYS has >=8 races, so a declared
+      -- total_races of 1-3 is always a phantom from a stale HKJC scrape. Hide it
+      -- unconditionally. (Old rule compared against a sibling meeting's total_races,
+      -- which failed when the real same-date meeting was still upcoming with
+      -- total_races=NULL, e.g. 2026-05-31 ghost HV(1) vs real ST(NULL).)
+      AND NOT (m.total_races IS NOT NULL AND m.total_races > 0 AND m.total_races < 4)
     GROUP BY m.id
     ORDER BY m.date DESC
     LIMIT ?
@@ -1405,7 +1406,7 @@ adminRoutes.post('/api/migrate-prediction-log-lgb', async (c) => {
         const r = await c.env.DB.prepare(`UPDATE race_meetings SET total_races = (SELECT COUNT(*) FROM races WHERE meeting_id = race_meetings.id) WHERE total_races IS NULL AND (SELECT COUNT(*) FROM races WHERE meeting_id = race_meetings.id) > 0`).run();
         out.totalRacesBackfilled = r.meta.changes ?? 0;
       }
-      const { results: ghosts } = await c.env.DB.prepare(`SELECT id, date, venue, track_condition FROM race_meetings WHERE venue NOT IN ('ST','HV')`).all<any>();
+      const { results: ghosts } = await c.env.DB.prepare(`SELECT id, date, venue, track_condition FROM race_meetings WHERE venue NOT IN ('ST','HV') OR (total_races IS NOT NULL AND total_races > 0 AND total_races < 4)`).all<any>();
       const ghostRows = ghosts ?? [];
       if (dryRun) {
         out.nonRaceVenuesWouldDelete = ghostRows;
@@ -1417,7 +1418,7 @@ adminRoutes.post('/api/migrate-prediction-log-lgb', async (c) => {
         const counts: Record<string, number | string> = {};
         if (raceIds.length > 0) {
           const rIn = raceIds.map(() => '?').join(',');
-          for (const t of ['race_results','sectional_times','horse_sectional_times','running_comments','dividends','race_videos']) {
+          for (const t of ['race_results','sectional_times','horse_sectional_times','running_comments','dividends','race_videos','lgb_predictions','odds_snapshots_legacy']) {
             try { const r = await c.env.DB.prepare(`DELETE FROM ${t} WHERE race_id IN (${rIn})`).bind(...raceIds).run(); counts[t] = r.meta.changes ?? 0; }
             catch (e: any) { counts[t + '_err'] = String(e?.message ?? e); }
           }
