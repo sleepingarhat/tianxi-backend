@@ -2327,14 +2327,17 @@ analyzeRoutes.get('/factors', (c) => {
       analyzeRoutes.get('/backtest-dates', async (c) => {
         try {
           const days = Math.max(1, Math.min(365, Number(c.req.query('days') ?? '90')));
-          const today = new Date().toISOString().substring(0, 10);
           const since = new Date(Date.now() - days * 86400000).toISOString().substring(0, 10);
+          // No upper-date bound: EXISTS(race_results.finishing_position>0) already limits to
+          // settled (past) meetings, so today's results appear as soon as they are in D1.
+          // (Previously the strict upper bound used a UTC-derived 'today', which hid the
+          // current race day until the UTC date rolled over ~08:00 HKT the next morning.)
           const { results } = await c.env.DB.prepare(
             `SELECT DISTINCT m.date FROM race_meetings m
-               WHERE m.date >= ? AND m.date < ?
+               WHERE m.date >= ?
                  AND EXISTS (SELECT 1 FROM races r JOIN race_results rr ON rr.race_id = r.id WHERE r.meeting_id = m.id AND rr.finishing_position > 0)
                ORDER BY m.date ASC`
-          ).bind(since, today).all<{ date: string }>();
+          ).bind(since).all<{ date: string }>();
           return c.json({ ok: true, days, dates: (results ?? []).map(r => r.date) });
         } catch (err: any) {
           return c.json({ error: 'list failed', detail: err?.message ?? String(err) }, 500);
