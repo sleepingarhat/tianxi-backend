@@ -1827,7 +1827,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
     · <a href="/api/analyze/ensemble-tune?days=30" target="_blank" style="color:var(--accent)">[P4 α grid search]</a>
     <a href="/api/analyze/ensemble-tune?days=30&apply=1" target="_blank" style="color:var(--accent);margin-left:6px">[grid search + apply]</a>
   </div>
-  <div class="bar">伺服器端渲染 · 每 60 秒自動刷新<span class="refresh" id="refreshClock"></span></div>
+  <div class="bar">伺服器端渲染 · 閒置時自動刷新<span class="refresh" id="refreshClock"></span></div>
 
   <div id="alertbar"></div>
 
@@ -2694,18 +2694,28 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
   safeRender('renderMeetings', renderMeetings);
         safeRender('loadTodayPredictions', () => loadTodayPredictions(false));
       safeRender('renderNextRaceDay', renderNextRaceDay);
-  document.getElementById('refreshClock').textContent = '載入時間：' + new Date().toLocaleTimeString('zh-HK') + ' · 每 60 秒自動刷新';
-  // Auto-reload page every 60s for fresh data — but skip while autoLoadHitChain is running
-  // (chain takes ~4min serial for ~10 past meetings @ ~25s each; reload would interrupt it)
+  document.getElementById('refreshClock').textContent = '載入時間：' + new Date().toLocaleTimeString('zh-HK') + ' · 閒置時自動刷新（操作中暫停）';
+  // Auto-refresh for fresh data, but NEVER interrupt the operator. A full
+  // location.reload() blanks the whole SSR page (~4s) on mobile, so a fixed 60s
+  // reload felt like endless loading and reset the page mid-interaction
+  // (selecting a race, scrolling). Now we defer the reload while the user has
+  // interacted recently, while the tab is hidden, or while a hit chain runs.
+  var _lastInteract = 0;
+  function _markInteract() { _lastInteract = Date.now(); }
+  ['pointerdown', 'keydown', 'touchstart', 'wheel', 'change', 'focusin'].forEach(function(ev) {
+    window.addEventListener(ev, _markInteract, { passive: true });
+  });
   function scheduleReload() {
-    setTimeout(() => {
-      if (window._hitChainActive) {
-        // chain still running — defer reload by 30s, check again
+    setTimeout(function() {
+      var idleMs = Date.now() - _lastInteract;
+      var hidden = (document.visibilityState === 'hidden');
+      if (window._hitChainActive || hidden || idleMs < 90000) {
+        // busy / hidden / user active — defer and re-check, do not blank the page
         scheduleReload();
       } else {
         window.location.reload();
       }
-    }, 60000);
+    }, 90000);
   }
   scheduleReload();
         // ── 預測與賽果 (PREDICTION VS RESULT) ──────────────────────────────
