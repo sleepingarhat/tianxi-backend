@@ -160,7 +160,7 @@ jobs:
             --token="$ADMIN_TOKEN" \
             --model-version="$MODEL_VER" \
             --auto-alpha \
-            --alpha-pass=0.62
+            --alpha-pass=0.88
 
       - name: Upload artifacts
         if: always()
