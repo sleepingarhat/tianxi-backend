@@ -2836,7 +2836,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
           if (!dateSel || !raceSel) return;
           var meets = (D && D.meetings && D.meetings.meetings) || [];
           var today = (D.status && D.status.serverTime ? D.status.serverTime : new Date().toISOString()).substring(0,10);
-          var eligible = meets.filter(function(m){ return m.date < today && m.race_count > 0; });
+          var eligible = meets.filter(function(m){ return m.race_count > 0; });
           if (!eligible.length) {
             dateSel.innerHTML = '<option>無已完賽資料</option>';
             return;
