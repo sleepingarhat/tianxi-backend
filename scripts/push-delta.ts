@@ -48,27 +48,27 @@ function main() {
   // ORDER MATTERS: FK parents first (horses/jockeys/trainers) → meetings → races → dependents
 
   // Anti-ghost source guard (mirrors the tianxi-backend display + cleanup rule):
-  // a real HK race day ALWAYS has >=8 races. A meeting in this POST-race-day
-  // delta with fewer than MIN_RACES_PER_MEETING races is a phantom — typically
-  // one day's results misattributed under another date+venue (the 2026-05-31
-  // ghost HV carried a single 5/27 race). Excluding it HERE stops the ghost (and
-  // its cascading races/results/comments/dividends) from ever being written to
-  // D1 in the first place — the source fix, vs. cleaning it up after the fact.
-  // Applies ONLY to the post-race `race` include path; the forward-looking
-  // `entries` racecard path legitimately has 0 races and is filtered by date
-  // alone (see the wantEntries block below).
+  // a real POST-race HK meeting ALWAYS has >=8 races; a real FORWARD-LOOKING
+  // upcoming meeting has 0 races (its racecard lives in entries_upcoming and is
+  // FK-parented by the meeting). So a meeting with 1..(MIN-1) races is a phantom
+  // — typically one day's results misattributed under another date+venue (the
+  // 2026-05-31 ghost HV carried a single 5/27 race). Exclude ONLY that 1..(MIN-1)
+  // band here so the ghost (and its cascading races/results/comments/dividends)
+  // never reaches D1 — the source fix, vs. cleaning it up after the fact.
+  // 0-race meetings are explicitly KEPT so --include=all / entries can still push
+  // upcoming meetings as FK parents for entries_upcoming.
   const MIN_RACES_PER_MEETING = 4;
-  const validRaceMeetingIds = `SELECT id FROM race_meetings WHERE date >= '${since}' AND (SELECT COUNT(*) FROM races r2 WHERE r2.meeting_id = race_meetings.id) >= ${MIN_RACES_PER_MEETING}`;
+  const validRaceMeetingIds = `SELECT id FROM race_meetings WHERE date >= '${since}' AND (SELECT COUNT(*) FROM races r2 WHERE r2.meeting_id = race_meetings.id) NOT BETWEEN 1 AND ${MIN_RACES_PER_MEETING - 1}`;
   const recentRaceIds = `SELECT id FROM races WHERE meeting_id IN (${validRaceMeetingIds})`;
 
   if (wantRace) {
     const skipped = db.prepare(
       `SELECT id, date, venue, (SELECT COUNT(*) FROM races r2 WHERE r2.meeting_id = m.id) AS race_count
          FROM race_meetings m
-        WHERE m.date >= ? AND (SELECT COUNT(*) FROM races r2 WHERE r2.meeting_id = m.id) < ?`,
-    ).all(since, MIN_RACES_PER_MEETING) as Array<Record<string, unknown>>;
+        WHERE m.date >= ? AND (SELECT COUNT(*) FROM races r2 WHERE r2.meeting_id = m.id) BETWEEN 1 AND ?`,
+    ).all(since, MIN_RACES_PER_MEETING - 1) as Array<Record<string, unknown>>;
     if (skipped.length) {
-      console.error(`[anti-ghost] excluding ${skipped.length} low-race phantom meeting(s) from race delta: ${JSON.stringify(skipped)}`);
+      console.error(`[anti-ghost] excluding ${skipped.length} phantom meeting(s) (1-${MIN_RACES_PER_MEETING - 1} races) from race delta: ${JSON.stringify(skipped)}`);
     }
   }
 
