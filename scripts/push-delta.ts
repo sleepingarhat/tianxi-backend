@@ -46,7 +46,31 @@ function main() {
 
   // Table definitions with date-scoping filters
   // ORDER MATTERS: FK parents first (horses/jockeys/trainers) → meetings → races → dependents
-  const recentRaceIds = `SELECT id FROM races WHERE meeting_id IN (SELECT id FROM race_meetings WHERE date >= '${since}')`;
+
+  // Anti-ghost source guard (mirrors the tianxi-backend display + cleanup rule):
+  // a real HK race day ALWAYS has >=8 races. A meeting in this POST-race-day
+  // delta with fewer than MIN_RACES_PER_MEETING races is a phantom — typically
+  // one day's results misattributed under another date+venue (the 2026-05-31
+  // ghost HV carried a single 5/27 race). Excluding it HERE stops the ghost (and
+  // its cascading races/results/comments/dividends) from ever being written to
+  // D1 in the first place — the source fix, vs. cleaning it up after the fact.
+  // Applies ONLY to the post-race `race` include path; the forward-looking
+  // `entries` racecard path legitimately has 0 races and is filtered by date
+  // alone (see the wantEntries block below).
+  const MIN_RACES_PER_MEETING = 4;
+  const validRaceMeetingIds = `SELECT id FROM race_meetings WHERE date >= '${since}' AND (SELECT COUNT(*) FROM races r2 WHERE r2.meeting_id = race_meetings.id) >= ${MIN_RACES_PER_MEETING}`;
+  const recentRaceIds = `SELECT id FROM races WHERE meeting_id IN (${validRaceMeetingIds})`;
+
+  if (wantRace) {
+    const skipped = db.prepare(
+      `SELECT id, date, venue, (SELECT COUNT(*) FROM races r2 WHERE r2.meeting_id = m.id) AS race_count
+         FROM race_meetings m
+        WHERE m.date >= ? AND (SELECT COUNT(*) FROM races r2 WHERE r2.meeting_id = m.id) < ?`,
+    ).all(since, MIN_RACES_PER_MEETING) as Array<Record<string, unknown>>;
+    if (skipped.length) {
+      console.error(`[anti-ghost] excluding ${skipped.length} low-race phantom meeting(s) from race delta: ${JSON.stringify(skipped)}`);
+    }
+  }
 
   // Horses/jockeys/trainers need to union refs from race_results AND pool-a tables
   // (otherwise FK fails when a trackwork row references a horse not in recent races)
@@ -92,8 +116,8 @@ function main() {
   }
 
   if (wantRace) {
-    plan.push({ table: 'race_meetings',         where: `date >= '${since}'` });
-    plan.push({ table: 'races',                 where: `meeting_id IN (SELECT id FROM race_meetings WHERE date >= '${since}')` });
+    plan.push({ table: 'race_meetings',         where: `id IN (${validRaceMeetingIds})` });
+    plan.push({ table: 'races',                 where: `meeting_id IN (${validRaceMeetingIds})` });
     plan.push({ table: 'race_results',          where: `race_id IN (${recentRaceIds})` });
     plan.push({ table: 'running_comments',      where: `race_id IN (${recentRaceIds})` });
     plan.push({ table: 'dividends',             where: `race_id IN (${recentRaceIds})` });
