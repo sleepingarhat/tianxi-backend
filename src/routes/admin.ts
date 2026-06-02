@@ -1712,10 +1712,11 @@ async function fetchAdminPageData(env: AdminEnv): Promise<Record<string, any>> {
 
 function renderPanel(token: string, preloaded: Record<string, any>): string {
   const _alpha = preloaded && preloaded.ensembleAlpha != null ? Number(preloaded.ensembleAlpha) : null;
-  const alphaLabel = _alpha != null && !Number.isNaN(_alpha) ? _alpha.toFixed(2) : '—';
-  const alphaMode = _alpha == null || Number.isNaN(_alpha) ? '未設定'
-    : _alpha <= 0 ? '純 ELO fallback'
-    : _alpha >= 0.85 ? 'LGB 主導'
+  const _alphaOk = _alpha != null && Number.isFinite(_alpha);
+  const alphaLabel = _alphaOk ? (_alpha as number).toFixed(2) : '—';
+  const alphaMode = !_alphaOk ? '未設定'
+    : (_alpha as number) <= 0 ? '純 ELO fallback'
+    : (_alpha as number) >= 0.85 ? 'LGB 主導'
     : 'LGB lean';
   return `<!doctype html>
 <html lang="zh-Hant"><head><meta charset="utf-8"><title>天喜 · 內部控制台</title>
