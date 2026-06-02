@@ -1686,7 +1686,14 @@ async function fetchAdminPageData(env: AdminEnv): Promise<Record<string, any>> {
       }
     } catch {}
   
+  const _alphaRow = await db
+    .prepare(`SELECT value FROM app_settings WHERE key = 'ensemble_alpha'`)
+    .first<{ value: string }>()
+    .catch(() => null);
+  const ensembleAlpha = _alphaRow && _alphaRow.value != null && _alphaRow.value !== '' ? Number(_alphaRow.value) : null;
+
   return {
+    ensembleAlpha,
     coverage: { datasets, factors },
     status: {
       counts: { meetings: mc, races: rc, results: rsc, horses: hc, jockeys: jc, trainers: tc,
@@ -1704,6 +1711,12 @@ async function fetchAdminPageData(env: AdminEnv): Promise<Record<string, any>> {
 }
 
 function renderPanel(token: string, preloaded: Record<string, any>): string {
+  const _alpha = preloaded && preloaded.ensembleAlpha != null ? Number(preloaded.ensembleAlpha) : null;
+  const alphaLabel = _alpha != null && !Number.isNaN(_alpha) ? _alpha.toFixed(2) : '—';
+  const alphaMode = _alpha == null || Number.isNaN(_alpha) ? '未設定'
+    : _alpha <= 0 ? '純 ELO fallback'
+    : _alpha >= 0.85 ? 'LGB 主導'
+    : 'LGB lean';
   return `<!doctype html>
 <html lang="zh-Hant"><head><meta charset="utf-8"><title>天喜 · 內部控制台</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap">
@@ -1823,7 +1836,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
   <div style="margin:-8px 0 14px;font-size:12px;color:var(--mut);line-height:1.5">
     生產模型：<strong style="color:var(--fg)">天喜預測模型 TX-Oracle v3</strong>
     · <span style="font-family:monospace">LightGBM ensemble + ELO complementary stacking</span>
-    · α=0.62 (LGB lean, P4 auto-tunable)
+    · α=${alphaLabel}（${alphaMode}，每賽日自動調節）
     · <a href="/api/analyze/ensemble-tune?days=30" target="_blank" style="color:var(--accent)">[P4 α grid search]</a>
     <a href="/api/analyze/ensemble-tune?days=30&apply=1" target="_blank" style="color:var(--accent);margin-left:6px">[grid search + apply]</a>
   </div>
@@ -1896,7 +1909,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
   </tr></thead><tbody></tbody></table>
   <div id="meetingPanel" style="margin-top:14px"></div>
 
-    <h2>即日 天喜預測模型 TX-Oracle v3 預測 <span style="font-size:11px;font-weight:500;color:var(--mut);margin-left:8px">LightGBM ensemble + ELO complementary stacking · α=0.62 (P4 tunable)</span></h2>
+    <h2>即日 天喜預測模型 TX-Oracle v3 預測 <span style="font-size:11px;font-weight:500;color:var(--mut);margin-left:8px">LightGBM ensemble + ELO complementary stacking · α=${alphaLabel}（${alphaMode}）</span></h2>
     <div class="actions-row">
       <button class="tp-run" id="btnTodayPredict" onclick="loadTodayPredictions(false)">▶ 載入即日 TX-Oracle v3 預測（ensemble: LGB lambdarank ⊕ ELO + 檔位/負磅）</button>
       <span id="todayPredictStatus" style="font-size:12px;color:var(--mut)"></span>
@@ -2184,7 +2197,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
         + '<div class="tp-table-wrap"><table class="tp-table"><thead><tr>'
           + '<th>排名</th><th>馬號</th><th>馬名 / 騎師 / 練馬師</th><th>檔</th>'
           + '<th>馬ELO</th><th>騎ELO</th><th>練ELO</th><th>綜合ELO</th>'
-          + '<th>因子</th><th title="LGB lambdarank 原始分（z-norm 前）；高 = 預測 prob 高">LGB分</th><th title="TX-Oracle v3 ensemble: 1500 + (α·lgb_z + (1-α)·elo_z + factor*0.5)·100, α=0.62">最終分</th><th>勝率</th><th>前三</th>'
+          + '<th>因子</th><th title="LGB lambdarank 原始分（z-norm 前）；高 = 預測 prob 高">LGB分</th><th title="TX-Oracle v3 ensemble: 1500 + (α·lgb_z + (1-α)·elo_z + factor*0.5)·100, α=${alphaLabel}">最終分</th><th>勝率</th><th>前三</th>'
         + '</tr></thead><tbody>' + rows + '</tbody></table></div></div>';
     }).join('');
     el.innerHTML = '<div style="padding:10px 12px;background:#fff;border:1px solid var(--rule);border-radius:4px;margin-bottom:8px;font-size:12px">'
@@ -2676,7 +2689,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
             + '<table class="tp-table"><thead><tr>'
               + '<th>排名</th><th>馬號</th><th>馬名 / 騎師 / 練馬師</th><th>檔</th>'
               + '<th>馬ELO</th><th>騎ELO</th><th>練ELO</th><th>綜合ELO</th>'
-              + '<th>因子調整</th><th title="LGB lambdarank 原始分（z-norm 前）；越接近 0 越好">LGB分</th><th title="TX-Oracle v3 ensemble: 1500 + (α·lgb_z + (1-α)·elo_z + factor·0.5)·100, α=0.62">最終分</th><th>勝率</th><th>前三</th>'
+              + '<th>因子調整</th><th title="LGB lambdarank 原始分（z-norm 前）；越接近 0 越好">LGB分</th><th title="TX-Oracle v3 ensemble: 1500 + (α·lgb_z + (1-α)·elo_z + factor·0.5)·100, α=${alphaLabel}">最終分</th><th>勝率</th><th>前三</th>'
             + '</tr></thead><tbody>' + rows + '</tbody></table>'
           + '</div>'
         + '</div>';
