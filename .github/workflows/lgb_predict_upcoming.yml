@@ -39,6 +39,7 @@ jobs:
           sparse-checkout: |
             data
             horses/form_records
+            trials
             last_sync.json
           sparse-checkout-cone-mode: false
 
