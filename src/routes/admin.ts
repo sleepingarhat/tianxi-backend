@@ -2671,8 +2671,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
               + '<td><strong>' + fmtElo(p.finalScore) + '</strong></td>'
               + '<td class="' + probCls + (p.rank<=2?' ok':'') + '">' + fmtPct(p.pWin) + '</td>'
               + '<td>' + fmtPct(p.pTop3) + '</td>'
-              + '</tr>'
-              + (p.commentary ? '<tr><td colspan="13" style="padding:4px 10px 12px 30px;font-size:11px;line-height:1.6;color:var(--mut);background:rgba(125,125,125,0.06)">▸ 選馬評述（因素解讀）：' + p.commentary + '</td></tr>' : '');
+              + '</tr>';
           }).join('');
         return '<div class="tp-race' + isOpen + '" id="tp-r' + race.raceNumber + '">'
           + '<div class="tp-race-hd" onclick="toggleTpRace(' + race.raceNumber + ')">'

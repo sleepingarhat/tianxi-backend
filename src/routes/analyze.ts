@@ -2165,7 +2165,6 @@ analyzeRoutes.get('/factors', (c) => {
           const picks = enriched.map((s, i) => { const { _score, ...rest } = s as any; return { ...rest, pWin: Math.round((expScores[i]/Z)*1000)/1000, pTop3: Math.round(Math.min((expScores[i]/Z)*3,0.99)*1000)/1000 }; });
           picks.sort((a: any, b: any) => b.pWin - a.pWin);
           picks.forEach((p: any, i: number) => { p.rank = i + 1; });
-          picks.forEach((p: any) => { if (p.rank <= 4) p.commentary = buildPickNarrative(p, { distance: raceDistance, going: raceGoing, raceClass, fieldSize: (enriched as any[]).length }); });
           const _txTotal2 = (enriched as any[]).length;
           return { raceId, lgbLookupRaceId, raceNumber: raceNum, title: raceTitle, class: raceClass, distance: raceDistance, going: raceGoing, track: raceTrack, course: raceCourse, picks, scoreSource: raceHasLgb ? `tx-oracle-v3 (lgb=${lgbHits}/${_txTotal2}, α=${todayPicksAlpha.toFixed(2)})` : 'elo+factor', lgbCoverage: { hits: lgbHits, total: _txTotal2, applied: raceHasLgb }, lgbModelVersion: lgbModelVerForRace, ensembleAlpha: todayPicksAlpha };
         });
