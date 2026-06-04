@@ -7,6 +7,7 @@
  *
  * Sources (any subset):
  *   profiles        — horses/profiles/horse_profiles.csv → horses + horse_profile_extra
+ *   pedigree        — horses/profiles/horse_profiles.csv → horse_pedigree (sire/dam map for LGB)
  *   form            — horses/form_records/form_*.csv → horse_form_records
  *   trackwork       — horses/trackwork/trackwork_*.csv → horse_trackwork
  *   injury          — horses/injury/injury_*.csv → horse_injury
@@ -25,6 +26,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { openDb, startIngestionRun, finishIngestionRun, upsertSyncState, ensureSchema } from './lib/db.js';
 import { getRepoHeadCommitShort } from './lib/git.js';
 import { ingestHorseProfiles } from './sources/horse_profiles.js';
+import { ingestHorsePedigree } from './sources/horse_pedigree.js';
 import { ingestHorseFormRecords } from './sources/horse_form.js';
 import { ingestTrials } from './sources/trials.js';
 import { ingestJockeyRecords } from './sources/jockey_records.js';
@@ -140,6 +142,28 @@ async function main(): Promise<void> {
       }
     } else {
       log('profiles', `CSV not found: ${csv}`);
+    }
+  }
+
+  // ---- horse_pedigree (own table, keyed prefixed to match race_results) ----
+  if (wants('pedigree')) {
+    const csv = resolve(args.dataDir, 'horses', 'profiles', 'horse_profiles.csv');
+    if (existsSync(csv)) {
+      const runId = startIngestionRun(db, 'horse_pedigree', sourceCommit);
+      const t0 = Date.now();
+      try {
+        const stats = args.dryRun
+          ? { inserted: 0, skipped: 0, failed: 0 }
+          : ingestHorsePedigree(db, csv, sourceCommit);
+        const ms = Date.now() - t0;
+        finishIngestionRun(db, runId, { inserted: stats.inserted, updated: 0, skipped: stats.skipped, failed: stats.failed, notes: `${ms}ms` }, true);
+        log('pedigree', `ins=${stats.inserted} skip=${stats.skipped} fail=${stats.failed} ${ms}ms`);
+      } catch (err) {
+        finishIngestionRun(db, runId, { inserted: 0, updated: 0, skipped: 0, failed: 0, notes: String(err) }, false);
+        console.error('[pedigree] fatal:', err);
+      }
+    } else {
+      log('pedigree', `CSV not found: ${csv}`);
     }
   }
 

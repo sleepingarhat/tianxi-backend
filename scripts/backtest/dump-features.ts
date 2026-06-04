@@ -187,6 +187,46 @@
       JOIN race_meetings rm ON rm.id = r.meeting_id
      WHERE rr.horse_id = ? AND rm.date < ?`);
 
+  // ── Stage 10 (NEW v3.2 ④): pedigree target-encoded progeny performance ──
+  // Leak-safe: progeny races strictly BEFORE the current race date. Keyed by
+  // race_results.horse_id (prefixed 'horse_'+code) via the horse_pedigree table
+  // (built by ingest/index.ts pedigree). Smoothed toward the global progeny
+  // top3 prior so small-sample sires regress to the mean. Missing pedigree →
+  // '' → -1.0 sentinel (lets the tree separate "unknown breeding" from low rate).
+  const pedExists = !!db.prepare(
+    "SELECT name FROM sqlite_master WHERE type='table' AND name='horse_pedigree'").get();
+  if (!pedExists) console.error('[dump-features] WARN: horse_pedigree table absent → sire/damsire features all -1.0 sentinel');
+  const K_PED = 40;
+  // Global progeny top3-per-start prior g (computed once over all settled results).
+  let G_TOP3 = 0.30;
+  {
+    const g = db.prepare(
+      `SELECT COUNT(*) AS starts,
+              SUM(CASE WHEN finishing_position BETWEEN 1 AND 3 THEN 1 ELSE 0 END) AS top3
+         FROM race_results WHERE finishing_position > 0 AND finishing_position < 99`)
+      .get() as { starts: number; top3: number | null };
+    if (g && g.starts > 0) G_TOP3 = (g.top3 ?? 0) / g.starts;
+  }
+  function smoothRate(starts: number, top3: number): number {
+    return Math.round(((top3 + K_PED * G_TOP3) / (starts + K_PED)) * 10000) / 10000;
+  }
+  const sireProgSql = `
+    SELECT COUNT(*) AS starts,
+           SUM(CASE WHEN rr.finishing_position BETWEEN 1 AND 3 THEN 1 ELSE 0 END) AS top3
+      FROM race_results rr
+      JOIN races r ON r.id = rr.race_id
+      JOIN race_meetings rm ON rm.id = r.meeting_id
+      JOIN horse_pedigree hp ON hp.horse_id = rr.horse_id
+     WHERE rm.date < ?
+       AND rr.finishing_position > 0 AND rr.finishing_position < 99`;
+  const qPedLookup = pedExists ? db.prepare('SELECT sire, dam_sire FROM horse_pedigree WHERE horse_id=?') : null;
+  const qSireProg = pedExists ? db.prepare(sireProgSql + ' AND hp.sire = ?') : null;
+  const qSireProgDist = pedExists ? db.prepare(sireProgSql + ' AND hp.sire = ? AND r.distance BETWEEN ? AND ?') : null;
+  const qDamsireProg = pedExists ? db.prepare(sireProgSql + ' AND hp.dam_sire = ?') : null;
+  const sireMemo = new Map<string, number>();
+  const sireDistMemo = new Map<string, number>();
+  const damsireMemo = new Map<string, number>();
+
   const qCombo = db.prepare(`
     SELECT COUNT(*) AS starts,
            SUM(CASE WHEN rr.finishing_position BETWEEN 1 AND 3 THEN 1 ELSE 0 END) AS top3
@@ -564,6 +604,8 @@
       // Stage 8 (NEW v3.2): margin-regression target (lbw parsed → lengths).
       // FEATURE: not used (would be lookahead). LABEL: for future aux head.
       'beaten_lengths',
+      // Stage 10 (NEW v3.2 ④): pedigree target-encoded (leak-safe, as-of date)
+      'sire_top3_sm','sire_dist_top3_sm','damsire_top3_sm',
       'finishing_position','is_top1','is_top3',
     ];
   writeFileSync(OUT, HEADER.join(',') + '\n');
@@ -712,6 +754,42 @@
         ? 0
         : parseLbw(r.lbw);
 
+      // Stage 10 (NEW v3.2 ④): pedigree target-encoded features (leak-safe, as-of date)
+      let sireTop3: number | '' = '', sireDistTop3: number | '' = '', damsireTop3: number | '' = '';
+      if (pedExists && qPedLookup) {
+        const ped = qPedLookup.get(r.horse_id) as { sire: string | null; dam_sire: string | null } | undefined;
+        const sire = ped?.sire ?? null;
+        const damsire = ped?.dam_sire ?? null;
+        if (sire) {
+          const k1 = sire + '|' + meta.date;
+          let v = sireMemo.get(k1);
+          if (v === undefined) {
+            const a = qSireProg!.get(meta.date, sire) as { starts: number; top3: number | null };
+            v = smoothRate(a?.starts ?? 0, a?.top3 ?? 0);
+            sireMemo.set(k1, v);
+          }
+          sireTop3 = v;
+          const k2 = sire + '|' + meta.date + '|' + meta.distance;
+          let v2 = sireDistMemo.get(k2);
+          if (v2 === undefined) {
+            const a = qSireProgDist!.get(meta.date, sire, meta.distance - 200, meta.distance + 200) as { starts: number; top3: number | null };
+            v2 = smoothRate(a?.starts ?? 0, a?.top3 ?? 0);
+            sireDistMemo.set(k2, v2);
+          }
+          sireDistTop3 = v2;
+        }
+        if (damsire) {
+          const k3 = damsire + '|' + meta.date;
+          let v3 = damsireMemo.get(k3);
+          if (v3 === undefined) {
+            const a = qDamsireProg!.get(meta.date, damsire) as { starts: number; top3: number | null };
+            v3 = smoothRate(a?.starts ?? 0, a?.top3 ?? 0);
+            damsireMemo.set(k3, v3);
+          }
+          damsireTop3 = v3;
+        }
+      }
+
       const row = [
           meta.id, meta.date, meta.venue, meta.race_number, meta.distance, meta.going, fieldSize,
           r.horse_id, r.jockey_id, r.trainer_id, r.draw, r.actual_weight, r.win_odds,
@@ -729,6 +807,7 @@
           isSprint, isMiddle, isDistance,
           drawX, paceX,
           beatenLengths,
+          sireTop3, sireDistTop3, damsireTop3,
           r.finishing_position,
           r.horse_id === top1Id ? 1 : 0,
           top3Set.has(r.horse_id) ? 1 : 0,
