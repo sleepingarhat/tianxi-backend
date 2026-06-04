@@ -372,6 +372,57 @@ function buildPickReason(pick: any): string {
   return parts.join(' · ') || '無因子數據';
 }
 
+  function buildPickNarrative(
+    p: any,
+    ctx: { distance?: number | null; going?: string | null; raceClass?: string | null; fieldSize?: number | null } = {},
+  ): string {
+    if (!p) return '';
+    const rankWord = p.rank === 1 ? '本場首選' : p.rank === 2 ? '次選' : p.rank === 3 ? '三選' : p.rank === 4 ? '四選' : `第 ${p.rank} 選`;
+    const pct = p.pWin != null ? `${(p.pWin * 100).toFixed(0)}%` : null;
+    const seg: string[] = [];
+
+    const hasLgb = typeof p.scoreSource === 'string' && p.scoreSource.indexOf('ensemble') >= 0 && p.lgbScore != null;
+    const aiGood = hasLgb && p.lgbScore > -2.2;
+    let lead = `系統將佢列為${rankWord}`;
+    if (pct) lead += `，綜合勝算約 ${pct}`;
+    if (hasLgb) lead += aiGood ? '；AI 機器學習與評分引擎雙雙看好' : '；評分引擎看好，AI 模型則持平';
+    else lead += '；以實力評分引擎為主';
+    seg.push(lead + '。');
+
+    const fb = p.factorBreakdown || {};
+    const bn = (k: string): number => (fb[k] && typeof fb[k].bonus === 'number') ? fb[k].bonus : 0;
+    const pos: string[] = [];
+    const neg: string[] = [];
+
+    if (bn('draw') >= 2) pos.push(`今仗檔位${p.draw != null ? `（${p.draw} 檔）` : ''}佔優`);
+    else if (bn('draw') <= -2) neg.push(`檔位${p.draw != null ? `（${p.draw} 檔）` : ''}稍為不利`);
+    if (bn('weight') >= 2) pos.push('磅位有利');
+    else if (bn('weight') <= -2) neg.push('負磅偏重');
+    if (bn('distance') >= 2) pos.push(`往績適合今仗${ctx.distance ? ` ${ctx.distance} 米` : ''}途程`);
+    else if (bn('distance') <= -2) neg.push('今仗距離未必最啱');
+    if (bn('going') >= 2) pos.push(`往績適應今日${ctx.going || ''}場地`);
+    else if (bn('going') <= -2) neg.push(`今日${ctx.going || ''}場地未必合適`);
+    if (bn('condition') >= 2) pos.push('近期晨操狀態理想');
+    if (bn('jtCombo') >= 2) pos.push('騎練配搭往績出色');
+    if (bn('injury') <= -2) neg.push('近期有傷患記錄需留意');
+
+    if (p.eloSource && p.eloSource !== 'snapshot') {
+      pos.push('新馬登場，評分屬潛力估算');
+    } else if (typeof p.daysSinceLast === 'number') {
+      const d = p.daysSinceLast;
+      if (d >= 14 && d <= 45) pos.push(`休息 ${d} 日復出，調整充分`);
+      else if (d > 90) neg.push(`久休 ${d} 日復出，臨場狀態待觀察`);
+      else if (d < 14 && d >= 0) pos.push(`${d} 日內再戰，狀態延續`);
+    }
+
+    if (p.eloComposite != null && p.eloComposite >= 1520) pos.push('實力評分高於全場平均');
+
+    if (pos.length) seg.push(`支持理由：${pos.slice(0, 4).join('、')}。`);
+    if (neg.length) seg.push(`需留意：${neg.slice(0, 2).join('、')}。`);
+
+    return seg.join('');
+  }
+
 // 共用 helper：批量載入指定賽事日所有場次的 LGB 預測分數
 // 被 computePicksFromEntries (hit-rate) 與 runRaceDayReportCompute (today-picks) 共用，
 // 防止兩條路徑 drift（曾經 hit-rate 冇 LGB 路徑 → admin 面板顯示純 ELO）。
@@ -2114,6 +2165,7 @@ analyzeRoutes.get('/factors', (c) => {
           const picks = enriched.map((s, i) => { const { _score, ...rest } = s as any; return { ...rest, pWin: Math.round((expScores[i]/Z)*1000)/1000, pTop3: Math.round(Math.min((expScores[i]/Z)*3,0.99)*1000)/1000 }; });
           picks.sort((a: any, b: any) => b.pWin - a.pWin);
           picks.forEach((p: any, i: number) => { p.rank = i + 1; });
+          picks.forEach((p: any) => { if (p.rank <= 4) p.commentary = buildPickNarrative(p, { distance: raceDistance, going: raceGoing, raceClass, fieldSize: (enriched as any[]).length }); });
           const _txTotal2 = (enriched as any[]).length;
           return { raceId, lgbLookupRaceId, raceNumber: raceNum, title: raceTitle, class: raceClass, distance: raceDistance, going: raceGoing, track: raceTrack, course: raceCourse, picks, scoreSource: raceHasLgb ? `tx-oracle-v3 (lgb=${lgbHits}/${_txTotal2}, α=${todayPicksAlpha.toFixed(2)})` : 'elo+factor', lgbCoverage: { hits: lgbHits, total: _txTotal2, applied: raceHasLgb }, lgbModelVersion: lgbModelVerForRace, ensembleAlpha: todayPicksAlpha };
         });
