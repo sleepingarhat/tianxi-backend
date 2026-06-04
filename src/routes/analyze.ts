@@ -385,7 +385,7 @@ function buildPickReason(pick: any): string {
     const aiGood = hasLgb && p.lgbScore > -2.2;
     let lead = `系統將佢列為${rankWord}`;
     if (pct) lead += `，綜合勝算約 ${pct}`;
-    if (hasLgb) lead += aiGood ? '；AI 機器學習與評分引擎雙雙看好' : '；評分引擎看好，AI 模型則持平';
+    if (hasLgb) lead += aiGood ? '；AI 機器學習與評分引擎雙雙看好' : '；評分引擎看好，AI 模型訊號偏弱';
     else lead += '；以實力評分引擎為主';
     seg.push(lead + '。');
 
