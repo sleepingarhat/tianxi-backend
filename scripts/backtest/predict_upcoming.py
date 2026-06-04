@@ -68,6 +68,10 @@ FEAT_COLS = [
     'sect_n', 'sect_early_avg', 'sect_late_kick',
     'is_sprint', 'is_middle', 'is_distance',
     'draw_x_sprint', 'paceclash_x_distance',
+    # Stage 9 (NEW): in-race relative features — per-race cross-runner context
+    # (z-scores + ordinal rank vs today's actual field). Same generator
+    # (dump-features.ts) computes these for upcoming races, so train/infer match.
+    'rel_helo_z', 'rel_helo_rank', 'rel_form_z', 'rel_weight_z', 'rel_days_z', 'rel_factor_z',
 ]
 
 

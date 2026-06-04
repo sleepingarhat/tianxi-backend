@@ -452,6 +452,37 @@
     return null;
   }
 
+  // ── Stage 9 (NEW): in-race relative feature helpers ──────────────────────
+  // Cross-runner context a per-row tree model cannot otherwise see: a horse's
+  // standing RELATIVE to today's actual field (z-score + ordinal rank), computed
+  // per race over the runners present. Null-safe: nulls are excluded from
+  // mean/std and emitted as '' (→ -1.0 sentinel after fillna in the python
+  // trainers, consistent with every other missing-feature column).
+  function relStats(vals: (number | null)[]): { mean: number; std: number } {
+    const xs = vals.filter((v): v is number => v != null && Number.isFinite(v));
+    if (xs.length === 0) return { mean: NaN, std: 0 };
+    const mean = xs.reduce((a, b) => a + b, 0) / xs.length;
+    const variance = xs.reduce((a, b) => a + (b - mean) ** 2, 0) / xs.length;
+    return { mean, std: Math.sqrt(variance) };
+  }
+  function zOf(v: number | null, s: { mean: number; std: number }): number | null {
+    if (v == null || !Number.isFinite(v) || Number.isNaN(s.mean)) return null;
+    if (s.std <= 1e-9) return 0;
+    return Math.round(((v - s.mean) / s.std) * 1000) / 1000;
+  }
+  // Fractional rank in [0,1], 0 = strongest (highest value), 1 = weakest.
+  // Single valid value → 0.5; null inputs → null.
+  function rankDesc(vals: (number | null)[]): (number | null)[] {
+    const idx = vals
+      .map((v, i) => ({ v, i }))
+      .filter((o): o is { v: number; i: number } => o.v != null && Number.isFinite(o.v));
+    idx.sort((a, b) => b.v - a.v);
+    const out: (number | null)[] = vals.map(() => null);
+    const n = idx.length;
+    idx.forEach((o, rank) => { out[o.i] = n > 1 ? Math.round((rank / (n - 1)) * 1000) / 1000 : 0.5; });
+    return out;
+  }
+
   // ── Race iteration ──────────────────────────────────────────────────────
   type RaceMeta = { id: string; date: string; venue: string; race_number: number; distance: number; going: string; class: string | null };
   type RunnerRow = {
@@ -564,6 +595,8 @@
       // Stage 8 (NEW v3.2): margin-regression target (lbw parsed → lengths).
       // FEATURE: not used (would be lookahead). LABEL: for future aux head.
       'beaten_lengths',
+      // Stage 9 (NEW): in-race relative features (per-race cross-runner context)
+      'rel_helo_z','rel_helo_rank','rel_form_z','rel_weight_z','rel_days_z','rel_factor_z',
       'finishing_position','is_top1','is_top3',
     ];
   writeFileSync(OUT, HEADER.join(',') + '\n');
@@ -617,6 +650,11 @@
     const isMiddle = dist >= 1400 && dist <= 1600 ? 1 : 0;
     const isDistance = dist >= 1800 ? 1 : 0;
 
+    const computed: {
+      base: unknown[]; fin: number; isTop1: number; isTop3: number;
+      baseline: number | null; helo: number | null; form: number | null;
+      weight: number | null; days: number | null; factor: number | null;
+    }[] = [];
     for (const r of runners) {
       const hElo = readElo('horse', r.horse_id, meta.date);
       const jElo = readElo('jockey', r.jockey_id, meta.date);
@@ -712,7 +750,7 @@
         ? 0
         : parseLbw(r.lbw);
 
-      const row = [
+      const base = [
           meta.id, meta.date, meta.venue, meta.race_number, meta.distance, meta.going, fieldSize,
           r.horse_id, r.jockey_id, r.trainer_id, r.draw, r.actual_weight, r.win_odds,
           hElo, jElo, tElo, daysSince,
@@ -729,9 +767,38 @@
           isSprint, isMiddle, isDistance,
           drawX, paceX,
           beatenLengths,
-          r.finishing_position,
-          r.horse_id === top1Id ? 1 : 0,
-          top3Set.has(r.horse_id) ? 1 : 0,
+        ];
+      computed.push({
+        base,
+        fin: r.finishing_position,
+        isTop1: r.horse_id === top1Id ? 1 : 0,
+        isTop3: top3Set.has(r.horse_id) ? 1 : 0,
+        baseline: baselineScore,
+        helo: hElo,
+        form: formAvgPosW,
+        weight: r.actual_weight,
+        days: daysSince,
+        factor: factorBonus,
+      });
+    }
+
+    // ── Stage 9 (NEW): second pass — append in-race relative features ────────
+    // All runners' absolute values are now known, so compute per-race z-scores
+    // and ordinal rank over today's actual field (cross-runner context the
+    // per-row tree model cannot otherwise access).
+    const sH = relStats(computed.map(c => c.helo));
+    const sF = relStats(computed.map(c => c.form));
+    const sW = relStats(computed.map(c => c.weight));
+    const sD = relStats(computed.map(c => c.days));
+    const sFa = relStats(computed.map(c => c.factor));
+    const heloRank = rankDesc(computed.map(c => c.helo));
+    for (let ci = 0; ci < computed.length; ci++) {
+      const c = computed[ci];
+      const row = [
+          ...c.base,
+          zOf(c.helo, sH), heloRank[ci],
+          zOf(c.form, sF), zOf(c.weight, sW), zOf(c.days, sD), zOf(c.factor, sFa),
+          c.fin, c.isTop1, c.isTop3,
         ].map(csv).join(',');
       buf.push(row + '\n');
       written++;
