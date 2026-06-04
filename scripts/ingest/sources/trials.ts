@@ -7,7 +7,6 @@ import { parseCsv } from '../lib/csv.js';
 import {
   parseHKDate,
   parseFinishTime,
-  parsePosition,
   parseInt10,
   normalizeVenue,
 } from '../lib/parsers.js';
@@ -97,51 +96,77 @@ export function ingestTrials(
 
   sessionTx(sessionRows);
 
-  // Then runners
-  const runnerTx = db.transaction((batch: typeof resultRows) => {
-    for (const row of batch) {
-      try {
-        const dateIso = parseHKDate(row['trial_date']);
-        if (!dateIso) {
-          runnerStats.skipped++;
-          continue;
-        }
-        const venue = row['trial_venue'] || null;
-        const groupNo = parseInt10(row['group_no']);
-        if (groupNo == null) {
-          runnerStats.skipped++;
-          continue;
-        }
-        const sessionId = trialSessionId(dateIso, venue, groupNo);
-        const horseCode = (row['horse_no'] || '').trim();
-        if (!horseCode) {
-          runnerStats.skipped++;
-          continue;
-        }
-        const finishTime = row['finish_time'] || null;
+  // Then runners. HK barrier trials carry NO official finishing place, but the
+  // de-facto order within a session is the finish time (also matches the last
+  // token of running_position). So GROUP rows by session, rank by finish time
+  // ascending -> finishing_position 1..N, and record total_runners. horse_id is
+  // stored PREFIXED ('horse_<code>') to match horses.id / race_results.horse_id
+  // in both bulk-local.db (training) and D1, so feature joins are direct.
+  type TrialEntry = { horseCode: string; timeSec: number | null; row: Record<string, string> };
+  const bySession = new Map<string, TrialEntry[]>();
+  for (const row of resultRows) {
+    const dateIso = parseHKDate(row['trial_date']);
+    const venue = row['trial_venue'] || null;
+    const groupNo = parseInt10(row['group_no']);
+    const horseCode = (row['horse_no'] || '').trim();
+    if (!dateIso || groupNo == null || !horseCode) {
+      runnerStats.skipped++;
+      continue;
+    }
+    const sessionId = trialSessionId(dateIso, venue, groupNo);
+    let arr = bySession.get(sessionId);
+    if (!arr) {
+      arr = [];
+      bySession.set(sessionId, arr);
+    }
+    arr.push({ horseCode, timeSec: parseFinishTime(row['finish_time'] || null), row });
+  }
 
-        upsertRunner.run(
-          trialRunnerId(sessionId, horseCode),
-          sessionId,
-          horseCode,
-          null, // horse_number not explicitly in CSV
-          parsePosition(row['draw']), // note: trials don't have finishing_position per se, use draw as placeholder TODO verify
-          finishTime,
-          parseFinishTime(finishTime),
-          row['jockey'] || null,
-          row['lbw'] || null,
-          row['gear'] || null,
-          row['commentary'] || null,
-        );
-        runnerStats.inserted++;
-      } catch (err) {
-        runnerStats.failed++;
-        console.error('[trial_runners] failed row', row['horse_no'], err);
-      }
+  const updateSessionTotal = db.prepare(
+    `UPDATE trial_sessions SET total_runners = ? WHERE id = ?`,
+  );
+
+  const runnerTx = db.transaction(() => {
+    for (const [sessionId, entries] of bySession) {
+      // rank by finish time ascending; rows without a parseable time sort last
+      // and receive a null finishing_position (their order is untrustworthy).
+      const ranked = entries
+        .map((e, i) => ({ ...e, i }))
+        .sort((a, b) => {
+          if (a.timeSec == null && b.timeSec == null) return a.i - b.i;
+          if (a.timeSec == null) return 1;
+          if (b.timeSec == null) return -1;
+          if (a.timeSec !== b.timeSec) return a.timeSec - b.timeSec;
+          return a.i - b.i;
+        });
+      const total = ranked.length;
+      updateSessionTotal.run(total, sessionId);
+      ranked.forEach((e, idx) => {
+        try {
+          const finishPos = e.timeSec == null ? null : idx + 1;
+          upsertRunner.run(
+            trialRunnerId(sessionId, e.horseCode),
+            sessionId,
+            `horse_${e.horseCode}`,
+            null, // horse_number not explicitly in CSV
+            finishPos,
+            e.row['finish_time'] || null,
+            e.timeSec,
+            e.row['jockey'] || null,
+            e.row['lbw'] || null,
+            e.row['gear'] || null,
+            e.row['commentary'] || null,
+          );
+          runnerStats.inserted++;
+        } catch (err) {
+          runnerStats.failed++;
+          console.error('[trial_runners] failed row', e.horseCode, err);
+        }
+      });
     }
   });
 
-  runnerTx(resultRows);
+  runnerTx();
 
   return { sessions: sessionStats, runners: runnerStats };
 }

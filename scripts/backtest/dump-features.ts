@@ -286,6 +286,23 @@
     //          section_time REAL, position_at_section INTEGER).
     // Fetch last 60 sectional rows for this horse (≈10 races worth)
     // and aggregate in JS over the most recent 6 races.
+    // Stage 9 (NEW): barrier-trial readiness. Trials reach bulk-local.db via
+    // the 'trials' ingest step; D1 never carries them (model features are built
+    // here in CI, only final scores are POSTed). Defensive: if the trial tables
+    // are absent (e.g. a stale cached db), skip silently -> all-zero trial cols.
+    const hasTrials = db
+      .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='trial_runners'`)
+      .get() != null;
+    const qTrials = hasTrials
+      ? db.prepare(`
+          SELECT ts.trial_date AS dt, tr.finishing_position AS pos, ts.total_runners AS n
+            FROM trial_runners tr
+            JOIN trial_sessions ts ON ts.id = tr.session_id
+           WHERE tr.horse_id = ? AND ts.trial_date < ?
+           ORDER BY ts.trial_date DESC
+           LIMIT 12`)
+      : null;
+
     const qSectionals = db.prepare(`
       SELECT hst.race_id AS rid,
              hst.section_number AS sec,
@@ -564,6 +581,8 @@
       // Stage 8 (NEW v3.2): margin-regression target (lbw parsed → lengths).
       // FEATURE: not used (would be lookahead). LABEL: for future aux head.
       'beaten_lengths',
+      // Stage 9 (NEW): barrier-trial readiness (pre-race trials only)
+      'trial_n','trial_days_since','trial_best_pos_pct','trial_win',
       'finishing_position','is_top1','is_top3',
     ];
   writeFileSync(OUT, HEADER.join(',') + '\n');
@@ -712,6 +731,27 @@
         ? 0
         : parseLbw(r.lbw);
 
+      // Stage 9 (NEW): barrier-trial readiness - only trials BEFORE race date
+      // (no lookahead). Null-safe: horses with no prior trial emit 0 / null.
+      let trialN = 0, trialWin = 0;
+      let trialDaysSince: number | null = null;
+      let trialBestPosPct: number | null = null;
+      if (qTrials) {
+        const trialRows = qTrials.all(r.horse_id, meta.date) as Array<{ dt: string; pos: number | null; n: number | null }>;
+        for (const tr of trialRows) {
+          trialN++;
+          if (tr.pos === 1) trialWin = 1;
+          if (tr.pos != null && tr.n && tr.n > 0) {
+            const pct = tr.pos / tr.n;
+            if (trialBestPosPct == null || pct < trialBestPosPct) trialBestPosPct = pct;
+          }
+          if (trialDaysSince == null && tr.dt) {
+            const d = Math.round((Date.parse(meta.date) - Date.parse(tr.dt)) / 86400000);
+            if (Number.isFinite(d)) trialDaysSince = d;
+          }
+        }
+      }
+
       const row = [
           meta.id, meta.date, meta.venue, meta.race_number, meta.distance, meta.going, fieldSize,
           r.horse_id, r.jockey_id, r.trainer_id, r.draw, r.actual_weight, r.win_odds,
@@ -729,6 +769,7 @@
           isSprint, isMiddle, isDistance,
           drawX, paceX,
           beatenLengths,
+          trialN, trialDaysSince, trialBestPosPct, trialWin,
           r.finishing_position,
           r.horse_id === top1Id ? 1 : 0,
           top3Set.has(r.horse_id) ? 1 : 0,

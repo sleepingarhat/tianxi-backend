@@ -96,6 +96,13 @@ jobs:
           npx tsx scripts/ingest/index.ts form --data-dir=../hkjc-data --db=./bulk-local.db
           ls -lh bulk-local.db
 
+      - name: Ingest barrier trials
+        if: steps.db-cache.outputs.cache-hit != 'true'
+        working-directory: tianxi-backend
+        run: |
+          npx tsx scripts/ingest/index.ts trials --data-dir=../hkjc-data --db=./bulk-local.db
+          ls -lh bulk-local.db
+
       - name: Compute ELO ratings
         if: steps.db-cache.outputs.cache-hit != 'true'
         working-directory: tianxi-backend

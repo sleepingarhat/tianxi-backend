@@ -68,6 +68,8 @@ FEAT_COLS = [
     'sect_n', 'sect_early_avg', 'sect_late_kick',
     'is_sprint', 'is_middle', 'is_distance',
     'draw_x_sprint', 'paceclash_x_distance',
+    # Stage 9 (NEW): barrier-trial readiness (pre-race trials only)
+    'trial_n', 'trial_days_since', 'trial_best_pos_pct', 'trial_win',
 ]
 
 
