@@ -68,6 +68,10 @@ FEAT_COLS = [
     'sect_n', 'sect_early_avg', 'sect_late_kick',
     'is_sprint', 'is_middle', 'is_distance',
     'draw_x_sprint', 'paceclash_x_distance',
+    # Stage 10 (NEW v3.2 ④ pedigree): leak-safe target-encoded breeding signal.
+    # Smoothed progeny top3-rate as-of race date (sire general / sire at this
+    # distance band / damsire). Missing pedigree → -1.0 sentinel via fillna.
+    'sire_top3_sm', 'sire_dist_top3_sm', 'damsire_top3_sm',
 ]
 
 
