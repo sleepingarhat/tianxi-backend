@@ -219,6 +219,37 @@ async function fetchRuns(env: AdminEnv, limit = 50): Promise<any[]> {
   } catch { return []; }
 }
 
+// Workflows tracked by the coverage panel that fire on a LOW cadence
+// (entries: Mon/Tue/Sat · ELO/d1-sync: per race day · pool: daily). The global
+// /actions/runs feed is dominated by hourly capy_odds + frequent deploys, so a
+// flat "recent N" slice scrolls these off the window within ~2 days and the
+// panel falsely paints them '從未成功'. Fetch each per-workflow so last-success
+// is always seen regardless of how noisy the high-frequency workflows are.
+const TRACKED_WF_FILES = [
+  'capy_race_daily.yml', 'capy_d1_sync.yml', 'capy_pool_a.yml',
+  'capy_d1_sync_pool_a.yml', 'capy_entries.yml', 'capy_d1_sync_entries.yml',
+  'capy_odds.yml', 'elo-post-race.yml',
+];
+async function fetchRunsRobust(env: AdminEnv): Promise<any[]> {
+  if (!env.GITHUB_TOKEN || !env.GITHUB_REPO) return [];
+  const headers = { Authorization: `Bearer ${env.GITHUB_TOKEN}`,
+    Accept: 'application/vnd.github+json', 'User-Agent': 'tianxi-admin' };
+  const base = `https://api.github.com/repos/${env.GITHUB_REPO}/actions`;
+  const urls = [
+    `${base}/runs?per_page=100`,                                   // global recent: failure alerts + high-freq
+    ...TRACKED_WF_FILES.map((f) => `${base}/workflows/${f}/runs?per_page=10`),
+  ];
+  const settled = await Promise.allSettled(
+    urls.map((u) => fetch(u, { headers }).then((r) => (r.ok ? r.json() : { workflow_runs: [] })))
+  );
+  const byId = new Map<number, any>();
+  for (const s of settled) {
+    if (s.status !== 'fulfilled') continue;
+    for (const r of ((s.value as any).workflow_runs || [])) byId.set(r.id, r);
+  }
+  return [...byId.values()];
+}
+
 // Map workflow key (name + filename) → recent runs (array + lastSuccess).
 // 2026-05-01 v4: keep full recent run list instead of only latest, so
 // an in_progress / cancelled latest no longer false-triggers '無自動 ✗'.
@@ -298,7 +329,7 @@ function rowAuto(wfMap: Record<string, WfInfo>, wfNames: string[]) {
 // ── /api/coverage ──────────────────────────────────────────────────────
 adminRoutes.get('/api/coverage', async (c) => {
   const db = c.env.DB;
-  const runs = await fetchRuns(c.env, 150);  // v4: 80→150 so each of 16 workflows has ≥5 recent
+  const runs = await fetchRunsRobust(c.env);  // per-workflow fetch — low-cadence workflows no longer scroll off the window
   const wf = buildWorkflowMap(runs);
 
   // Gather all counts + latest dates in parallel
@@ -1522,7 +1553,7 @@ async function fetchAdminPageData(env: AdminEnv): Promise<Record<string, any>> {
     scalar<string>(db, 'SELECT MAX(date) FROM race_meetings'),
   ]);
 
-  const runs = await fetchRuns(env, 150);
+  const runs = await fetchRunsRobust(env);  // per-workflow fetch — low-cadence workflows no longer scroll off the window
   const wf = buildWorkflowMap(runs);
   const fd = (s: string | null) => s || '—';
 
