@@ -69,6 +69,14 @@ jobs:
           echo "key=$KEY" >> $GITHUB_OUTPUT
           echo "Cache key: $KEY"
 
+      - name: Compute feature-cache key (data + dump-features.ts hash)
+        id: featsig
+        run: |
+          FEAT_HASH=$(sha256sum tianxi-backend/scripts/backtest/dump-features.ts | cut -c1-12)
+          FKEY="lgb-feat-${{ steps.sig.outputs.key }}-${FEAT_HASH}"
+          echo "key=$FKEY" >> $GITHUB_OUTPUT
+          echo "Feature cache key: $FKEY"
+
       - name: Restore bulk-local.db cache
         id: db-cache
         if: inputs.force_rebuild_db != 'true'
@@ -129,7 +137,21 @@ jobs:
             echo "FATAL: horse_pedigree has $PED rows (<1000) — pedigree ingest/sparse-checkout broken"; exit 1
           fi
 
+      - name: Restore features.csv cache
+        id: feat-cache
+        if: inputs.force_rebuild_db != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: tianxi-backend/features.csv
+          key: ${{ steps.featsig.outputs.key }}
+
       - name: Dump training features (full history)
+        # SPEED: the full-history dump (2016→yesterday, ~98k rows incl the
+        # pedigree as-of encoding) costs ~2h. It only changes when the data
+        # (DATA_SHA) or dump-features.ts logic changes — both folded into the
+        # feature-cache key — so on a cache hit we skip the dump entirely and
+        # only the (cheap) upcoming-entries dump runs against bulk-local.db.
+        if: steps.feat-cache.outputs.cache-hit != 'true'
         working-directory: tianxi-backend
         run: |
           YESTERDAY=$(date -u -d 'yesterday' +%Y-%m-%d)
@@ -138,6 +160,13 @@ jobs:
             --from=2016-09-01 --to=$YESTERDAY \
             --out=features.csv
           echo "training rows: $(wc -l < features.csv)"
+
+      - name: Save features.csv cache
+        if: always() && steps.feat-cache.outputs.cache-hit != 'true' && hashFiles('tianxi-backend/features.csv') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: tianxi-backend/features.csv
+          key: ${{ steps.featsig.outputs.key }}
 
       - name: Fetch upcoming entries from prod
         env:

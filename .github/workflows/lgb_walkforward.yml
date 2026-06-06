@@ -41,6 +41,10 @@ on:
         description: 'Ignore cache and rebuild bulk-local.db from scratch'
         required: false
         default: 'false'
+      exclude:
+        description: 'Comma-sep FEATURE_COLS to drop (A/B ablation control)'
+        required: false
+        default: ''
 
 jobs:
   walkforward:
@@ -185,6 +189,7 @@ jobs:
             --n-estimators ${{ inputs.n_estimators }} \
             --num-leaves ${{ inputs.num_leaves }} \
             --objective ${{ inputs.objective }} \
+            --exclude '${{ inputs.exclude }}' \
             --verbose 2>&1 | tee lgb_stdout.txt
 
       - name: Print summary block

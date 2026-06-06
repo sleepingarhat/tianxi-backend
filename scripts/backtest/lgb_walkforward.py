@@ -64,6 +64,11 @@ FEATURE_COLS = [
       # Smoothed progeny top3-rate as-of race date (sire general / sire at this
       # distance band / damsire). Missing pedigree → -1.0 sentinel via fillna.
       "sire_top3_sm", "sire_dist_top3_sm", "damsire_top3_sm",
+      # Stage 11 (NEW v3.2 ⑤ gear): equipment change-state parsed from the HKJC
+      # gear string (first-time / removed / recently-changed flags + blinkers).
+      # Leak-safe (declared on racecard pre-race); no historical join — the
+      # markers (B1/TT1/XB-/B2) encode the change in-string.
+      "gear_first_n", "gear_off_n", "gear_changed", "gear_blinkers",
       # going_code is appended below as a categorical feature.
   ]
 
@@ -84,6 +89,8 @@ def parse_args() -> argparse.Namespace:
                     help="lambdarank uses position as ranking label; "
                          "binary uses is_top1 with race-grouping ignored")
     ap.add_argument("--verbose", action="store_true")
+    ap.add_argument("--exclude", default="",
+                    help="comma-separated FEATURE_COLS to drop (A/B ablation control)")
     return ap.parse_args()
 
 
@@ -153,7 +160,13 @@ def train_booster(train_df: pd.DataFrame, args: argparse.Namespace, feat_cols: l
 def main() -> int:
     args = parse_args()
     df = load(args.features)
-    feat_cols = FEATURE_COLS + ["going_code"]
+    exclude = {c.strip() for c in args.exclude.split(",") if c.strip()}
+    if exclude:
+        miss = exclude - set(FEATURE_COLS)
+        if miss:
+            print(f"[lgb-wf] WARN: --exclude names not in FEATURE_COLS: {sorted(miss)}", file=sys.stderr)
+        print(f"[lgb-wf] A/B ablation: excluding {sorted(exclude & set(FEATURE_COLS))}", file=sys.stderr)
+    feat_cols = [c for c in FEATURE_COLS if c not in exclude] + ["going_code"]
 
     race_ids = list(dict.fromkeys(df["race_id"].tolist()))
     print(f"[lgb-wf] {len(df):,} runner-rows across {len(race_ids):,} races "

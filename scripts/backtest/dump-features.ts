@@ -498,6 +498,7 @@
     race_id: string; horse_id: string; jockey_id: string | null; trainer_id: string | null;
     finishing_position: number; draw: number | null; actual_weight: number | null; win_odds: number | null;
     lbw: string | null;
+    gear: string | null;
   };
 
   // ── Race + runner source ────────────────────────────────────────────────
@@ -551,6 +552,7 @@
         actual_weight: e.actual_weight != null ? Number(e.actual_weight) : null,
         win_odds: null,
         lbw: null,  // unknown — race hasn't run
+        gear: e.gear ?? null,  // ⑤ equipment (export must include gear; null until then)
       });
       runnersByRace.set(raceId, list);
     }
@@ -569,7 +571,7 @@
 
     qRunners = db.prepare(`
       SELECT race_id, horse_id, jockey_id, trainer_id, finishing_position,
-             draw, actual_weight, win_odds, lbw
+             draw, actual_weight, win_odds, lbw, gear
         FROM race_results
        WHERE race_id = ?
          AND finishing_position BETWEEN 1 AND 98`);
@@ -577,6 +579,39 @@
 
   console.error(`[dump-features] ${FROM}..${TO} → ${races.length} races · ELO=${ENGINE} · W=H${W_HORSE}/J${W_JOCKEY}/T${W_TRAINER}`);
   console.error(`[dump-features] writing → ${OUT}`);
+
+  // ── Stage 11 (NEW v3.2 ⑤): gear / equipment-change parser ──────────────
+  // HKJC encodes the equipment CHANGE-STATE directly in the gear string, so
+  // no historical join is needed (avoids the O(n²) as-of cost the pedigree
+  // encoding incurs). Codes are '/'-separated; each may carry a marker:
+  //   <code>1 = first time wearing it (e.g. B1, TT1, XB1)
+  //   <code>2 = second time (HKJC flags a change for 2 races) → still "recent"
+  //   <code>- = removed this race (e.g. XB-)
+  //   '--'   = no gear at all
+  // All declared on the racecard pre-race → fully leak-safe. Base codes incl:
+  //   B(blinkers) V(visor) XB(x-over noseband) TT(tongue tie) H(hood)
+  //   CP(cheek pieces) SR(sheepskin) P(pacifiers) E(ear plugs) …
+  function parseGear(g: string | null | undefined): {
+    firstN: number; offN: number; changed: number; blinkers: number;
+  } {
+    const out = { firstN: 0, offN: 0, changed: 0, blinkers: 0 };
+    if (g == null) return out;
+    const s = String(g).trim();
+    if (s === '' || s === '--' || s === '-') return out;
+    for (const tokRaw of s.split('/')) {
+      const tok = tokRaw.trim();
+      if (!tok || tok === '--' || tok === '-') continue;
+      const m = tok.match(/^([A-Za-z]+)([0-9-]*)$/);
+      if (!m) continue;
+      const base = m[1].toUpperCase();
+      const marker = m[2] || '';
+      if (marker.includes('1')) out.firstN++;
+      if (marker.includes('-')) out.offN++;
+      if (marker.includes('1') || marker.includes('2') || marker.includes('-')) out.changed = 1;
+      if (base === 'B' || base === 'V') out.blinkers = 1;  // vision-restricting focus aids
+    }
+    return out;
+  }
 
   const HEADER = [
       'race_id','race_date','venue','race_no','distance','going','field_size',
@@ -606,6 +641,8 @@
       'beaten_lengths',
       // Stage 10 (NEW v3.2 ④): pedigree target-encoded (leak-safe, as-of date)
       'sire_top3_sm','sire_dist_top3_sm','damsire_top3_sm',
+      // Stage 11 (NEW v3.2 ⑤): gear/equipment change (HKJC markers, leak-safe)
+      'gear_first_n','gear_off_n','gear_changed','gear_blinkers',
       'finishing_position','is_top1','is_top3',
     ];
   writeFileSync(OUT, HEADER.join(',') + '\n');
@@ -619,6 +656,7 @@
 
   let buf: string[] = [];
   let written = 0;
+  let gearChangedN = 0, gearBlinkersN = 0;  // ⑤ coverage guard (silent-regression detector)
   function flush() { if (buf.length) { appendFileSync(OUT, buf.join('')); buf = []; } }
 
   for (let i = 0; i < races.length; i++) {
@@ -790,6 +828,11 @@
         }
       }
 
+      // Stage 11 (NEW v3.2 ⑤): gear/equipment-change features (leak-safe markers)
+      const gearF = parseGear(r.gear);
+      if (gearF.changed) gearChangedN++;
+      if (gearF.blinkers) gearBlinkersN++;
+
       const row = [
           meta.id, meta.date, meta.venue, meta.race_number, meta.distance, meta.going, fieldSize,
           r.horse_id, r.jockey_id, r.trainer_id, r.draw, r.actual_weight, r.win_odds,
@@ -808,6 +851,7 @@
           drawX, paceX,
           beatenLengths,
           sireTop3, sireDistTop3, damsireTop3,
+          gearF.firstN, gearF.offN, gearF.changed, gearF.blinkers,
           r.finishing_position,
           r.horse_id === top1Id ? 1 : 0,
           top3Set.has(r.horse_id) ? 1 : 0,
@@ -820,5 +864,13 @@
   }
   flush();
   console.error(`[dump-features] done: ${written} rows × ${HEADER.length} cols → ${OUT}`);
+  if (written > 0) {
+    const chPct = (100 * gearChangedN / written).toFixed(1);
+    const blPct = (100 * gearBlinkersN / written).toFixed(1);
+    console.error(`[dump-features] ⑤ gear coverage: gear_changed=${gearChangedN} (${chPct}%) · gear_blinkers=${gearBlinkersN} (${blPct}%)`);
+    if (!UPCOMING_MODE && gearChangedN === 0 && gearBlinkersN === 0) {
+      console.error('[dump-features] WARN: gear features ALL zero on historical dump → race_results.gear missing/blank (silent regression?)');
+    }
+  }
   db.close();
   
