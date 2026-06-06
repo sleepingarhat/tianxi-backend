@@ -1338,9 +1338,9 @@ analyzeRoutes.get('/top-picks', async (c) => {
       const { results: euRows } = await c.env.DB.prepare(`
         SELECT e.horse_id, e.horse_number, h.name_ch, h.name_en
         FROM entries_upcoming e JOIN horses h ON h.id = e.horse_id
-        WHERE e.race_date = ? AND (e.race_number = ? OR e.race_number IS NULL)
+        WHERE e.race_date = ? AND e.venue = ? AND e.venue IN ('ST','HV') AND (e.race_number = ? OR e.race_number IS NULL)
         ORDER BY e.horse_number
-      `).bind(race.date, race.race_number).all<any>().catch(() => ({ results: [] as any[] }));
+      `).bind(race.date, race.venue, race.race_number).all<any>().catch(() => ({ results: [] as any[] }));
       if (euRows?.length) {
         const euEnriched = await Promise.all((euRows ?? []).map(async (r: any) => {
           const hRead = await fetchAxisEloReading(c.env.DB, 'horse', r.horse_id, race.date, engine).catch(() => null);
