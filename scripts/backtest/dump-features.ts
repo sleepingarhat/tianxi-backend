@@ -339,6 +339,21 @@
        ORDER BY rm.date DESC, hst.section_number ASC
        LIMIT 60`);
 
+    // ── Stage 12 (NEW v3.2 ⑥ pace/走位): per-race sectional-TIME stats for
+    // leak-safe within-race z-scoring of a horse's section times. GROUP BY
+    // section so we get mean + mean-of-squares (→ population std) per segment
+    // for ALL runners of a PAST race (fully settled → no lookahead). Memoized
+    // per race_id in raceSectStats() below. section_time is the raw pace datum
+    // that Stage-8 sectionalProfile() discards (it uses position_at_section only).
+    const qRaceSectStats = db.prepare(`
+      SELECT section_number AS sec,
+             AVG(section_time) AS mean_t,
+             AVG(section_time * section_time) AS mean_t2,
+             COUNT(*) AS n
+        FROM horse_sectional_times
+       WHERE race_id = ? AND section_time IS NOT NULL
+       GROUP BY section_number`);
+
     // ── Stage 6 (NEW): class change — last race_class for horse ────────────
     // horse_form_records.race_class is text. Format varies:
     //   - bare digit "4"  (from form_records CSV col 9)
@@ -449,6 +464,64 @@
       early_avg: earlies.length ? Math.round((earlies.reduce((a, b) => a + b, 0) / earlies.length) * 100) / 100 : null,
       late_kick: kicks.length ? Math.round((kicks.reduce((a, b) => a + b, 0) / kicks.length) * 100) / 100 : null,
     };
+  }
+
+  // ── Stage 12 (NEW v3.2 ⑥): per-race sectional-time stats, memoized ───────
+  // Returns the early (min section_number) and final (max section_number)
+  // segment's mean time + population std across that race's runners. Population
+  // std via sqrt(E[t²]-E[t]²). null when the race has no sectional rows.
+  const raceSectStatsCache = new Map<string, {
+    earlySec: number; earlyMean: number; earlyStd: number;
+    finalSec: number; finalMean: number; finalStd: number;
+  } | null>();
+  function raceSectStats(rid: string) {
+    const cached = raceSectStatsCache.get(rid);
+    if (cached !== undefined) return cached;
+    const rows = qRaceSectStats.all(rid) as { sec: number; mean_t: number; mean_t2: number; n: number }[];
+    let out: typeof cached = null;
+    if (rows.length) {
+      rows.sort((a, b) => a.sec - b.sec);
+      const std = (m: number, m2: number) => Math.sqrt(Math.max(0, m2 - m * m));
+      const lo = rows[0], hi = rows[rows.length - 1];
+      out = {
+        earlySec: lo.sec, earlyMean: lo.mean_t, earlyStd: std(lo.mean_t, lo.mean_t2),
+        finalSec: hi.sec, finalMean: hi.mean_t, finalStd: std(hi.mean_t, hi.mean_t2),
+      };
+    }
+    raceSectStatsCache.set(rid, out);
+    return out;
+  }
+  // From a horse's last-6 sectional races, z-score its early & final section
+  // TIME within each race's field, then average. Negative = faster than the
+  // race average (lower time). Missing/insufficient → -9 sentinel (outside the
+  // realistic z range ≈ ±5, so the tree can isolate "no data"). NOT a per-
+  // CURRENT-race relative (③): the z is over each PAST race's own runners.
+  const SECT_Z_NA = -9;
+  function sectionalSpeedProfile(
+    rows: { rid: string; sec: number; pos: number | null; t: number | null }[],
+  ): { early_z: number; fin_z: number; n: number } {
+    if (!rows.length) return { early_z: SECT_Z_NA, fin_z: SECT_Z_NA, n: 0 };
+    const byRace = new Map<string, { sec: number; t: number }[]>();
+    for (const r of rows) {
+      if (r.t == null || !Number.isFinite(r.t)) continue;
+      const arr = byRace.get(r.rid) || [];
+      arr.push({ sec: r.sec, t: r.t });
+      byRace.set(r.rid, arr);
+    }
+    const races = Array.from(byRace.entries()).slice(0, 6);
+    const earlyZs: number[] = [];
+    const finZs: number[] = [];
+    for (const [rid, segs] of races) {
+      const st = raceSectStats(rid);
+      if (!st) continue;
+      const e = segs.find(s => s.sec === st.earlySec);
+      const f = segs.find(s => s.sec === st.finalSec);
+      if (e && st.earlyStd > 1e-6) earlyZs.push((e.t - st.earlyMean) / st.earlyStd);
+      if (f && st.finalStd > 1e-6) finZs.push((f.t - st.finalMean) / st.finalStd);
+    }
+    const mean = (a: number[], na: number) =>
+      a.length ? Math.round((a.reduce((x, y) => x + y, 0) / a.length) * 1000) / 1000 : na;
+    return { early_z: mean(earlyZs, SECT_Z_NA), fin_z: mean(finZs, SECT_Z_NA), n: Math.max(earlyZs.length, finZs.length) };
   }
   // From last-N running_positions: { early: mean first-sectional position, style: 1=leader/2=stalker/3=closer/0=unknown }
   function paceProfile(rps: string[]): { early: number | null; style: number } {
@@ -633,6 +706,10 @@
       'class_now_num','last_class_num','class_delta',
       // Stage 8 (NEW v3.2): real sectional times (last 6 races aggregated)
       'sect_n','sect_early_avg','sect_late_kick',
+      // Stage 12 (NEW v3.2 ⑥ pace/走位): sectional-SPEED z (time-based, leak-safe
+      // within each past race's field; -9 = no data). Distinct from the
+      // position-based sect_* above — uses section_time, which Stage-8 discards.
+      'sect_early_z','sect_fin_z',
       // Stage 8 (NEW v3.2): distance-band features + interactions
       'is_sprint','is_middle','is_distance',
       'draw_x_sprint','paceclash_x_distance',
@@ -657,6 +734,7 @@
   let buf: string[] = [];
   let written = 0;
   let gearChangedN = 0, gearBlinkersN = 0;  // ⑤ coverage guard (silent-regression detector)
+  let sectSpdN = 0;  // ⑥ coverage guard: rows with real (non-sentinel) sectional-speed z
   function flush() { if (buf.length) { appendFileSync(OUT, buf.join('')); buf = []; } }
 
   for (let i = 0; i < races.length; i++) {
@@ -677,12 +755,15 @@
     const paceByHorse: Map<string, { early: number | null; style: number; n: number }> = new Map();
     // Stage 8 (NEW v3.2): pre-pass sectional profiles too
     const sectByHorse: Map<string, { n: number; early_avg: number | null; late_kick: number | null }> = new Map();
+    // Stage 12 (NEW v3.2 ⑥): pre-pass sectional-speed z profiles (reuse sectRows)
+    const sectSpeedByHorse: Map<string, { early_z: number; fin_z: number; n: number }> = new Map();
     for (const r of runners) {
       const rps = (qHorsePace.all(r.horse_id, meta.date) as { rp: string }[]).map(x => x.rp);
       const pp = paceProfile(rps);
       paceByHorse.set(r.horse_id, { early: pp.early, style: pp.style, n: rps.length });
       const sectRows = qSectionals.all(r.horse_id, meta.date) as { rid: string; sec: number; t: number | null; pos: number | null; dt: string }[];
       sectByHorse.set(r.horse_id, sectionalProfile(sectRows));
+      sectSpeedByHorse.set(r.horse_id, sectionalSpeedProfile(sectRows));
     }
     let raceNLeaders = 0, raceNClosers = 0;
     for (const v of paceByHorse.values()) {
@@ -786,6 +867,8 @@
       // Interaction semantics: emit 0 (not null) when band indicator is 0 so
       // LGB sees "no interaction effect" rather than "missing → -1.0 sentinel".
       const sect = sectByHorse.get(r.horse_id)!;
+      const sectSpd = sectSpeedByHorse.get(r.horse_id)!;
+      if (sectSpd.n > 0) sectSpdN++;
       const drawX = (r.draw != null && isSprint) ? r.draw : 0;
       const paceX = (paceClash != null && isDistance) ? paceClash : 0;
       const beatenLengths = r.finishing_position === 1
@@ -847,6 +930,7 @@
           raceNLeaders, raceNClosers, paceClash,
           classNowNum, lastClassNum, classDelta,
           sect.n, sect.early_avg, sect.late_kick,
+          sectSpd.early_z, sectSpd.fin_z,
           isSprint, isMiddle, isDistance,
           drawX, paceX,
           beatenLengths,
@@ -870,6 +954,11 @@
     console.error(`[dump-features] ⑤ gear coverage: gear_changed=${gearChangedN} (${chPct}%) · gear_blinkers=${gearBlinkersN} (${blPct}%)`);
     if (!UPCOMING_MODE && gearChangedN === 0 && gearBlinkersN === 0) {
       console.error('[dump-features] WARN: gear features ALL zero on historical dump → race_results.gear missing/blank (silent regression?)');
+    }
+    const spdPct = (100 * sectSpdN / written).toFixed(1);
+    console.error(`[dump-features] ⑥ sectional-speed coverage: sect z present=${sectSpdN} (${spdPct}%)`);
+    if (!UPCOMING_MODE && sectSpdN === 0) {
+      console.error('[dump-features] WARN: sectional-speed z ALL sentinel on historical dump → horse_sectional_times.section_time missing (sparse-checkout/import regression?)');
     }
   }
   db.close();

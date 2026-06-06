@@ -58,6 +58,10 @@ FEATURE_COLS = [
       # See predict_upcoming.py FEAT_COLS comment for rationale. beaten_lengths
       # excluded — it's a future regression-head label, not a feature.
       "sect_n", "sect_early_avg", "sect_late_kick",
+      # Stage 12 (NEW v3.2 ⑥ pace/走位): sectional-SPEED z (time-based, leak-safe
+      # within each past race's field; -9 sentinel = no data). Genuinely NEW raw
+      # signal — uses section_time, which the position-based sect_* above discard.
+      "sect_early_z", "sect_fin_z",
       "is_sprint", "is_middle", "is_distance",
       "draw_x_sprint", "paceclash_x_distance",
       # Stage 10 (NEW v3.2 ④ pedigree): leak-safe target-encoded breeding signal.
