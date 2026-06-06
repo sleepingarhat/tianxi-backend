@@ -58,7 +58,14 @@ function main() {
   // 0-race meetings are explicitly KEPT so --include=all / entries can still push
   // upcoming meetings as FK parents for entries_upcoming.
   const MIN_RACES_PER_MEETING = 4;
-  const validRaceMeetingIds = `SELECT id FROM race_meetings WHERE date >= '${since}' AND (SELECT COUNT(*) FROM races r2 WHERE r2.meeting_id = race_meetings.id) NOT BETWEEN 1 AND ${MIN_RACES_PER_MEETING - 1}`;
+  // Venue source guard: HK racing is ONLY Sha Tin (ST) / Happy Valley (HV).
+  // HKJC occasionally seeds overseas / simulcast meetings (venue S1/S2/…) into
+  // race_meetings + entries_upcoming. They must never reach D1 — the engine
+  // already filters them on read, but writing them lets the scraper's
+  // "next meeting" auto-detect grab an overseas card and starve the real local
+  // race day. Exclude every non-HK venue at the single D1 write chokepoint.
+  const HK_VENUE_FILTER = `venue IN ('ST','HV')`;
+  const validRaceMeetingIds = `SELECT id FROM race_meetings WHERE date >= '${since}' AND ${HK_VENUE_FILTER} AND (SELECT COUNT(*) FROM races r2 WHERE r2.meeting_id = race_meetings.id) NOT BETWEEN 1 AND ${MIN_RACES_PER_MEETING - 1}`;
   const recentRaceIds = `SELECT id FROM races WHERE meeting_id IN (${validRaceMeetingIds})`;
 
   if (wantRace) {
@@ -88,7 +95,7 @@ function main() {
   if (wantEntries) {
     // Entries seed horses.id as prefixed 'horse_<code>' via entries ingest stub.
     // Reference by that id directly so the horses push captures debut entrants.
-    horseRefs.push(`SELECT DISTINCT ('horse_' || horse_id) FROM entries_upcoming WHERE race_date >= '${since}'`);
+    horseRefs.push(`SELECT DISTINCT ('horse_' || horse_id) FROM entries_upcoming WHERE race_date >= '${since}' AND ${HK_VENUE_FILTER}`);
   }
   const horseRefUnion = horseRefs.length ? horseRefs.join(' UNION ') : `SELECT NULL WHERE 0`;
 
@@ -140,9 +147,9 @@ function main() {
     // via `INSERT ... ON CONFLICT(date, venue) DO NOTHING`). Avoid double-push when
     // --include=race already added it above.
     if (!wantRace) {
-      plan.push({ table: 'race_meetings', where: `date >= '${since}'` });
+      plan.push({ table: 'race_meetings', where: `date >= '${since}' AND ${HK_VENUE_FILTER}` });
     }
-    plan.push({ table: 'entries_upcoming', where: `race_date >= '${since}'` });
+    plan.push({ table: 'entries_upcoming', where: `race_date >= '${since}' AND ${HK_VENUE_FILTER}` });
   }
 
   if (wantOdds) {

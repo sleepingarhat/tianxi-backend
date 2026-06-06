@@ -31,9 +31,22 @@
     const sourceCommit = process.env.GITHUB_SHA ?? null;
 
     const api = new HorseRacingAPI();
-    const meetings: any[] = await api.getAllRaces().catch(() => null as any);
-    if (!meetings || !Array.isArray(meetings) || !meetings.length) {
+    const allMeetings: any[] = await api.getAllRaces().catch(() => null as any);
+    if (!allMeetings || !Array.isArray(allMeetings) || !allMeetings.length) {
       console.error('[racecard] getAllRaces returned empty — no active meeting');
+      process.exit(0);
+    }
+
+    // HK-only source guard: HKJC getAllRaces() also returns overseas / simulcast
+    // meetings (venueCode S1/S2/…). This engine covers ONLY Sha Tin (ST) and
+    // Happy Valley (HV). Overseas cards must never be scraped — otherwise the
+    // "next meeting = meetings[0]" auto-detect grabs an overseas card and starves
+    // the real local race day (2026-06-06 S2 crowded out the real 6/7 ST card).
+    const HK_VENUES = new Set(['ST', 'HV']);
+    const meetings = allMeetings.filter((m: any) => HK_VENUES.has((m.venueCode ?? '').toUpperCase()));
+    if (!meetings.length) {
+      const avail = allMeetings.map((m: any) => `${m.date}@${m.venueCode}`).join(', ');
+      console.error(`[racecard] no active HK (ST/HV) meeting — skipping. Available (non-HK): ${avail}`);
       process.exit(0);
     }
 
