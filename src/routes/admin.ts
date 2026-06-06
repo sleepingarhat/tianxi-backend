@@ -854,6 +854,7 @@ adminRoutes.get('/api/entries-upcoming-export', async (c) => {
       LEFT JOIN race_meetings m ON m.date = e.race_date AND m.venue = e.venue
       LEFT JOIN races r ON r.meeting_id = m.id AND r.race_number = e.race_number
      WHERE e.race_date BETWEEN ? AND ?
+       AND e.venue IN ('ST','HV')
        AND (e.priority_order IS NULL OR e.priority_order = '' OR e.priority_order = '正選')
      ORDER BY e.race_date, e.venue, e.race_number, e.horse_number
   `).bind(from, to).all<any>().catch(() => ({ results: [] as any[] }));

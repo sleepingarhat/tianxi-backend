@@ -33,7 +33,9 @@ meetingsRoutes.get('/', async (c) => {
     // unconditionally. (Old rule required a sibling meeting with MORE races,
     // which failed when the real same-date meeting was still upcoming with
     // total_races=NULL.)
-    'AND NOT (m.total_races IS NOT NULL AND m.total_races > 0 AND m.total_races < 4)';
+    'AND NOT (m.total_races IS NOT NULL AND m.total_races > 0 AND m.total_races < 4) ' +
+    // HK-only: never list overseas/simulcast venues (S1, S2, …). HK uses ST/HV.
+    "AND m.venue IN ('ST','HV')";
   const params: unknown[] = [];
 
   if (from) {

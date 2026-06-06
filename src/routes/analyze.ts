@@ -464,7 +464,7 @@ export async function computeHitRateStats(db: any, date: string, engine: EloEngi
   | { error: string; status: number }
   | { meeting: any; races: any[]; summary: any }
 > {
-  const meeting = await db.prepare(`SELECT m.* FROM race_meetings m WHERE m.date = ? ORDER BY (SELECT COUNT(*) FROM races r WHERE r.meeting_id = m.id) DESC, m.id LIMIT 1`).bind(date).first<any>().catch(() => null);
+  const meeting = await db.prepare(`SELECT m.* FROM race_meetings m WHERE m.date = ? AND m.venue IN ('ST','HV') ORDER BY (SELECT COUNT(*) FROM races r WHERE r.meeting_id = m.id) DESC, m.id LIMIT 1`).bind(date).first<any>().catch(() => null);
   if (!meeting) return { error: `${date} 賽馬日記錄不存在`, status: 404 };
   const { results: entries } = await db.prepare(
     `SELECT r.race_number, rr.horse_number, rr.horse_id, rr.draw, rr.actual_weight,
@@ -1991,10 +1991,10 @@ analyzeRoutes.get('/factors', (c) => {
         // causing "排位表無資料" for already-raced dates. Now picks next upcoming
         // meeting and lets the entries-empty fallback below give a clearer message.
         let targetDate: string | null = await db.prepare(
-          `SELECT MIN(date) FROM race_meetings WHERE date >= ?`
+          `SELECT MIN(date) FROM race_meetings WHERE date >= ? AND venue IN ('ST','HV')`
         ).bind(todayStr).first<string>('MIN(date)').catch(() => null);
         if (!targetDate) {
-          targetDate = await db.prepare(`SELECT MAX(date) FROM race_meetings`).first<string>('MAX(date)').catch(() => null);
+          targetDate = await db.prepare(`SELECT MAX(date) FROM race_meetings WHERE venue IN ('ST','HV')`).first<string>('MAX(date)').catch(() => null);
         }
         if (!targetDate) return { error: '賽馬日記錄不存在', status: 404 };
 
@@ -2016,12 +2016,13 @@ analyzeRoutes.get('/factors', (c) => {
             meeting = await db.prepare(
               `SELECT m.* FROM race_meetings m
                 WHERE m.date = ?
+                  AND m.venue IN ('ST','HV')
                   AND EXISTS (SELECT 1 FROM entries_upcoming e WHERE e.race_date = m.date AND e.venue = m.venue AND e.race_number > 0)
                 ORDER BY m.id LIMIT 1`
             ).bind(targetDate).first<any>().catch(() => null);
           }
           if (!meeting) {
-            meeting = await db.prepare(`SELECT m.* FROM race_meetings m WHERE m.date = ? ORDER BY (SELECT COUNT(*) FROM races r WHERE r.meeting_id = m.id) DESC, m.id LIMIT 1`).bind(targetDate).first<any>().catch(() => null);
+            meeting = await db.prepare(`SELECT m.* FROM race_meetings m WHERE m.date = ? AND m.venue IN ('ST','HV') ORDER BY (SELECT COUNT(*) FROM races r WHERE r.meeting_id = m.id) DESC, m.id LIMIT 1`).bind(targetDate).first<any>().catch(() => null);
           }
           if (!meeting) return { error: `${targetDate} 賽馬日記錄不存在`, status: 404 };
 
@@ -2416,7 +2417,7 @@ analyzeRoutes.get('/factors', (c) => {
           const date = c.req.query('date');
           if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return c.json({ error: '請提供 YYYY-MM-DD 格式日期' }, 400);
           const engine: EloEngine = c.req.query('engine') === 'v11' ? 'v11' : 'v12';
-          const meeting = await db.prepare(`SELECT m.* FROM race_meetings m WHERE m.date = ? ORDER BY (SELECT COUNT(*) FROM races r WHERE r.meeting_id = m.id) DESC, m.id LIMIT 1`).bind(date).first<any>().catch(() => null);
+          const meeting = await db.prepare(`SELECT m.* FROM race_meetings m WHERE m.date = ? AND m.venue IN ('ST','HV') ORDER BY (SELECT COUNT(*) FROM races r WHERE r.meeting_id = m.id) DESC, m.id LIMIT 1`).bind(date).first<any>().catch(() => null);
           if (!meeting) return c.json({ error: `${date} 賽馬日記錄不存在` }, 404);
           // Try entries_upcoming first (works for upcoming dates)
           const { results: euRows } = await db.prepare(
