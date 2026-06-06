@@ -2048,7 +2048,7 @@ analyzeRoutes.get('/factors', (c) => {
                      e.distance, e.track, e.course, e.race_class,
                      h.name_ch, h.name_en
                FROM entries_upcoming e LEFT JOIN horses h ON h.id = e.horse_id
-               WHERE e.race_date = ? AND e.race_number > 0
+               WHERE e.race_date = ? AND e.venue IN ('ST','HV') AND e.race_number > 0
                ORDER BY e.race_number, e.horse_number`;
           const stmt = withVenue ? db.prepare(q).bind(targetDate, meeting.venue) : db.prepare(q).bind(targetDate);
           const { results } = await stmt.all<any>().catch(() => ({ results: [] as any[] }));
@@ -2427,7 +2427,7 @@ analyzeRoutes.get('/factors', (c) => {
                     e.distance, e.track, e.course, e.race_class,
                     h.name_ch, h.name_en
              FROM entries_upcoming e LEFT JOIN horses h ON h.id = e.horse_id
-             WHERE e.race_date = ? AND e.race_number > 0
+             WHERE e.race_date = ? AND e.venue IN ('ST','HV') AND e.race_number > 0
              ORDER BY e.race_number, e.horse_number`
           ).bind(date).all<any>().catch(() => ({ results: [] as any[] }));
           let entries = euRows ?? [];

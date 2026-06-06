@@ -79,13 +79,13 @@ meetingsRoutes.get('/next', async (c) => {
   const today = new Date().toISOString().split('T')[0];
 
   let meeting = await c.env.DB.prepare(
-    'SELECT * FROM race_meetings WHERE date >= ? ORDER BY date ASC LIMIT 1'
+    "SELECT * FROM race_meetings WHERE date >= ? AND venue IN ('ST','HV') ORDER BY date ASC LIMIT 1"
   ).bind(today).first<RaceMeetingRow>();
 
   let fallback = false;
   if (!meeting) {
     meeting = await c.env.DB.prepare(
-      'SELECT * FROM race_meetings ORDER BY date DESC LIMIT 1'
+      "SELECT * FROM race_meetings WHERE venue IN ('ST','HV') ORDER BY date DESC LIMIT 1"
     ).first<RaceMeetingRow>();
     fallback = true;
   }
@@ -134,7 +134,7 @@ meetingsRoutes.get('/:date', async (c) => {
       `SELECT rm.*, COUNT(r.id) AS _race_count
          FROM race_meetings rm
          LEFT JOIN races r ON r.meeting_id = rm.id
-        WHERE rm.date = ?
+        WHERE rm.date = ? AND rm.venue IN ('ST','HV')
         GROUP BY rm.id
         ORDER BY _race_count DESC, rm.id DESC
         LIMIT 1`
@@ -223,7 +223,7 @@ meetingsRoutes.get('/next/upcoming', async (c) => {
   const today = new Date().toISOString().split('T')[0];
 
   const meeting = await c.env.DB.prepare(
-    'SELECT * FROM race_meetings WHERE date >= ? ORDER BY date ASC LIMIT 1'
+    "SELECT * FROM race_meetings WHERE date >= ? AND venue IN ('ST','HV') ORDER BY date ASC LIMIT 1"
   ).bind(today).first<RaceMeetingRow>();
 
   if (!meeting) {
@@ -247,11 +247,11 @@ meetingsRoutes.get('/smart/current', async (c) => {
   const today = new Date().toISOString().split('T')[0];
 
   const upcoming = await c.env.DB.prepare(
-    'SELECT * FROM race_meetings WHERE date >= ? ORDER BY date ASC LIMIT 1'
+    "SELECT * FROM race_meetings WHERE date >= ? AND venue IN ('ST','HV') ORDER BY date ASC LIMIT 1"
   ).bind(today).first<RaceMeetingRow>();
 
   const latest = await c.env.DB.prepare(
-    'SELECT * FROM race_meetings WHERE date < ? ORDER BY date DESC LIMIT 1'
+    "SELECT * FROM race_meetings WHERE date < ? AND venue IN ('ST','HV') ORDER BY date DESC LIMIT 1"
   ).bind(today).first<RaceMeetingRow>();
 
   const pick = upcoming ?? latest;
