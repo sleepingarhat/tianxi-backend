@@ -240,7 +240,7 @@ export const analyzeRoutes = new Hono<{ Bindings: Env }>();
        FROM race_meetings m
        JOIN races r ON r.meeting_id = m.id
        JOIN race_results rr ON rr.race_id = r.id
-       WHERE m.date = ? AND rr.finishing_position > 0`
+       WHERE m.date = ? AND m.venue IN ('ST','HV') AND rr.finishing_position > 0`
     ).bind(date).all<any>().catch(() => ({ results: [] as any[] }));
     if (!actuals?.length) return { updated: 0, races: 0 };
     const stmts: D1PreparedStatement[] = [];
@@ -479,7 +479,7 @@ export async function computeHitRateStats(db: any, date: string, engine: EloEngi
      LEFT JOIN horses h ON h.id = rr.horse_id
      LEFT JOIN jockeys j ON j.id = rr.jockey_id
      LEFT JOIN trainers t ON t.id = rr.trainer_id
-     WHERE rm.date = ?
+     WHERE rm.date = ? AND rm.venue IN ('ST','HV')
      ORDER BY r.race_number, rr.horse_number`
   ).bind(date).all<any>().catch(() => ({ results: [] as any[] }));
   if (!entries?.length) return { error: `${date} 賽果無資料 — 可能為未來賽事或結果未同步`, status: 404 };
@@ -489,7 +489,7 @@ export async function computeHitRateStats(db: any, date: string, engine: EloEngi
      JOIN races r ON r.id = rr.race_id
      JOIN race_meetings rm ON rm.id = r.meeting_id
      LEFT JOIN horses h ON h.id = rr.horse_id
-     WHERE rm.date = ? AND rr.finishing_position IS NOT NULL AND rr.finishing_position > 0
+     WHERE rm.date = ? AND rm.venue IN ('ST','HV') AND rr.finishing_position IS NOT NULL AND rr.finishing_position > 0
      ORDER BY r.race_number, rr.finishing_position`
   ).bind(date).all<any>().catch(() => ({ results: [] as any[] }));
   const actualByRace = new Map<number, any[]>();
@@ -661,7 +661,7 @@ analyzeRoutes.post('/', async (c) => {
       SELECT r.*, rm.date, rm.venue, rm.track_condition, rm.weather
       FROM races r
       JOIN race_meetings rm ON rm.id = r.meeting_id
-      WHERE r.id = ?
+      WHERE r.id = ? AND rm.venue IN ('ST','HV')
     `).bind(raceId).first<any>();
 
     if (!race) {
@@ -1092,7 +1092,7 @@ async function computeComposite(
   const raceCtx = await db.prepare(`
     SELECT r.distance, r.going, rm.venue
     FROM races r JOIN race_meetings rm ON rm.id = r.meeting_id
-    WHERE r.id = ?
+    WHERE r.id = ? AND rm.venue IN ('ST','HV')
   `).bind(raceId).first<any>();
   const raceDistance: number | null = raceCtx?.distance ?? null;
   const raceGoing: string | null = raceCtx?.going ?? null;
@@ -1309,7 +1309,7 @@ analyzeRoutes.get('/top-picks', async (c) => {
   const race = await c.env.DB.prepare(`
     SELECT r.*, rm.date, rm.venue, rm.track_condition
     FROM races r JOIN race_meetings rm ON rm.id = r.meeting_id
-    WHERE r.id = ?
+    WHERE r.id = ? AND rm.venue IN ('ST','HV')
   `).bind(raceId).first<any>();
   if (!race) return c.json({ error: '找不到該場賽事' }, 404);
 
@@ -1387,7 +1387,7 @@ analyzeRoutes.get('/explain', async (c) => {
   if (!raceId || !horseId) return c.json({ error: '請提供 raceId + horseId' }, 400);
 
   const race = await c.env.DB.prepare(`
-    SELECT r.*, rm.date FROM races r JOIN race_meetings rm ON rm.id = r.meeting_id WHERE r.id = ?
+    SELECT r.*, rm.date FROM races r JOIN race_meetings rm ON rm.id = r.meeting_id WHERE r.id = ? AND rm.venue IN ('ST','HV')
   `).bind(raceId).first<any>();
   if (!race) return c.json({ error: '找不到該場賽事' }, 404);
 
@@ -2010,7 +2010,7 @@ analyzeRoutes.get('/factors', (c) => {
           // Falls back to most-races meeting. ?venue=HV forces a specific venue.
           let meeting: any = null;
           if (forceVenue) {
-            meeting = await db.prepare(`SELECT m.* FROM race_meetings m WHERE m.date = ? AND m.venue = ? LIMIT 1`).bind(targetDate, forceVenue).first<any>().catch(() => null);
+            meeting = await db.prepare(`SELECT m.* FROM race_meetings m WHERE m.date = ? AND m.venue = ? AND m.venue IN ('ST','HV') LIMIT 1`).bind(targetDate, forceVenue).first<any>().catch(() => null);
           }
           if (!meeting) {
             meeting = await db.prepare(
@@ -2387,6 +2387,7 @@ analyzeRoutes.get('/factors', (c) => {
           const { results } = await c.env.DB.prepare(
             `SELECT DISTINCT m.date FROM race_meetings m
                WHERE m.date >= ?
+                 AND m.venue IN ('ST','HV')
                  AND EXISTS (SELECT 1 FROM races r JOIN race_results rr ON rr.race_id = r.id WHERE r.meeting_id = m.id AND rr.finishing_position > 0)
                ORDER BY m.date ASC`
           ).bind(since).all<{ date: string }>();
@@ -2447,7 +2448,7 @@ analyzeRoutes.get('/factors', (c) => {
                LEFT JOIN horses h ON h.id = rr.horse_id
                LEFT JOIN jockeys j ON j.id = rr.jockey_id
                LEFT JOIN trainers t ON t.id = rr.trainer_id
-               WHERE rm.date = ?
+               WHERE rm.date = ? AND rm.venue IN ('ST','HV')
                ORDER BY r.race_number, rr.horse_number`
             ).bind(date).all<any>().catch(() => ({ results: [] as any[] }));
             entries = rrRows ?? [];
@@ -2662,7 +2663,7 @@ analyzeRoutes.get('/factors', (c) => {
           const datesQ = await db.prepare(
             "SELECT DISTINCT rm.date AS date, rm.venue AS venue " +
             "FROM race_meetings rm JOIN races r ON r.meeting_id = rm.id JOIN race_results rr ON rr.race_id = r.id " +
-            "WHERE rm.date >= ? AND rm.date < ? AND rr.finishing_position IS NOT NULL " +
+            "WHERE rm.date >= ? AND rm.date < ? AND rm.venue IN ('ST','HV') AND rr.finishing_position IS NOT NULL " +
             "ORDER BY rm.date DESC"
           ).bind(cutoff, today).all<any>().catch(() => ({ results: [] as any[] }));
           const meetingDates: any[] = (datesQ.results as any[]) || [];
@@ -2745,7 +2746,7 @@ analyzeRoutes.get('/factors', (c) => {
           const datesQ = await db.prepare(
             "SELECT DISTINCT rm.date AS date FROM race_meetings rm " +
             "JOIN races r ON r.meeting_id = rm.id JOIN race_results rr ON rr.race_id = r.id " +
-            "WHERE rm.date >= ? AND rm.date < ? AND rr.finishing_position IS NOT NULL " +
+            "WHERE rm.date >= ? AND rm.date < ? AND rm.venue IN ('ST','HV') AND rr.finishing_position IS NOT NULL " +
             "ORDER BY rm.date DESC"
           ).bind(cutoff, today).all<any>().catch(() => ({ results: [] as any[] }));
           const dates: string[] = ((datesQ.results as any[]) || []).map((m: any) => m.date as string);
