@@ -64,11 +64,12 @@ FEATURE_COLS = [
       # Smoothed progeny top3-rate as-of race date (sire general / sire at this
       # distance band / damsire). Missing pedigree → -1.0 sentinel via fillna.
       "sire_top3_sm", "sire_dist_top3_sm", "damsire_top3_sm",
-      # Stage 11 (NEW v3.2 ⑤ gear): equipment change-state parsed from the HKJC
-      # gear string (first-time / removed / recently-changed flags + blinkers).
-      # Leak-safe (declared on racecard pre-race); no historical join — the
-      # markers (B1/TT1/XB-/B2) encode the change in-string.
-      "gear_first_n", "gear_off_n", "gear_changed", "gear_blinkers",
+      # ⑤ gear/equipment-change (gear_first_n/off_n/changed/blinkers) is DORMANT:
+      # walk-forward A/B (1299 races, 2024-11→2026-04) regressed top1 -0.15 /
+      # top2 -0.85 / top3 -0.39pp (only top4 +0.46). Columns still emitted by
+      # dump-features.ts (leak-safe, free) — re-add the names here to re-test a
+      # future interaction, but do NOT promote to predict_upcoming.py without a
+      # walk-forward lift. (Same verdict as ①試閘 / ③場內相對.)
       # going_code is appended below as a categorical feature.
   ]
 
