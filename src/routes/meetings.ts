@@ -105,7 +105,7 @@ meetingsRoutes.get('/next', async (c) => {
     venueName: meeting.venue === 'ST' ? '沙田' : meeting.venue === 'HV' ? '跑馬地' : meeting.venue,
     trackCondition: meeting.track_condition,
     weather: meeting.weather,
-    totalRaces: racesWithHorses.length || meeting.total_races,
+    totalRaces: (races ?? []).length || meeting.total_races,
     fallback,
     races: (races ?? []).map((r) => ({
       id: r.id,
