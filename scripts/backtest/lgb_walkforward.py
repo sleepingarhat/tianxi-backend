@@ -58,10 +58,15 @@ FEATURE_COLS = [
       # See predict_upcoming.py FEAT_COLS comment for rationale. beaten_lengths
       # excluded — it's a future regression-head label, not a feature.
       "sect_n", "sect_early_avg", "sect_late_kick",
-      # Stage 12 (NEW v3.2 ⑥ pace/走位): sectional-SPEED z (time-based, leak-safe
-      # within each past race's field; -9 sentinel = no data). Genuinely NEW raw
-      # signal — uses section_time, which the position-based sect_* above discard.
-      "sect_early_z", "sect_fin_z",
+      # ⑥ sectional-SPEED z (sect_early_z / sect_fin_z — first/final section TIME
+      # z-scored within each PAST race's field, leak-safe; -9 sentinel=no data) is
+      # DORMANT: two walk-forward A/B pairs (1299 races, 2024-11→2026-04) gave a
+      # NON-reproducible result — at retrain=50 top1 +0.62 / top3 +0.31, but at
+      # retrain=25 the signs FLIPPED to top1 -0.23 / top3 -0.77 (all within ~1 SE
+      # ≈1.15pp; only top4 consistently up +0.23/+0.92). High importance (~830/799)
+      # but NO robust hit-rate lift → NOT promoted to predict_upcoming.py. Columns
+      # still emitted by dump-features.ts (leak-safe, free) — re-add the two names
+      # here to re-test. (4th pure-feature non-win after ①試閘 / ③場內相對 / ⑤gear.)
       "is_sprint", "is_middle", "is_distance",
       "draw_x_sprint", "paceclash_x_distance",
       # Stage 10 (NEW v3.2 ④ pedigree): leak-safe target-encoded breeding signal.
