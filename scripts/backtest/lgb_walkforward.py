@@ -73,6 +73,12 @@ FEATURE_COLS = [
       # Smoothed progeny top3-rate as-of race date (sire general / sire at this
       # distance band / damsire). Missing pedigree → -1.0 sentinel via fillna.
       "sire_top3_sm", "sire_dist_top3_sm", "damsire_top3_sm",
+      # Stage 13 (NEW v3.2 ⑦ hard-luck): comment-derived trouble signal —
+      # recency-weighted A受阻 + B走大疊 + C出閘失準 over last 8 starts (cmt_n =
+      # history depth; -1 = no history). UNDER TEST via walk-forward A/B: drop the
+      # four names below with --exclude for the baseline run. Promote to
+      # predict_upcoming.py only on a double-confirmed (two retrain cadences) lift.
+      "cmt_n", "cmt_trouble", "cmt_wide", "cmt_badstart",
       # ⑤ gear/equipment-change (gear_first_n/off_n/changed/blinkers) is DORMANT:
       # walk-forward A/B (1299 races, 2024-11→2026-04) regressed top1 -0.15 /
       # top2 -0.85 / top3 -0.39pp (only top4 +0.46). Columns still emitted by
