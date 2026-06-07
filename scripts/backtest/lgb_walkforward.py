@@ -92,6 +92,11 @@ FEATURE_COLS = [
       # future interaction, but do NOT promote to predict_upcoming.py without a
       # walk-forward lift. (Same verdict as ①試閘 / ③場內相對.)
       # going_code is appended below as a categorical feature.
+      # Stage 14/15/16 (NEW v3.2 ⑧⑨⑩): body-weight Δ, continuous rating, injury
+      # layoff. Under A/B evaluation — exclude via --exclude to form the control arm.
+      "body_wt", "body_wt_delta", "body_wt_dev5",
+      "rating_now", "rating_delta", "rating_slope",
+      "inj_n", "inj_days_since", "inj_returning",
   ]
 
 
