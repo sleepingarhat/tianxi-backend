@@ -66,6 +66,7 @@ jobs:
             data
             horses/form_records
             horses/profiles
+            horses/injury
             last_sync.json
           sparse-checkout-cone-mode: false
 
@@ -99,7 +100,7 @@ jobs:
           DATA_SHA=$(cd hkjc-data && git rev-parse HEAD)
           # Hash backend ingest+ELO scripts so any code change invalidates cache
           SCRIPTS_HASH=$(find tianxi-backend/scripts/ingest tianxi-backend/scripts/elo tianxi-backend/scripts/import-csv.ts tianxi-backend/src/db/schema.sql -type f 2>/dev/null | sort | xargs sha256sum | sha256sum | head -c12)
-          KEY="lgb-db-${DATA_SHA:0:12}-${SCRIPTS_HASH}"
+          KEY="lgb-db-inj-${DATA_SHA:0:12}-${SCRIPTS_HASH}"
           echo "key=$KEY" >> $GITHUB_OUTPUT
           echo "Cache key: $KEY"
 
@@ -135,6 +136,14 @@ jobs:
           npx tsx scripts/ingest/index.ts pedigree --data-dir=../hkjc-data --db=./bulk-local.db
           ls -lh bulk-local.db
 
+      - name: Ingest horse injury (⑩ layoff → horse_injury)
+        if: steps.db-cache.outputs.cache-hit != 'true'
+        working-directory: tianxi-backend
+        run: |
+          echo '=== STEP 2c: ingest/index.ts injury (horse_injury for LGB ⑩) ==='
+          npx tsx scripts/ingest/index.ts injury --data-dir=../hkjc-data --db=./bulk-local.db
+          ls -lh bulk-local.db
+
       - name: Compute ELO ratings
         if: steps.db-cache.outputs.cache-hit != 'true'
         working-directory: tianxi-backend
@@ -164,6 +173,13 @@ jobs:
           echo "horse_pedigree rows: $PED"
           if [ "${{ steps.db-cache.outputs.cache-hit }}" != 'true' ] && [ "${PED:-0}" -lt 1000 ]; then
             echo "FATAL: horse_pedigree has $PED rows (<1000) — pedigree ingest/sparse-checkout broken"; exit 1
+          fi
+          # ⑩ injury guard: horse_injury must be non-empty on a fresh build (sparse-checkout
+          # + STEP 2c required; absence → every ⑩ feature silently sentinel — see tx-sparse-checkout-ci).
+          INJ=$(sqlite3 bulk-local.db "SELECT COUNT(*) FROM horse_injury;" 2>/dev/null || echo 0)
+          echo "horse_injury rows: $INJ"
+          if [ "${{ steps.db-cache.outputs.cache-hit }}" != 'true' ] && [ "${INJ:-0}" -lt 1 ]; then
+            echo "FATAL: horse_injury has $INJ rows — injury ingest/sparse-checkout broken"; exit 1
           fi
 
 
