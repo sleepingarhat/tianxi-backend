@@ -782,7 +782,8 @@
       // Stage 11 (NEW v3.2 ⑤): gear/equipment change (HKJC markers, leak-safe)
       'gear_first_n','gear_off_n','gear_changed','gear_blinkers',
       // Stage 13 (NEW v3.2 ⑦): comment-derived hard-luck (recency-weighted over
-      // last 8 starts; -1 sentinel = no history). A受阻 + B走大疊 + C出閘失準.
+      // last 8 starts; cmt_n = history depth (0 = no history); the three fraction
+      // cols use the -1 sentinel for no history). A受阻 + B走大疊 + C出閘失準.
       'cmt_n','cmt_trouble','cmt_wide','cmt_badstart',
       'finishing_position','is_top1','is_top3',
     ];
