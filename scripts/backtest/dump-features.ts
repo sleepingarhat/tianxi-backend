@@ -187,6 +187,33 @@
       JOIN race_meetings rm ON rm.id = r.meeting_id
      WHERE rr.horse_id = ? AND rm.date < ?`);
 
+  // ── Stage 14 (NEW v3.2 ⑧): horse BODY weight (race_results.declared_weight,
+  //    ~1000lbs; distinct from actual_weight = handicap). Last up to 5 prior
+  //    body weights, leak-safe rm.date < current. prev = most-recent. ─────
+  const qBodyWtHist = db.prepare(`
+    SELECT rr.declared_weight AS w
+      FROM race_results rr
+      JOIN races r ON r.id = rr.race_id
+      JOIN race_meetings rm ON rm.id = r.meeting_id
+     WHERE rr.horse_id = ?
+       AND rm.date < ?
+       AND rr.declared_weight IS NOT NULL
+       AND rr.declared_weight > 0
+     ORDER BY rm.date DESC LIMIT 5`);
+
+  // ── Stage 16 (NEW v3.2 ⑩): injury / vet layoff (horse_injury; horse_id is the
+  //    RAW code A001 → bridge via horseCode, like form/class). Leak-safe:
+  //    injury_date < race date. Table may be absent on un-wired builds. ──────
+  const injExists = !!db.prepare(
+    "SELECT name FROM sqlite_master WHERE type='table' AND name='horse_injury'").get();
+  if (!injExists) console.error('[dump-features] WARN: horse_injury table absent → ⑩ injury features all sentinel');
+  const qInjuryHistory = injExists ? db.prepare(`
+    SELECT injury_date AS idate, resolution_date AS rdate
+      FROM horse_injury
+     WHERE horse_id = ?
+       AND injury_date IS NOT NULL AND injury_date != ''
+       AND injury_date < ?`) : null;
+
   // ── Stage 10 (NEW v3.2 ④): pedigree target-encoded progeny performance ──
   // Leak-safe: progeny races strictly BEFORE the current race date. Keyed by
   // race_results.horse_id (prefixed 'horse_'+code) via the horse_pedigree table
@@ -387,6 +414,16 @@
         FROM horse_form_records
        WHERE horse_id = ?
          AND race_class IS NOT NULL AND race_class != ''
+         AND race_date IS NOT NULL AND race_date != ''`);
+    // ── Stage 15 (NEW v3.2 ⑨): continuous HKJC rating (horse_form_records.rating,
+    //    finer than the class bucket). All rated form lines; sort by normDate.
+    //    rating_now = rating as-of race (most recent <= date), Δ vs prior, slope
+    //    over last 4. Leak-safe: rating is published pre-race. ────────────
+    const qRatingHistory = db.prepare(`
+      SELECT rating AS rt, race_date AS dt
+        FROM horse_form_records
+       WHERE horse_id = ?
+         AND rating IS NOT NULL AND rating > 0
          AND race_date IS NOT NULL AND race_date != ''`);
     // Normalize date: accept DD/MM/YYYY → YYYY-MM-DD; pass through ISO.
     function normDate(s: string): string | null {
@@ -631,6 +668,7 @@
   type RunnerRow = {
     race_id: string; horse_id: string; jockey_id: string | null; trainer_id: string | null;
     finishing_position: number; draw: number | null; actual_weight: number | null; win_odds: number | null;
+    declared_weight: number | null;
     lbw: string | null;
     gear: string | null;
   };
@@ -684,6 +722,7 @@
         finishing_position: 0,  // unknown — placeholder
         draw: e.draw != null ? Number(e.draw) : null,
         actual_weight: e.actual_weight != null ? Number(e.actual_weight) : null,
+        declared_weight: e.declared_weight != null ? Number(e.declared_weight) : null,  // ⑧ body weight (null until racecard export carries it)
         win_odds: null,
         lbw: null,  // unknown — race hasn't run
         gear: e.gear ?? null,  // ⑤ equipment (export must include gear; null until then)
@@ -705,7 +744,7 @@
 
     qRunners = db.prepare(`
       SELECT race_id, horse_id, jockey_id, trainer_id, finishing_position,
-             draw, actual_weight, win_odds, lbw, gear
+             draw, actual_weight, declared_weight, win_odds, lbw, gear
         FROM race_results
        WHERE race_id = ?
          AND finishing_position BETWEEN 1 AND 98`);
@@ -785,6 +824,12 @@
       // last 8 starts; cmt_n = history depth (0 = no history); the three fraction
       // cols use the -1 sentinel for no history). A受阻 + B走大疊 + C出閘失準.
       'cmt_n','cmt_trouble','cmt_wide','cmt_badstart',
+      // Stage 14 (NEW v3.2 ⑧): horse body weight (declared_weight) level/Δ/dev
+      'body_wt','body_wt_delta','body_wt_dev5',
+      // Stage 15 (NEW v3.2 ⑨): continuous HKJC rating level/Δ/slope
+      'rating_now','rating_delta','rating_slope',
+      // Stage 16 (NEW v3.2 ⑩): injury layoff — count / days-since / fresh-return
+      'inj_n','inj_days_since','inj_returning',
       'finishing_position','is_top1','is_top3',
     ];
   writeFileSync(OUT, HEADER.join(',') + '\n');
@@ -801,6 +846,7 @@
   let gearChangedN = 0, gearBlinkersN = 0;  // ⑤ coverage guard (silent-regression detector)
   let sectSpdN = 0;  // ⑥ coverage guard: rows with real (non-sentinel) sectional-speed z
   let cmtHistN = 0, cmtTroubleN = 0;  // ⑦ coverage guard: rows with comment history / trouble flag
+  let bodyWtN = 0, ratingHistN = 0, injHistN = 0;  // ⑧⑨⑩ coverage guards
   function flush() { if (buf.length) { appendFileSync(OUT, buf.join('')); buf = []; } }
 
   for (let i = 0; i < races.length; i++) {
@@ -989,6 +1035,58 @@
       if (gearF.changed) gearChangedN++;
       if (gearF.blinkers) gearBlinkersN++;
 
+      // Stage 14 (⑧): body-weight level + change vs last start + dev from recent norm
+      const bwNow = (r.declared_weight != null && r.declared_weight > 0) ? r.declared_weight : null;
+      const bwHist = qBodyWtHist.all(r.horse_id, meta.date) as { w: number }[];
+      let bodyWt: number = bwNow ?? -1;
+      let bodyWtDelta: number = -999, bodyWtDev5: number = -999;
+      if (bwNow != null && bwHist.length > 0) {
+        bodyWtDelta = bwNow - bwHist[0].w;
+        const avg5 = bwHist.reduce((s, x) => s + x.w, 0) / bwHist.length;
+        bodyWtDev5 = bwNow - avg5;
+      }
+      if (bwNow != null) bodyWtN++;
+
+      // Stage 15 (⑨): continuous rating now / Δ / slope (as-of, leak-safe)
+      let ratingNow: number = -1, ratingDelta: number = -999, ratingSlope: number = -999;
+      if (horseCode) {
+        const rh = (qRatingHistory.all(horseCode) as { rt: number; dt: string }[])
+          .map(x => ({ rt: x.rt, iso: normDate(x.dt) }))
+          .filter(x => x.iso && x.iso <= meta.date) as { rt: number; iso: string }[];
+        rh.sort((a, b) => a.iso < b.iso ? -1 : a.iso > b.iso ? 1 : 0);
+        if (rh.length > 0) {
+          ratingNow = rh[rh.length - 1].rt;
+          if (rh.length >= 2) {
+            ratingDelta = ratingNow - rh[rh.length - 2].rt;
+            const ys = rh.slice(-4).map(x => x.rt);
+            const nR = ys.length;
+            const xs = ys.map((_, ix) => ix);
+            const xm = xs.reduce((a, b) => a + b, 0) / nR;
+            const ym = ys.reduce((a, b) => a + b, 0) / nR;
+            let numR = 0, denR = 0;
+            for (let k = 0; k < nR; k++) { numR += (xs[k] - xm) * (ys[k] - ym); denR += (xs[k] - xm) ** 2; }
+            ratingSlope = denR > 0 ? numR / denR : 0;
+          }
+          ratingHistN++;
+        }
+      }
+
+      // Stage 16 (⑩): injury layoff — career count, days since last injury, fresh return
+      let injN: number = 0, injDaysSince: number = -1, injReturning: number = 0;
+      if (injExists && qInjuryHistory && horseCode) {
+        const ih = qInjuryHistory.all(horseCode, meta.date) as { idate: string; rdate: string | null }[];
+        injN = ih.length;
+        if (ih.length > 0) {
+          let lastInj = '';
+          let lastRes: string | null = null;
+          for (const x of ih) { if (x.idate > lastInj) { lastInj = x.idate; lastRes = x.rdate; } }
+          injDaysSince = daysBetween(lastInj, meta.date);
+          const clearedRef = (lastRes && lastRes < meta.date) ? lastRes : lastInj;
+          if (daysBetween(clearedRef, meta.date) <= 120) injReturning = 1;
+          injHistN++;
+        }
+      }
+
       const row = [
           meta.id, meta.date, meta.venue, meta.race_number, meta.distance, meta.going, fieldSize,
           r.horse_id, r.jockey_id, r.trainer_id, r.draw, r.actual_weight, r.win_odds,
@@ -1010,6 +1108,9 @@
           sireTop3, sireDistTop3, damsireTop3,
           gearF.firstN, gearF.offN, gearF.changed, gearF.blinkers,
           cmt.n, cmt.trouble, cmt.wide, cmt.badstart,
+          bodyWt, bodyWtDelta, bodyWtDev5,
+          ratingNow, ratingDelta, ratingSlope,
+          injN, injDaysSince, injReturning,
           r.finishing_position,
           r.horse_id === top1Id ? 1 : 0,
           top3Set.has(r.horse_id) ? 1 : 0,
@@ -1039,6 +1140,21 @@
     console.error(`[dump-features] ⑦ hard-luck coverage: comment history present=${cmtHistN} (${cmtHistPct}%) · trouble-flagged=${cmtTroubleN} (${cmtTrbPct}%)`);
     if (!UPCOMING_MODE && cmtHistN === 0) {
       console.error('[dump-features] WARN: comment history ALL empty on historical dump → running_comments missing (sparse-checkout/import regression?)');
+    }
+    const bwPct = (100 * bodyWtN / written).toFixed(1);
+    console.error(`[dump-features] ⑧ body-weight coverage: present=${bodyWtN} (${bwPct}%)`);
+    if (!UPCOMING_MODE && bodyWtN === 0) {
+      console.error('[dump-features] WARN: body_wt ALL sentinel → race_results.declared_weight missing (import regression?)');
+    }
+    const rtPct = (100 * ratingHistN / written).toFixed(1);
+    console.error(`[dump-features] ⑨ rating coverage: history present=${ratingHistN} (${rtPct}%)`);
+    if (!UPCOMING_MODE && ratingHistN === 0) {
+      console.error('[dump-features] WARN: rating history ALL empty → horse_form_records.rating missing (ingest regression?)');
+    }
+    const injPct = (100 * injHistN / written).toFixed(1);
+    console.error(`[dump-features] ⑩ injury coverage: history present=${injHistN} (${injPct}%)`);
+    if (!UPCOMING_MODE && injExists && injHistN === 0) {
+      console.error('[dump-features] WARN: injury history ALL empty → horse_injury empty (sparse-checkout/ingest regression?)');
     }
   }
   db.close();
