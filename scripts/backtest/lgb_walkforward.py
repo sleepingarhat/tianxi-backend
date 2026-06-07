@@ -73,6 +73,18 @@ FEATURE_COLS = [
       # Smoothed progeny top3-rate as-of race date (sire general / sire at this
       # distance band / damsire). Missing pedigree → -1.0 sentinel via fillna.
       "sire_top3_sm", "sire_dist_top3_sm", "damsire_top3_sm",
+      # Stage 13 (⑦ hard-luck): comment-derived trouble signal (recency-weighted
+      # A受阻 + B走大疊 + C出閘失準 over last 8 starts; cmt_n=history depth, -1=none)
+      # is DORMANT: double-confirmed walk-forward A/B (1299 races, 2024-11→2026-04)
+      # REGRESSED the headline top1 at BOTH cadences (retrain=50 -0.08 / retrain=25
+      # -0.15); top2/top3 were mildly positive (+1.08/+1.54 and +0.92/+0.69) but all
+      # sub-noise (SE≈1.15pp) and top4 flipped (-0.54/+0.46). High importance
+      # (cmt_wide gain ~952) but NO robust top1 lift → NOT promoted to
+      # predict_upcoming.py. Columns still emitted by dump-features.ts (94.7%
+      # coverage, leak-safe, free) — re-add the four names here to re-test in a
+      # future interaction. (5th feature non-win after ①試閘/③場內相對/⑤gear/⑥sect-z;
+      # a genuinely-NEW signal that still cannot beat ELO+form+pedigree saturation.)
+      # "cmt_n", "cmt_trouble", "cmt_wide", "cmt_badstart",
       # ⑤ gear/equipment-change (gear_first_n/off_n/changed/blinkers) is DORMANT:
       # walk-forward A/B (1299 races, 2024-11→2026-04) regressed top1 -0.15 /
       # top2 -0.85 / top3 -0.39pp (only top4 +0.46). Columns still emitted by

@@ -354,6 +354,25 @@
        WHERE race_id = ? AND section_time IS NOT NULL
        GROUP BY section_number`);
 
+    // ── Stage 13 (NEW v3.2 ⑦ hard-luck): comment-derived trouble signal ─────
+    // running_comments (id, race_id, horse_id, comment_text, language) is
+    // populated by import-csv.ts from commentary_YYYY-MM-DD.csv (HKJC 沿途走勢
+    // 評述). '無特別報告' rows are SKIPPED at import → a clean run has NO comment
+    // row, so we spine on race_results (all real starts) and LEFT JOIN the
+    // comment; a null txt = a clean run, NOT missing history. Leak-safe: comments
+    // only exist for already-run PAST races (rm.date < meta.date). Same id
+    // derivation as sectionals (raceId()/horseId()) so the joins mirror qSectionals.
+    const qHorseComments = db.prepare(`
+      SELECT rm.date AS dt, rc.comment_text AS txt
+        FROM race_results rr
+        JOIN races r ON r.id = rr.race_id
+        JOIN race_meetings rm ON rm.id = r.meeting_id
+        LEFT JOIN running_comments rc
+               ON rc.race_id = rr.race_id AND rc.horse_id = rr.horse_id
+       WHERE rr.horse_id = ? AND rm.date < ?
+         AND rr.finishing_position > 0 AND rr.finishing_position < 99
+       ORDER BY rm.date DESC LIMIT 8`);
+
     // ── Stage 6 (NEW): class change — last race_class for horse ────────────
     // horse_form_records.race_class is text. Format varies:
     //   - bare digit "4"  (from form_records CSV col 9)
@@ -522,6 +541,48 @@
     const mean = (a: number[], na: number) =>
       a.length ? Math.round((a.reduce((x, y) => x + y, 0) / a.length) * 1000) / 1000 : na;
     return { early_z: mean(earlyZs, SECT_Z_NA), fin_z: mean(finZs, SECT_Z_NA), n: Math.max(earlyZs.length, finZs.length) };
+  }
+
+  // ── Stage 13 (NEW v3.2 ⑦ hard-luck): comment-derived trouble features ───
+  // Keyword sets over the HKJC 沿途走勢評述 (Traditional Chinese). Three signal
+  // families validated as market-underrated (at equal odds, trouble horses
+  // finish ~5-9pp worse on top3 → finishing position is a pessimistically-biased
+  // ability read → recent trouble = positive next-start signal):
+  //   A 受阻/不順 (blocked / interfered / checked)
+  //   B 走大疊/兜大圈 (forced wide → extra ground covered)
+  //   C 出閘失準 (slow / bumped start)
+  // Matched by substring (.includes). Good-start phrases like 出閘迅速 do NOT
+  // match the C set. Each is a per-race binary flag; we recency-weight over the
+  // horse's last 8 ACTUAL starts (linear weight n..1, most-recent highest).
+  const KW_TROUBLE  = ['受阻','阻礙','受擠','被困','受困','收慢','失位','走位不','碰撞','觸碰','受制','擠迫','閉塞','受影響'];
+  const KW_WIDE     = ['兜大圈','大外疊','走外疊','第三疊','第四疊','第五疊','三疊','四疊','向外斜'];
+  const KW_BADSTART = ['出閘普通','出閘僅','出閘緩','出閘慢','起步慢','留閘','起步時發生碰撞','出閘失','出閘後退'];
+  function hasAny(s: string, kws: string[]): boolean {
+    for (const k of kws) if (s.includes(k)) return true;
+    return false;
+  }
+  // rows ordered date DESC (most recent first), up to 8 real starts. txt is null
+  // for a clean ('無特別報告') run. Returns recency-weighted fraction of starts
+  // carrying each flag, plus n = number of starts considered. n=0 (no history) →
+  // '' sentinels (→ -1.0 via python fillna), distinct from a consistently-clean
+  // horse (n>0, fraction 0).
+  function commentProfile(rows: { dt: string; txt: string | null }[]):
+    { n: number; trouble: number | ''; wide: number | ''; badstart: number | '' } {
+    const n = rows.length;
+    if (!n) return { n: 0, trouble: '', wide: '', badstart: '' };
+    let wSum = 0, tA = 0, tB = 0, tC = 0;
+    for (let i = 0; i < n; i++) {
+      const w = n - i;                 // linear recency weight (most recent = n)
+      wSum += w;
+      const txt = rows[i].txt || '';
+      if (txt) {
+        if (hasAny(txt, KW_TROUBLE)) tA += w;
+        if (hasAny(txt, KW_WIDE)) tB += w;
+        if (hasAny(txt, KW_BADSTART)) tC += w;
+      }
+    }
+    const r = (x: number) => Math.round((x / wSum) * 1000) / 1000;
+    return { n, trouble: r(tA), wide: r(tB), badstart: r(tC) };
   }
   // From last-N running_positions: { early: mean first-sectional position, style: 1=leader/2=stalker/3=closer/0=unknown }
   function paceProfile(rps: string[]): { early: number | null; style: number } {
@@ -720,6 +781,9 @@
       'sire_top3_sm','sire_dist_top3_sm','damsire_top3_sm',
       // Stage 11 (NEW v3.2 ⑤): gear/equipment change (HKJC markers, leak-safe)
       'gear_first_n','gear_off_n','gear_changed','gear_blinkers',
+      // Stage 13 (NEW v3.2 ⑦): comment-derived hard-luck (recency-weighted over
+      // last 8 starts; -1 sentinel = no history). A受阻 + B走大疊 + C出閘失準.
+      'cmt_n','cmt_trouble','cmt_wide','cmt_badstart',
       'finishing_position','is_top1','is_top3',
     ];
   writeFileSync(OUT, HEADER.join(',') + '\n');
@@ -735,6 +799,7 @@
   let written = 0;
   let gearChangedN = 0, gearBlinkersN = 0;  // ⑤ coverage guard (silent-regression detector)
   let sectSpdN = 0;  // ⑥ coverage guard: rows with real (non-sentinel) sectional-speed z
+  let cmtHistN = 0, cmtTroubleN = 0;  // ⑦ coverage guard: rows with comment history / trouble flag
   function flush() { if (buf.length) { appendFileSync(OUT, buf.join('')); buf = []; } }
 
   for (let i = 0; i < races.length; i++) {
@@ -757,6 +822,8 @@
     const sectByHorse: Map<string, { n: number; early_avg: number | null; late_kick: number | null }> = new Map();
     // Stage 12 (NEW v3.2 ⑥): pre-pass sectional-speed z profiles (reuse sectRows)
     const sectSpeedByHorse: Map<string, { early_z: number; fin_z: number; n: number }> = new Map();
+    // Stage 13 (NEW v3.2 ⑦): pre-pass comment-derived hard-luck profiles
+    const cmtByHorse: Map<string, { n: number; trouble: number | ''; wide: number | ''; badstart: number | '' }> = new Map();
     for (const r of runners) {
       const rps = (qHorsePace.all(r.horse_id, meta.date) as { rp: string }[]).map(x => x.rp);
       const pp = paceProfile(rps);
@@ -764,6 +831,8 @@
       const sectRows = qSectionals.all(r.horse_id, meta.date) as { rid: string; sec: number; t: number | null; pos: number | null; dt: string }[];
       sectByHorse.set(r.horse_id, sectionalProfile(sectRows));
       sectSpeedByHorse.set(r.horse_id, sectionalSpeedProfile(sectRows));
+      const cmtRows = qHorseComments.all(r.horse_id, meta.date) as { dt: string; txt: string | null }[];
+      cmtByHorse.set(r.horse_id, commentProfile(cmtRows));
     }
     let raceNLeaders = 0, raceNClosers = 0;
     for (const v of paceByHorse.values()) {
@@ -869,6 +938,9 @@
       const sect = sectByHorse.get(r.horse_id)!;
       const sectSpd = sectSpeedByHorse.get(r.horse_id)!;
       if (sectSpd.n > 0) sectSpdN++;
+      const cmt = cmtByHorse.get(r.horse_id)!;
+      if (cmt.n > 0) cmtHistN++;
+      if (typeof cmt.trouble === 'number' && cmt.trouble > 0) cmtTroubleN++;
       const drawX = (r.draw != null && isSprint) ? r.draw : 0;
       const paceX = (paceClash != null && isDistance) ? paceClash : 0;
       const beatenLengths = r.finishing_position === 1
@@ -936,6 +1008,7 @@
           beatenLengths,
           sireTop3, sireDistTop3, damsireTop3,
           gearF.firstN, gearF.offN, gearF.changed, gearF.blinkers,
+          cmt.n, cmt.trouble, cmt.wide, cmt.badstart,
           r.finishing_position,
           r.horse_id === top1Id ? 1 : 0,
           top3Set.has(r.horse_id) ? 1 : 0,
@@ -959,6 +1032,12 @@
     console.error(`[dump-features] ⑥ sectional-speed coverage: sect z present=${sectSpdN} (${spdPct}%)`);
     if (!UPCOMING_MODE && sectSpdN === 0) {
       console.error('[dump-features] WARN: sectional-speed z ALL sentinel on historical dump → horse_sectional_times.section_time missing (sparse-checkout/import regression?)');
+    }
+    const cmtHistPct = (100 * cmtHistN / written).toFixed(1);
+    const cmtTrbPct = (100 * cmtTroubleN / written).toFixed(1);
+    console.error(`[dump-features] ⑦ hard-luck coverage: comment history present=${cmtHistN} (${cmtHistPct}%) · trouble-flagged=${cmtTroubleN} (${cmtTrbPct}%)`);
+    if (!UPCOMING_MODE && cmtHistN === 0) {
+      console.error('[dump-features] WARN: comment history ALL empty on historical dump → running_comments missing (sparse-checkout/import regression?)');
     }
   }
   db.close();
