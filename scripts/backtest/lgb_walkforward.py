@@ -74,7 +74,7 @@ FEATURE_COLS = [
       # distance band / damsire). Missing pedigree → -1.0 sentinel via fillna.
       "sire_top3_sm", "sire_dist_top3_sm", "damsire_top3_sm",
       # Stage 13 (⑦ hard-luck): comment-derived trouble signal (recency-weighted
-      # A受阻 + B走大疊 + C出閘失準 over last 8 starts; cmt_n=history depth, -1=none)
+      # A受阻 + B走大疊 + C出閘失準 over last 8 starts; cmt_n=depth (0=none), frac=-1)
       # is DORMANT: double-confirmed walk-forward A/B (1299 races, 2024-11→2026-04)
       # REGRESSED the headline top1 at BOTH cadences (retrain=50 -0.08 / retrain=25
       # -0.15); top2/top3 were mildly positive (+1.08/+1.54 and +0.92/+0.69) but all
