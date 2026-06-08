@@ -1838,7 +1838,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
     .nrd-race.open .nrd-chevron { transform:rotate(90deg) }
     .nrd-table-wrap { display:none }
     .nrd-race.open .nrd-table-wrap { display:block }
-    .nrd-table { width:100%; border-collapse:collapse; font-size:12px }
+    .nrd-table { width:100%; border-collapse:collapse; font-size:12px; border:0; box-shadow:none; border-radius:0 }
     .nrd-table th { background:#f0ede8; font-size:11px; font-weight:500; letter-spacing:.04em; padding:5px 8px; text-align:left; border-bottom:1px solid var(--rule); white-space:nowrap }
     .nrd-table td { padding:6px 8px; border-bottom:1px solid var(--rule); vertical-align:middle }
     .nrd-table tr:last-child td { border-bottom:0 }
@@ -1867,7 +1867,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
       .tp-race.open .tp-chevron { transform:rotate(90deg) }
       .tp-table-wrap { display:none }
       .tp-race.open .tp-table-wrap { display:block }
-      .tp-table { width:100%; border-collapse:collapse; font-size:12px }
+      .tp-table { width:100%; border-collapse:collapse; font-size:12px; border:0; box-shadow:none; border-radius:0 }
       .tp-table th { background:#f0ede8; font-size:11px; font-weight:500; letter-spacing:.04em; padding:5px 8px; text-align:left; border-bottom:1px solid var(--rule); white-space:nowrap }
       .tp-table td { padding:6px 8px; border-bottom:1px solid var(--rule); vertical-align:top }
       .tp-table tr:last-child td { border-bottom:0 }
