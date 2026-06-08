@@ -1993,27 +1993,27 @@ analyzeRoutes.get('/factors', (c) => {
         db: D1Database, date: string, venue: string
       ): Promise<Map<number, { odds: Map<string, number>; snapshotAt: string }>> {
         const out = new Map<number, { odds: Map<string, number>; snapshotAt: string }>();
-        const { results: latest } = await db.prepare(
-          `SELECT race_number, MAX(snapshot_at) AS latest
-             FROM odds_snapshots
-            WHERE race_date = ? AND venue = ? AND pool_type = 'WIN'
-            GROUP BY race_number`
-        ).bind(date, venue).all<any>().catch(() => ({ results: [] as any[] }));
-        if (!latest?.length) return out;
-        const latestByRace = new Map<number, string>();
-        for (const r of latest) latestByRace.set(Number(r.race_number), r.latest as string);
+        // Single query, ordered by snapshot_at ASC → per-horse last-write is its latest odds
+        // (deterministic; robust to horses scratched/added across snapshots & to dup rows).
         const { results: rows } = await db.prepare(
           `SELECT race_number, combination, odds, snapshot_at
              FROM odds_snapshots
-            WHERE race_date = ? AND venue = ? AND pool_type = 'WIN'`
+            WHERE race_date = ? AND venue = ? AND pool_type = 'WIN'
+            ORDER BY snapshot_at ASC`
         ).bind(date, venue).all<any>().catch(() => ({ results: [] as any[] }));
+        const perHorse = new Map<number, Map<string, { odds: number; at: string }>>();
         for (const row of (rows ?? [])) {
-          const rn = Number(row.race_number);
-          const want = latestByRace.get(rn);
-          if (!want || row.snapshot_at !== want) continue;
-          if (!out.has(rn)) out.set(rn, { odds: new Map<string, number>(), snapshotAt: want });
           const o = Number(row.odds);
-          if (o > 1) out.get(rn)!.odds.set(String(row.combination), o);
+          if (!(o > 1)) continue;
+          const rn = Number(row.race_number);
+          if (!perHorse.has(rn)) perHorse.set(rn, new Map());
+          perHorse.get(rn)!.set(String(row.combination), { odds: o, at: String(row.snapshot_at) });
+        }
+        for (const [rn, hm] of perHorse) {
+          const odds = new Map<string, number>();
+          let at = '';
+          for (const [k, v] of hm) { odds.set(k, v.odds); if (v.at > at) at = v.at; }
+          if (odds.size) out.set(rn, { odds, snapshotAt: at });
         }
         return out;
       }
@@ -2029,6 +2029,11 @@ analyzeRoutes.get('/factors', (c) => {
           (p) => p.pWin != null && oddsByHorseNo.has(String(p.horseNumber))
         );
         if (withOdds.length < 2) return { marketReady: false };
+        // Explicitly null market fields on ALL picks first so non-covered runners
+        // (scratched / no odds) are unambiguous for downstream consumers.
+        for (const p of picks) {
+          p.liveWinOdds = null; p.marketProb = null; p.blendProb = null; p.marketRank = null;
+        }
         const invSum = withOdds.reduce(
           (a, p) => a + 1 / oddsByHorseNo.get(String(p.horseNumber))!, 0
         );
