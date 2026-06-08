@@ -2639,9 +2639,9 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
       // visible at a glance which model produced the predictions.
       var statusEl = document.getElementById('todayPredictStatus');
       if (statusEl) {
-        var mv = data.lgbModelVersion || '(none)';
+        var mv = data.lgbModelVersion || '(無)';
         var cov = data.lgbCoverage || {};
-        var covTxt = (cov.rows != null) ? (cov.rows + ' rows') : 'no coverage';
+        var covTxt = (cov.rows != null) ? (cov.rows + ' 行覆蓋') : '無覆蓋';
         // Authoritative per-race flag from analyze.ts (lgbCoverage.applied). The
         // scoreSource string changed to tx-oracle-v3 (lgb=.., alpha=..) so the old
         // strict-equality lgb check silently never matched (false fallback banner).
@@ -2652,11 +2652,11 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
         };
         var anyLgb = (data.races || []).some(lgbApplied);
         var allLgb = (data.races || []).length > 0 && (data.races || []).every(lgbApplied);
-        var badge = allLgb ? '✓ LGB applied to ALL races'
-                : anyLgb ? '◑ LGB applied to SOME races (fallback elsewhere)'
-                : '○ LGB fallback — using ELO + factor only';
+        var badge = allLgb ? '✓ 全部場已套用 LGB'
+                : anyLgb ? '◑ 部分場已套用 LGB（其餘退回 ELO）'
+                : '○ LGB 未覆蓋 — 只用 ELO + 因子';
         var color = allLgb ? 'var(--green)' : anyLgb ? '#c80' : 'var(--mut)';
-        statusEl.innerHTML = '<span style="color:var(--ink)">model:</span> <code>' + mv + '</code> · ' + covTxt + ' · <span style="color:' + color + '">' + badge + '</span>';
+        statusEl.innerHTML = '<span style="color:var(--ink)">模型：</span> <code>' + mv + '</code> · ' + covTxt + ' · <span style="color:' + color + '">' + badge + '</span>';
       }
       function fmtElo(v) { return v != null ? '<span class="tp-elo">' + Math.round(v) + '</span>' : '<span style="color:var(--mut)">—</span>'; }
       function fmtBonus(v, fb) {
