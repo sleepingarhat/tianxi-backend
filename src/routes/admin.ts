@@ -2684,7 +2684,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
         var isOpen = ri < 3 ? ' open' : '';
         var topHorse = picks[0] ? ('<strong>' + (picks[0].nameCh || picks[0].nameEn || '—') + '</strong> ' + fmtPct(picks[0].pWin)) : '無資料';
         var rows = !picks.length
-          ? '<tr><td colspan="15" style="padding:12px;color:var(--mut)">無排位資料</td></tr>'
+          ? '<tr><td colspan="16" style="padding:12px;color:var(--mut)">無排位資料</td></tr>'
           : picks.map(function(p) {
             var rc = p.rank===1 ? 'tp-rank-1' : p.rank<=3 ? 'tp-rank-2' : '';
             var probCls = 'tp-prob' + (p.rank===1 ? ' tp-prob-hi' : '');
