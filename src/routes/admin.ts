@@ -1755,30 +1755,41 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap">
 <style>
   :root {
-    --bg:#f5f5f4; --fg:#1c1c1c; --mut:#6b6760; --rule:#d8d4cb;
-    --green:#18a355; --red:#c8102e; --blue:#1d5dca; --warn:#d9a40b;
+    --bg:#f3f1ec; --card:#ffffff; --fg:#1a1714; --ink-soft:#3a3530; --mut:#6f6a62; --faint:#9b958c;
+    --rule:#e4dfd5; --rule-soft:#efeae0;
+    --green:#1a8f4c; --green-bg:#e7f6ec; --red:#c8102e; --red-bg:#fdeef0;
+    --blue:#2059c8; --blue-bg:#e9f0fd; --warn:#bf8a0a; --warn-bg:#fbf3df; --accent:#2059c8;
+    --r-sm:6px; --r-md:10px; --r-lg:14px;
+    --shadow-sm:0 1px 2px rgba(26,23,20,.05);
+    --shadow-md:0 4px 14px rgba(26,23,20,.07),0 1px 3px rgba(26,23,20,.05);
   }
   * { box-sizing: border-box }
-  body { font: 14px/1.5 "Inter", "PingFang TC", "Noto Sans TC", sans-serif; font-feature-settings:"cv02","cv03","cv04","tnum"; background:var(--bg); color:var(--fg); margin:0; padding:24px; max-width:1400px; margin-left:auto; margin-right:auto }
-  h1 { font-size: 18px; margin:0 0 6px; letter-spacing:.02em }
-  h2 { font-size: 13px; margin:24px 0 10px; letter-spacing:.08em; color:var(--mut) }
-  .bar { color:var(--mut); margin-bottom:16px; font-size:12px }
-  .refresh { color:var(--mut); font-size:11px; margin-left:8px }
+  body { font: 14px/1.55 "Inter", "PingFang TC", "Noto Sans TC", sans-serif; font-feature-settings:"cv02","cv03","cv04","tnum"; -webkit-font-smoothing:antialiased; color:var(--fg); margin:0; padding:24px; max-width:1400px; margin-left:auto; margin-right:auto; background:var(--bg); background-image:radial-gradient(1100px 380px at 50% -140px,#fbfaf7,transparent) }
+  h1 { font-size: 20px; margin:0 0 4px; letter-spacing:-.01em; font-weight:700; display:flex; align-items:center; gap:8px }
+  h2 { font-size: 12px; margin:28px 0 12px; letter-spacing:.1em; text-transform:uppercase; color:var(--mut); display:flex; align-items:center; gap:8px }
+  h2::before { content:""; width:3px; height:13px; background:var(--accent); border-radius:2px; display:inline-block; flex-shrink:0 }
+  .bar { color:var(--faint); margin-bottom:16px; font-size:12px }
+  .refresh { color:var(--faint); font-size:11px; margin-left:8px }
   .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:10px }
-  .tile { background:#fff; padding:10px 12px; border:1px solid var(--rule); border-radius:4px }
-  .tile .label { font-size:11px; color:var(--mut) }
-  .tile .val { font-size:18px; font-weight:600; margin-top:2px }
-  .tile .sub { font-size:11px; color:var(--mut); margin-top:2px }
-  .tile.warn { border-color:var(--warn); background:#fffaec }
-  .tile.bad  { border-color:var(--red); background:#fdf0f2 }
-  table { border-collapse:collapse; width:100%; font-size:13px; background:#fff; border:1px solid var(--rule) }
-  th,td { padding:7px 10px; text-align:left; border-bottom:1px solid var(--rule) }
-  th { background:#ede8dc; font-weight:500; font-size:11px; letter-spacing:.04em }
+  .tile { background:var(--card); padding:12px 14px; border:1px solid var(--rule); border-radius:var(--r-md); box-shadow:var(--shadow-sm) }
+  .tile .label { font-size:11px; color:var(--mut); letter-spacing:.02em }
+  .tile .val { font-size:19px; font-weight:700; margin-top:3px; letter-spacing:-.01em }
+  .tile .sub { font-size:11px; color:var(--faint); margin-top:2px }
+  .tile.warn { border-color:var(--warn); background:var(--warn-bg) }
+  .tile.bad  { border-color:var(--red); background:var(--red-bg) }
+  table { border-collapse:separate; border-spacing:0; width:100%; font-size:13px; background:var(--card); border:1px solid var(--rule); border-radius:var(--r-md); overflow:hidden; box-shadow:var(--shadow-sm) }
+  th,td { padding:9px 12px; text-align:left; border-bottom:1px solid var(--rule-soft) }
+  th { background:#f0ebe1; font-weight:600; font-size:11px; letter-spacing:.05em; color:var(--ink-soft); text-transform:uppercase }
+  tbody tr:last-child td { border-bottom:0 }
+  tbody tr:hover td { background:#faf8f4 }
   td.ok { color:var(--green) } td.bad { color:var(--red) } td.warn { color:var(--warn) }
-  button { background:var(--fg); color:#fff; border:0; padding:6px 12px; font-family:inherit; font-size:13px; cursor:pointer; border-radius:3px }
-  button:hover { opacity:.85 }
-  button.ghost { background:transparent; color:var(--fg); border:1px solid var(--rule) }
-  input, select { font-family:inherit; font-size:13px; padding:5px 8px; border:1px solid var(--rule); border-radius:3px; background:#fff }
+  button { background:var(--fg); color:#fff; border:0; padding:7px 14px; font-family:inherit; font-size:13px; font-weight:500; cursor:pointer; border-radius:var(--r-sm); box-shadow:var(--shadow-sm); transition:opacity .15s, box-shadow .15s, transform .08s }
+  button:hover { opacity:.9; box-shadow:var(--shadow-md) }
+  button:active { transform:translateY(1px) }
+  button.ghost { background:var(--card); color:var(--fg); border:1px solid var(--rule); box-shadow:none }
+  button.ghost:hover { background:#faf8f4 }
+  input, select { font-family:inherit; font-size:13px; padding:6px 10px; border:1px solid var(--rule); border-radius:var(--r-sm); background:var(--card); color:var(--fg) }
+  input:focus, select:focus { outline:2px solid var(--blue-bg); border-color:var(--blue) }
   .actions-row { display:flex; gap:6px; align-items:center; margin-bottom:8px; flex-wrap:wrap }
   .log { font-family: "JetBrains Mono", ui-monospace, monospace; font-size:12px; background:#1c1c1c; color:#eee; padding:10px; border-radius:4px; max-height:240px; overflow:auto; white-space:pre-wrap; margin-top:8px }
   .pill { display:inline-block; padding:2px 8px; border-radius:10px; font-size:11px; font-weight:500 }
@@ -1792,7 +1803,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
   .chip.warn { background:#fff0c6; color:#8a6a0a }
   .chip.bad  { background:#f7d4d9; color:#8a0e24 }
   .chip .icon { font-size:11px }
-  #alertbar { margin-bottom:16px; border-radius:4px; overflow:hidden }
+  #alertbar { margin-bottom:16px; border-radius:var(--r-md); overflow:hidden; box-shadow:var(--shadow-sm) }
   #alertbar .alert { padding:8px 12px; font-size:13px; border-left:4px solid var(--rule) }
   #alertbar .alert.red { background:#fdf0f2; border-left-color:var(--red); color:#7a0b1e }
   #alertbar .alert.yellow { background:#fffaec; border-left-color:var(--warn); color:#6a4d05 }
@@ -1804,6 +1815,16 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
   .used-yes { color:var(--green); font-weight:600 }
   .used-no { color:var(--mut) }
   .weight { font-family: "JetBrains Mono", ui-monospace, monospace; font-size:12px }
+  .masthead { display:flex; gap:14px; align-items:flex-start; padding:16px 18px; background:var(--card); border:1px solid var(--rule); border-radius:var(--r-lg); box-shadow:var(--shadow-md); margin-bottom:16px }
+  .mast-mark { width:42px; height:42px; border-radius:11px; background:linear-gradient(140deg,#1a1714,#3a3530); color:#fff; display:flex; align-items:center; justify-content:center; flex-shrink:0; box-shadow:var(--shadow-sm) }
+  .mast-mark svg { width:23px; height:23px }
+  .mast-body { flex:1; min-width:0 }
+  .mast-meta { font-size:12px; color:var(--mut); line-height:1.55; margin-top:3px }
+  .mast-meta strong { color:var(--fg) }
+  .mono { font-family:"JetBrains Mono", ui-monospace, monospace; font-size:11px }
+  .mast-actions { margin-top:9px; display:flex; gap:8px; flex-wrap:wrap }
+  .mast-link { font-size:11px; color:var(--accent); text-decoration:none; border:1px solid var(--rule); padding:3px 10px; border-radius:999px; background:var(--card); transition:background .15s }
+  .mast-link:hover { background:var(--blue-bg) }
     /* ── 即日排位表 ── */
     .nrd-race { margin-bottom:10px; border:1px solid var(--rule); border-radius:6px; background:#fff; overflow:hidden }
     .nrd-race-hd { display:flex; align-items:center; gap:12px; padding:10px 14px; background:#fafaf8; cursor:pointer; user-select:none }
@@ -1865,14 +1886,17 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
       button.tp-run:disabled { opacity:.5; cursor:wait }
     </style></head>
 <body>
-  <h1>天喜 · 內部控制台 <span class="pulse" title="實時監控"></span></h1>
-  <div style="margin:-8px 0 14px;font-size:12px;color:var(--mut);line-height:1.5">
-    生產模型：<strong style="color:var(--fg)">天喜預測模型 TX-Oracle v3</strong>
-    · <span style="font-family:monospace">LightGBM ensemble + ELO complementary stacking</span>
-    · α=${alphaLabel}（${alphaMode}，每賽日自動調節）
-    · <a href="/api/analyze/ensemble-tune?days=30" target="_blank" style="color:var(--accent)">[P4 α grid search]</a>
-    <a href="/api/analyze/ensemble-tune?days=30&apply=1" target="_blank" style="color:var(--accent);margin-left:6px">[grid search + apply]</a>
-  </div>
+  <header class="masthead">
+    <div class="mast-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></div>
+    <div class="mast-body">
+      <h1>天喜 · 內部控制台 <span class="pulse" title="實時監控"></span></h1>
+      <div class="mast-meta">生產模型：<strong>天喜預測模型 TX-Oracle v3</strong> · <span class="mono">LightGBM ensemble + ELO complementary stacking</span> · α=${alphaLabel}（${alphaMode}，每賽日自動調節）</div>
+      <div class="mast-actions">
+        <a class="mast-link" href="/api/analyze/ensemble-tune?days=30" target="_blank">P4 · α grid search</a>
+        <a class="mast-link" href="/api/analyze/ensemble-tune?days=30&apply=1" target="_blank">α grid search + apply</a>
+      </div>
+    </div>
+  </header>
   <div class="bar">伺服器端渲染 · 閒置時自動刷新<span class="refresh" id="refreshClock"></span></div>
 
   <div id="alertbar"></div>
