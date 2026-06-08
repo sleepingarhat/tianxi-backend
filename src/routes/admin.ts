@@ -2684,7 +2684,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
         var isOpen = ri < 3 ? ' open' : '';
         var topHorse = picks[0] ? ('<strong>' + (picks[0].nameCh || picks[0].nameEn || '—') + '</strong> ' + fmtPct(picks[0].pWin)) : '無資料';
         var rows = !picks.length
-          ? '<tr><td colspan="12" style="padding:12px;color:var(--mut)">無排位資料</td></tr>'
+          ? '<tr><td colspan="15" style="padding:12px;color:var(--mut)">無排位資料</td></tr>'
           : picks.map(function(p) {
             var rc = p.rank===1 ? 'tp-rank-1' : p.rank<=3 ? 'tp-rank-2' : '';
             var probCls = 'tp-prob' + (p.rank===1 ? ' tp-prob-hi' : '');
@@ -2703,6 +2703,9 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
               + '<td><strong>' + fmtElo(p.finalScore) + '</strong></td>'
               + '<td class="' + probCls + (p.rank<=2?' ok':'') + '">' + fmtPct(p.pWin) + '</td>'
               + '<td>' + fmtPct(p.pTop3) + '</td>'
+              + '<td style="text-align:right;font-variant-numeric:tabular-nums">' + (p.liveWinOdds!=null ? p.liveWinOdds.toFixed(1) : '<span class="muted-cell">—</span>') + '</td>'
+              + '<td style="text-align:right">' + (p.marketProb!=null ? fmtPct(p.marketProb) : '<span class="muted-cell">—</span>') + '</td>'
+              + '<td style="text-align:center">' + (p.marketRank!=null ? ('<strong>' + p.marketRank + '</strong>' + (p.blendProb!=null ? ' <span style="color:var(--mut);font-size:10px">' + fmtPct(p.blendProb) + '</span>' : '')) : '<span class="muted-cell">—</span>') + '</td>'
               + '</tr>';
           }).join('');
         return '<div class="tp-race' + isOpen + '" id="tp-r' + race.raceNumber + '">'
@@ -2713,6 +2716,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
               + '<div class="tp-race-sub">'
                 + (race.distance?race.distance+'m':'') + (race.going?' · '+race.going:'')
                 + (race.class?' · '+race.class:'') + ' · ' + picks.length + ' 匹'
+                + (race.marketReady ? ' · <span style="color:var(--green)">市場欄✓</span>' : ' · <span style="color:var(--mut)">市場欄 等盤口</span>')
               + '</div>'
             + '</div>'
             + '<div style="margin-left:auto;font-size:12px;color:var(--mut);white-space:nowrap">' + topHorse + '</div>'
@@ -2723,6 +2727,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
               + '<th>排名</th><th>馬號</th><th>馬名 / 騎師 / 練馬師</th><th>檔</th>'
               + '<th>馬ELO</th><th>騎ELO</th><th>練ELO</th><th>綜合ELO</th>'
               + '<th>因子調整</th><th title="LGB lambdarank 原始分（z-norm 前）；越接近 0 越好">LGB分</th><th title="TX-Oracle v3 ensemble: 1500 + (α·lgb_z + (1-α)·elo_z + factor·0.5)·100, α=${alphaLabel}">最終分</th><th>勝率</th><th>前三</th>'
+              + '<th title="最新 WIN 盤口賠率（賽日近開賽前 firm up）">市場賠率</th><th title="盤口隱含勝率（已去 overround）">市場p</th><th title="市場穩陣欄排名 · LOG-blend β=' + (race.marketBeta!=null?race.marketBeta:0.4) + ' · 括號為混合勝率">市場排名</th>'
             + '</tr></thead><tbody>' + rows + '</tbody></table>'
           + '</div>'
         + '</div>';
