@@ -1980,6 +1980,83 @@ analyzeRoutes.get('/factors', (c) => {
     // === Race-day report compute (Stage 8) ============================
       // Extracted so cron + admin manual trigger can re-use the same logic.
       // Cache-first by default; pass { fresh: true } to force recompute + cache write.
+      // ── Market-blend (additive; does NOT change model ranking) ──────────────
+      // Backtest verdict (2026-06, 520 races, 4 disjoint splits): LOG-blending the
+      // market win-prob into model pWin lifts top1 20→32% — but it leans FAVOURITE
+      // (high hit-rate); it does NOT catch 冷馬. Exposed as a SEPARATE "市場穩陣" column
+      // beside the unchanged "模型搏冷" ranking. β from the sweep.
+      const MARKET_BLEND_BETA = 0.4;
+
+      // Latest WIN-pool odds snapshot per race for a meeting. Odds firm up race-day;
+      // empty before then → market column shows "等臨場盤口". combination = horse_number.
+      async function fetchLatestWinOddsByRace(
+        db: D1Database, date: string, venue: string
+      ): Promise<Map<number, { odds: Map<string, number>; snapshotAt: string }>> {
+        const out = new Map<number, { odds: Map<string, number>; snapshotAt: string }>();
+        const { results: latest } = await db.prepare(
+          `SELECT race_number, MAX(snapshot_at) AS latest
+             FROM odds_snapshots
+            WHERE race_date = ? AND venue = ? AND pool_type = 'WIN'
+            GROUP BY race_number`
+        ).bind(date, venue).all<any>().catch(() => ({ results: [] as any[] }));
+        if (!latest?.length) return out;
+        const latestByRace = new Map<number, string>();
+        for (const r of latest) latestByRace.set(Number(r.race_number), r.latest as string);
+        const { results: rows } = await db.prepare(
+          `SELECT race_number, combination, odds, snapshot_at
+             FROM odds_snapshots
+            WHERE race_date = ? AND venue = ? AND pool_type = 'WIN'`
+        ).bind(date, venue).all<any>().catch(() => ({ results: [] as any[] }));
+        for (const row of (rows ?? [])) {
+          const rn = Number(row.race_number);
+          const want = latestByRace.get(rn);
+          if (!want || row.snapshot_at !== want) continue;
+          if (!out.has(rn)) out.set(rn, { odds: new Map<string, number>(), snapshotAt: want });
+          const o = Number(row.odds);
+          if (o > 1) out.get(rn)!.odds.set(String(row.combination), o);
+        }
+        return out;
+      }
+
+      // Attach an additive market-blend ranking to a race's picks. Mutates each pick
+      // with liveWinOdds / marketProb / blendProb / marketRank. Model rank & pWin are
+      // LEFT UNTOUCHED. Returns { marketReady }.
+      function attachMarketBlend(
+        picks: any[], oddsByHorseNo: Map<string, number> | null
+      ): { marketReady: boolean } {
+        if (!oddsByHorseNo || oddsByHorseNo.size === 0) return { marketReady: false };
+        const withOdds = picks.filter(
+          (p) => p.pWin != null && oddsByHorseNo.has(String(p.horseNumber))
+        );
+        if (withOdds.length < 2) return { marketReady: false };
+        const invSum = withOdds.reduce(
+          (a, p) => a + 1 / oddsByHorseNo.get(String(p.horseNumber))!, 0
+        );
+        const modelSum = withOdds.reduce((a, p) => a + p.pWin, 0) || 1;
+        const eps = 1e-9;
+        const scored = withOdds.map((p) => {
+          const o = oddsByHorseNo.get(String(p.horseNumber))!;
+          const mktP = 1 / o / invSum;
+          const modelP = p.pWin / modelSum;
+          const blendScore =
+            (1 - MARKET_BLEND_BETA) * Math.log(modelP + eps) +
+            MARKET_BLEND_BETA * Math.log(mktP + eps);
+          return { p, o, mktP, blendScore };
+        });
+        const mx = Math.max(...scored.map((s) => s.blendScore));
+        const exps = scored.map((s) => Math.exp(s.blendScore - mx));
+        const Z = exps.reduce((a, b) => a + b, 0) || 1;
+        scored.forEach((s, i) => {
+          s.p.liveWinOdds = Math.round(s.o * 10) / 10;
+          s.p.marketProb = Math.round(s.mktP * 1000) / 1000;
+          s.p.blendProb = Math.round((exps[i] / Z) * 1000) / 1000;
+        });
+        [...scored]
+          .sort((a, b) => b.blendScore - a.blendScore)
+          .forEach((s, i) => { s.p.marketRank = i + 1; });
+        return { marketReady: true };
+      }
+
       async function runRaceDayReportCompute(db: D1Database, engine: EloEngine, opts: { fresh?: boolean; venue?: string } = {}): Promise<any> {
         const fresh = opts.fresh === true;
         const forceVenue = opts.venue;
@@ -2096,6 +2173,7 @@ analyzeRoutes.get('/factors', (c) => {
         const { map: lgbScoreByRaceHorse, modelVersion: todayPicksLgbModelVersion } =
           await loadLgbScoresForMeeting(db, raceNumbers, racesDBMap, targetDate, meeting.venue);
         const todayPicksAlpha = await getEnsembleAlpha(db);
+        const liveWinOddsByRace = await fetchLatestWinOddsByRace(db, targetDate, meeting.venue).catch(() => new Map<number, { odds: Map<string, number>; snapshotAt: string }>());
 
         const racePredictions = raceNumbers.map(raceNum => {
           const raceEntries = raceMap.get(raceNum)!;
@@ -2166,8 +2244,10 @@ analyzeRoutes.get('/factors', (c) => {
           const picks = enriched.map((s, i) => { const { _score, ...rest } = s as any; return { ...rest, pWin: Math.round((expScores[i]/Z)*1000)/1000, pTop3: Math.round(Math.min((expScores[i]/Z)*3,0.99)*1000)/1000 }; });
           picks.sort((a: any, b: any) => b.pWin - a.pWin);
           picks.forEach((p: any, i: number) => { p.rank = i + 1; });
+          const _mbOdds = liveWinOddsByRace.get(raceNum) ?? null;
+          const _mb = attachMarketBlend(picks, _mbOdds?.odds ?? null);
           const _txTotal2 = (enriched as any[]).length;
-          return { raceId, lgbLookupRaceId, raceNumber: raceNum, title: raceTitle, class: raceClass, distance: raceDistance, going: raceGoing, track: raceTrack, course: raceCourse, picks, scoreSource: raceHasLgb ? `tx-oracle-v3 (lgb=${lgbHits}/${_txTotal2}, α=${todayPicksAlpha.toFixed(2)})` : 'elo+factor', lgbCoverage: { hits: lgbHits, total: _txTotal2, applied: raceHasLgb }, lgbModelVersion: lgbModelVerForRace, ensembleAlpha: todayPicksAlpha };
+          return { raceId, lgbLookupRaceId, raceNumber: raceNum, title: raceTitle, class: raceClass, distance: raceDistance, going: raceGoing, track: raceTrack, course: raceCourse, picks, scoreSource: raceHasLgb ? `tx-oracle-v3 (lgb=${lgbHits}/${_txTotal2}, α=${todayPicksAlpha.toFixed(2)})` : 'elo+factor', lgbCoverage: { hits: lgbHits, total: _txTotal2, applied: raceHasLgb }, lgbModelVersion: lgbModelVerForRace, ensembleAlpha: todayPicksAlpha, marketReady: _mb.marketReady, oddsSnapshotAt: _mbOdds?.snapshotAt ?? null, marketBeta: MARKET_BLEND_BETA };
         });
         const eloReady = racePredictions.some((r) => r.picks?.some((p: any) => p.eloComposite != null));
         const computeMs = Date.now() - t0;
