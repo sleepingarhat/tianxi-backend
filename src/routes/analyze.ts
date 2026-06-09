@@ -2756,6 +2756,23 @@ analyzeRoutes.get('/factors', (c) => {
           const engine: EloEngine = c.req.query('engine') === 'v11' ? 'v11' : 'v12';
           const today = new Date().toISOString().substring(0, 10);
           const cutoff = new Date(Date.now() - days * 86400000).toISOString().substring(0, 10);
+          // Rollup-level cache: aggregating per-meeting cache over N meetings is
+          // sequential D1 reads (~9s for 90d). Cache the whole payload keyed by
+          // window + engine, validated by `to`=today. Safe because the rollup
+          // window is [cutoff, today) — today's results never count until the
+          // calendar day rolls over, so a per-day key is exact. ?refresh=1 bypasses.
+          const refresh = c.req.query('refresh') === '1';
+          const rollupKey = `__rollup_${days}`;
+          const rollupEng = `${engine}-tx3-rollup`;
+          if (!refresh) {
+            try {
+              const row = await db.prepare(`SELECT payload_json FROM meeting_hit_rate_cache WHERE date=? AND engine=?`).bind(rollupKey, rollupEng).first<{ payload_json: string }>();
+              if (row?.payload_json) {
+                const parsed = JSON.parse(row.payload_json);
+                if (parsed && parsed.to === today) return c.json({ ...parsed, cached: true });
+              }
+            } catch { /* fall through to recompute */ }
+          }
           const datesQ = await db.prepare(
             "SELECT DISTINCT rm.date AS date, rm.venue AS venue " +
             "FROM race_meetings rm JOIN races r ON r.meeting_id = rm.id JOIN race_results rr ON rr.race_id = r.id " +
@@ -2799,7 +2816,7 @@ analyzeRoutes.get('/factors', (c) => {
               } catch (e: any) { errors.push({date: m.date, error: e?.message || String(e)}); }
             }
             const rRate = (n: number, d: number) => d ? Math.round(n / d * 1000) / 10 : null;
-            return c.json({
+            const payload: any = {
               windowDays: days, from: cutoff, to: today,
               meetingsFound: meetingDates.length,
               meetingsEvaluated: perMeeting.length,
@@ -2820,7 +2837,12 @@ analyzeRoutes.get('/factors', (c) => {
               first4Hits: totalFirst4, first4Eligible: totalFirst4Eligible,
               perMeeting, errors,
               generatedAt: new Date().toISOString(),
-            });
+            };
+            try {
+              await db.prepare(`INSERT OR REPLACE INTO meeting_hit_rate_cache (date, engine, payload_json, computed_at) VALUES (?, ?, ?, ?)`)
+                .bind(rollupKey, rollupEng, JSON.stringify(payload), new Date().toISOString()).run();
+            } catch { /* cache write best-effort */ }
+            return c.json(payload);
         } catch (err: any) {
           return c.json({ error: 'hit-rate-rollup failed', detail: err?.message ?? String(err) }, 500);
         }
