@@ -2763,7 +2763,9 @@ analyzeRoutes.get('/factors', (c) => {
           // calendar day rolls over, so a per-day key is exact. ?refresh=1 bypasses.
           const refresh = c.req.query('refresh') === '1';
           const rollupKey = `__rollup_${days}`;
-          const rollupEng = `${engine}-tx3-rollup`;
+          // Version-derived key (NOT hardcoded 'tx3') so a HIT_RATE_CACHE_VERSION
+          // bump invalidates rollup rows in lockstep with per-meeting rows.
+          const rollupEng = `${_engineKey(engine)}-rollup`;
           if (!refresh) {
             try {
               const row = await db.prepare(`SELECT payload_json FROM meeting_hit_rate_cache WHERE date=? AND engine=?`).bind(rollupKey, rollupEng).first<{ payload_json: string }>();
@@ -2771,7 +2773,7 @@ analyzeRoutes.get('/factors', (c) => {
                 const parsed = JSON.parse(row.payload_json);
                 if (parsed && parsed.to === today) return c.json({ ...parsed, cached: true });
               }
-            } catch { /* fall through to recompute */ }
+            } catch (e) { console.warn('hit-rate-rollup cache read failed', e); /* fall through to recompute */ }
           }
           const datesQ = await db.prepare(
             "SELECT DISTINCT rm.date AS date, rm.venue AS venue " +
@@ -2841,7 +2843,7 @@ analyzeRoutes.get('/factors', (c) => {
             try {
               await db.prepare(`INSERT OR REPLACE INTO meeting_hit_rate_cache (date, engine, payload_json, computed_at) VALUES (?, ?, ?, ?)`)
                 .bind(rollupKey, rollupEng, JSON.stringify(payload), new Date().toISOString()).run();
-            } catch { /* cache write best-effort */ }
+            } catch (e) { console.warn('hit-rate-rollup cache write failed', e); /* best-effort */ }
             return c.json(payload);
         } catch (err: any) {
           return c.json({ error: 'hit-rate-rollup failed', detail: err?.message ?? String(err) }, 500);
