@@ -2029,6 +2029,17 @@ analyzeRoutes.get('/factors', (c) => {
           (p) => p.pWin != null && oddsByHorseNo.has(String(p.horseNumber))
         );
         if (withOdds.length < 2) return { marketReady: false };
+        // Coverage guard: require odds for the BULK of the field before showing the
+        // market column. Renormalizing 1/odds over only a few runners inflates their
+        // implied prob (e.g. 3/12 covered → those 3 split 100%) and produces a
+        // misleading 市場排名. NOT 100% on purpose: late scratches (SCR) and unbet
+        // extreme-longshots legitimately lack live odds, so a full-field requirement
+        // would almost never trigger even at post time. 80% keeps the renorm base ≈
+        // the whole market while tolerating ~1-2 missing on a typical 12-14 horse card.
+        const MARKET_COVER_MIN = 0.8;
+        if (withOdds.length < Math.ceil(picks.length * MARKET_COVER_MIN)) {
+          return { marketReady: false };
+        }
         // Explicitly null market fields on ALL picks first so non-covered runners
         // (scratched / no odds) are unambiguous for downstream consumers.
         for (const p of picks) {
