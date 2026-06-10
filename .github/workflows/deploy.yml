@@ -20,6 +20,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Replay test — market-blend odds-key contract
+        run: npx tsx scripts/test-market-blend.ts
+
       - name: Deploy to Cloudflare Workers
         run: npx wrangler deploy
         env:
