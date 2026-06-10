@@ -85,11 +85,16 @@
 
     // 2) Picks carry UNPADDED horseNumber (as the live model produces them).
     const live = WIN_ODDS.filter((r) => r.snapshot_at === '2026-06-10T06:00:00Z');
-    const picks: any[] = live.map((r) => ({ horseNumber: Number(r.combination), pWin: 1 / r.odds }));
+    // picks carry model-side fields (rank / finalScore) that the additive blend must NOT move.
+  const picks: any[] = live.map((r, i) => ({ horseNumber: Number(r.combination), pWin: 1 / r.odds, rank: i + 1, finalScore: 1500 - i * 10 }));
     const z = picks.reduce((a, p) => a + p.pWin, 0);
     picks.forEach((p) => (p.pWin = p.pWin / z));
+  // snapshot model-side invariant BEFORE the additive blend.
+  const modelBefore = JSON.stringify(picks.map((p) => ({ h: p.horseNumber, rank: p.rank, pWin: p.pWin, finalScore: p.finalScore })));
 
     const res = attachMarketBlend(picks, r1 ? r1.odds : null);
+  const modelAfter = JSON.stringify(picks.map((p) => ({ h: p.horseNumber, rank: p.rank, pWin: p.pWin, finalScore: p.finalScore })));
+  assert(modelBefore === modelAfter, 'attachMarketBlend leaves model rank/pWin/finalScore UNTOUCHED (additive contract: 模型搏冷 never moves)');
     assert(res.marketReady === true, 'marketReady true (padded odds matched unpadded picks)');
     const covered = picks.filter((p) => p.liveWinOdds != null);
     assert(covered.length === 12, 'all 12 picks got market fields (got ' + covered.length + ')');
