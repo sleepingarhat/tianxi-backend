@@ -2428,7 +2428,7 @@ analyzeRoutes.get('/factors', (c) => {
             ).bind(date, venue).all<any>().catch(() => ({ results: [] as any[] }));
             const oddsMap = new Map<string, { odds: number | null; snapshotAt: string | null }>();
             for (const r of (oddsRows ?? [])) {
-              oddsMap.set(`${r.race_number}:${r.horse_no}`, {
+              oddsMap.set(`${r.race_number}:${Number(r.horse_no)}`, {
                 odds: r.odds == null ? null : Number(r.odds),
                 snapshotAt: r.snapshot_at ?? null,
               });
@@ -2439,7 +2439,7 @@ analyzeRoutes.get('/factors', (c) => {
             for (const race of (report.races ?? [])) {
               const top = (race.picks ?? []).find((p: any) => p.rank === 1);
               if (!top) continue;
-              const o = oddsMap.get(`${race.raceNumber}:${top.horseNumber}`);
+              const o = oddsMap.get(`${race.raceNumber}:${Number(top.horseNumber)}`);
               oddsTotal++;
               if (o?.odds != null) oddsAvailable++;
               const inRange = o?.odds != null && o.odds >= minOdds && o.odds <= maxOdds;
