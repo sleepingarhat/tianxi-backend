@@ -2007,7 +2007,9 @@ analyzeRoutes.get('/factors', (c) => {
           if (!(o > 1)) continue;
           const rn = Number(row.race_number);
           if (!perHorse.has(rn)) perHorse.set(rn, new Map());
-          perHorse.get(rn)!.set(String(row.combination), { odds: o, at: String(row.snapshot_at) });
+          // combination is zero-padded ("01".."12") from HKJC combString while picks
+          // carry an unpadded numeric horseNumber → normalize via Number() so "01"===1.
+          perHorse.get(rn)!.set(String(Number(row.combination)), { odds: o, at: String(row.snapshot_at) });
         }
         for (const [rn, hm] of perHorse) {
           const odds = new Map<string, number>();
@@ -2026,7 +2028,7 @@ analyzeRoutes.get('/factors', (c) => {
       ): { marketReady: boolean } {
         if (!oddsByHorseNo || oddsByHorseNo.size === 0) return { marketReady: false };
         const withOdds = picks.filter(
-          (p) => p.pWin != null && oddsByHorseNo.has(String(p.horseNumber))
+          (p) => p.pWin != null && oddsByHorseNo.has(String(Number(p.horseNumber)))
         );
         if (withOdds.length < 2) return { marketReady: false };
         // Coverage guard: require odds for the BULK of the field before showing the
@@ -2046,12 +2048,12 @@ analyzeRoutes.get('/factors', (c) => {
           p.liveWinOdds = null; p.marketProb = null; p.blendProb = null; p.marketRank = null;
         }
         const invSum = withOdds.reduce(
-          (a, p) => a + 1 / oddsByHorseNo.get(String(p.horseNumber))!, 0
+          (a, p) => a + 1 / oddsByHorseNo.get(String(Number(p.horseNumber)))!, 0
         );
         const modelSum = withOdds.reduce((a, p) => a + p.pWin, 0) || 1;
         const eps = 1e-9;
         const scored = withOdds.map((p) => {
-          const o = oddsByHorseNo.get(String(p.horseNumber))!;
+          const o = oddsByHorseNo.get(String(Number(p.horseNumber)))!;
           const mktP = 1 / o / invSum;
           const modelP = p.pWin / modelSum;
           const blendScore =
