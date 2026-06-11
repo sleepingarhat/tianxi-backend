@@ -91,19 +91,19 @@ function parseFinishTime(s: string): number | null {
   }
 
   // Plain number
-  const num = parseFloat(s);
+  const num = parseFloat(s.replace(/,/g, ''));
   return isNaN(num) ? null : num;
 }
 
 function parseInteger(s: string | undefined): number | null {
   if (!s || s.trim() === '' || s.trim() === '-' || s.trim() === '---') return null;
-  const n = parseInt(s);
+  const n = parseInt(s.replace(/,/g, ''), 10);
   return isNaN(n) ? null : n;
 }
 
 function parseFloatOrNull(s: string | undefined): number | null {
   if (!s || s.trim() === '' || s.trim() === '-' || s.trim() === '---') return null;
-  const n = parseFloat(s);
+  const n = parseFloat(s.replace(/,/g, ''));
   return isNaN(n) ? null : n;
 }
 
