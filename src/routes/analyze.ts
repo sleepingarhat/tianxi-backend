@@ -48,7 +48,8 @@ export const analyzeRoutes = new Hono<{ Bindings: Env }>();
     raceNumbers: number[],
   ): Promise<{ byRace: Map<number, Record<string, number>>; complete: boolean }> {
     const byRace = new Map<number, Record<string, number>>();
-    if ((venue !== 'HV' && venue !== 'ST') || !raceNumbers.length) return { byRace, complete: false };
+    if (venue !== 'HV' && venue !== 'ST') return { byRace, complete: false };
+    if (!raceNumbers.length) return { byRace, complete: true };
     const racedate = date.replace(/-/g, '/');
     const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
     const labels: Array<[string, string]> = [['四連環', 'FF'], ['單T', 'TRI'], ['三重彩', 'TCE'], ['四重彩', 'QTT']];
@@ -554,8 +555,23 @@ export async function computeHitRateStats(db: any, date: string, engine: EloEngi
   let divByRaceNumber = new Map<number, Record<string, number>>();
   let boxDivsComplete = false;
   if (wantBoxPayouts) {
-    const rns = picksData.races.map((r: any) => r.raceNumber).filter((n: any) => n != null);
-    const fetched = await fetchHkjcBoxDivs(date, meeting.venue, rns);
+    // Only fetch dividends for races where the model top-4 actually won a box pool
+    // (任序首3 trio or 任序首4) — typically 0-3 of ~9 races. HKJC throttles Cloudflare
+    // egress, so fetching every race serialises to ~30s; this limits it to the few
+    // races that can produce a payout. Win logic mirrors the per-race loop below.
+    const needRns: number[] = [];
+    for (const race of picksData.races) {
+      const m4 = (race.picks ?? []).slice(0, 4).map((p: any) => p.horseNumber).filter((v: any) => v != null && v !== '').map((v: any) => String(v));
+      const mset = new Set<string>(m4);
+      if (mset.size !== 4) continue;
+      const sorted = (actualByRace.get(race.raceNumber) ?? []).slice().sort((a: any, b: any) => a.finishing_position - b.finishing_position);
+      const a3 = sorted.slice(0, 3).map((a: any) => a.horse_number).filter((v: any) => v != null && v !== '').map((v: any) => String(v));
+      const a4 = sorted.slice(0, 4).map((a: any) => a.horse_number).filter((v: any) => v != null && v !== '').map((v: any) => String(v));
+      const trioWin = a3.length === 3 && a3.every((x: string) => mset.has(x));
+      const ffWin = a4.length === 4 && a4.every((x: string) => mset.has(x));
+      if (trioWin || ffWin) needRns.push(race.raceNumber);
+    }
+    const fetched = await fetchHkjcBoxDivs(date, meeting.venue, needRns);
     divByRaceNumber = fetched.byRace;
     boxDivsComplete = fetched.complete;
   }
