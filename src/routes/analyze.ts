@@ -37,6 +37,32 @@ export const analyzeRoutes = new Hono<{ Bindings: Env }>();
     return `${engine}-${HIT_RATE_CACHE_VERSION}`;
   }
 
+  // DIVIDENDS_TRUSTWORTHY_FROM: HKJC dividend rows imported before this date were
+  // truncated by an importer comma-parsing bug, so $10 box payouts are only shown
+  // for meetings on/after it. Single source of truth — must NOT be lowered.
+  const DIVIDENDS_TRUSTWORTHY_FROM = '2026-06-11';
+
+  // A hit-rate payload can be cached by the pre-compute cron BEFORE a meeting day
+  // has its dividend rows imported, leaving boxPayouts empty even though the model
+  // covered the result (cov>=3 guarantees a trio/tierce box win once dividends
+  // exist). Detect that so the route recomputes instead of serving the stale
+  // empty cache — payouts self-heal with no manual ?refresh=1 (全自動).
+  function hitRateCacheNeedsBoxRecompute(date: string, cached: any): boolean {
+    if (date < DIVIDENDS_TRUSTWORTHY_FROM) return false;
+    const races = (cached && cached.races) || [];
+    return races.some((r: any) => {
+      if (Array.isArray(r.boxPayouts) && r.boxPayouts.length > 0) return false;
+      const m4 = (r.predictedTop4 || []).map((p: any) => p.horseNumber).filter((v: any) => v != null && v !== '').map((v: any) => String(v));
+      const a4 = (r.actualTop4 || []).map((a: any) => a.horseNumber).filter((v: any) => v != null && v !== '').map((v: any) => String(v));
+      if (m4.length === 0 || a4.length === 0) return false;
+      const ms = new Set<string>(m4);
+      if (ms.size !== 4) return false;
+      let cov = 0;
+      a4.forEach((x: string) => { if (ms.has(x)) cov++; });
+      return cov >= 3;
+    });
+  }
+
   export async function readHitRateCache(db: D1Database, date: string, engine: string): Promise<any | null> {
     try {
       const row = await db.prepare(
@@ -505,7 +531,6 @@ export async function computeHitRateStats(db: any, date: string, engine: EloEngi
   // on/after DIVIDENDS_TRUSTWORTHY_FROM are guaranteed correct, so box payouts are
   // gated to those dates. Coverage (4中N) is derived consumer-side from predicted/
   // actual top-4 and is always available (incl. historical meetings).
-  const DIVIDENDS_TRUSTWORTHY_FROM = '2026-06-11';
   const dividendsTrustworthy = date >= DIVIDENDS_TRUSTWORTHY_FROM;
   const divByRaceNumber = new Map<number, Record<string, number>>();
   if (dividendsTrustworthy) {
@@ -2562,7 +2587,7 @@ analyzeRoutes.get('/factors', (c) => {
                 }
               } else {
                 const cached = await readHitRateCache(c.env.DB, date, engine);
-                if (cached) {
+                if (cached && !hitRateCacheNeedsBoxRecompute(date, cached)) {
                   return c.json({
                     date,
                     venue: cached.meeting?.venue,
