@@ -37,30 +37,51 @@ export const analyzeRoutes = new Hono<{ Bindings: Env }>();
     return `${engine}-${HIT_RATE_CACHE_VERSION}`;
   }
 
-  // DIVIDENDS_TRUSTWORTHY_FROM: HKJC dividend rows imported before this date were
-  // truncated by an importer comma-parsing bug, so $10 box payouts are only shown
-  // for meetings on/after it. Single source of truth — must NOT be lowered.
-  const DIVIDENDS_TRUSTWORTHY_FROM = '2026-06-11';
+  // Box-bet payouts for the model top-4 are scraped LIVE from the official HKJC
+  // results page on each compute, so payouts are available for ALL dates incl.
+  // historical (the D1 dividend history was comma-truncated garbage). One fetch per
+  // race; only when computeHitRateStats is called with { boxPayouts: true } (single-
+  // meeting route + cron) so the rollup / α-tuner never fire a fetch storm.
+  async function fetchHkjcBoxDivs(
+    date: string,
+    venue: string,
+    raceNumbers: number[],
+  ): Promise<{ byRace: Map<number, Record<string, number>>; complete: boolean }> {
+    const byRace = new Map<number, Record<string, number>>();
+    if ((venue !== 'HV' && venue !== 'ST') || !raceNumbers.length) return { byRace, complete: false };
+    const racedate = date.replace(/-/g, '/');
+    const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
+    const labels: Array<[string, string]> = [['四連環', 'FF'], ['單T', 'TRI'], ['三重彩', 'TCE'], ['四重彩', 'QTT']];
+    const settledOk = await Promise.allSettled(raceNumbers.map(async (rn) => {
+      const url = `https://racing.hkjc.com/zh-hk/local/information/localresults?racedate=${racedate}&Racecourse=${venue}&RaceNo=${rn}`;
+      const resp = await fetch(url, { headers: { 'user-agent': UA, 'accept-language': 'zh-HK,zh;q=0.9', 'accept': 'text/html' } });
+      if (!resp.ok) return { rn, ok: false };
+      const body = await resp.text();
+      const settled = body.includes('勝出組合');
+      const divs: Record<string, number> = {};
+      for (const [label, pool] of labels) {
+        const m = body.match(new RegExp('>' + label + '</td>[^<]*<td[^>]*>([^<]*)</td>[^<]*<td[^>]*>([^<]*)</td>'));
+        if (!m) continue;
+        const amt = parseFloat(m[2].trim().replace(/,/g, ''));
+        if (!isFinite(amt) || amt <= 0) continue;
+        divs[pool] = amt;
+      }
+      if (Object.keys(divs).length) byRace.set(rn, divs);
+      return { rn, ok: settled };
+    }));
+    let okCount = 0;
+    for (const r of settledOk) { if (r.status === 'fulfilled' && r.value.ok) okCount++; }
+    return { byRace, complete: okCount === raceNumbers.length };
+  }
 
-  // A hit-rate payload can be cached by the pre-compute cron BEFORE a meeting day
-  // has its dividend rows imported, leaving boxPayouts empty even though the model
-  // covered the result (cov>=3 guarantees a trio/tierce box win once dividends
-  // exist). Detect that so the route recomputes instead of serving the stale
-  // empty cache — payouts self-heal with no manual ?refresh=1 (全自動).
-  function hitRateCacheNeedsBoxRecompute(date: string, cached: any): boolean {
-    if (date < DIVIDENDS_TRUSTWORTHY_FROM) return false;
-    const races = (cached && cached.races) || [];
-    return races.some((r: any) => {
-      if (Array.isArray(r.boxPayouts) && r.boxPayouts.length > 0) return false;
-      const m4 = (r.predictedTop4 || []).map((p: any) => p.horseNumber).filter((v: any) => v != null && v !== '').map((v: any) => String(v));
-      const a4 = (r.actualTop4 || []).map((a: any) => a.horseNumber).filter((v: any) => v != null && v !== '').map((v: any) => String(v));
-      if (m4.length === 0 || a4.length === 0) return false;
-      const ms = new Set<string>(m4);
-      if (ms.size !== 4) return false;
-      let cov = 0;
-      a4.forEach((x: string) => { if (ms.has(x)) cov++; });
-      return cov >= 3;
-    });
+  // The pre-compute cron / rollup can write a hit-rate cache WITHOUT box payouts
+  // (boxDivsFetched=false). Recompute once so the first real view scrapes HKJC and
+  // fills payouts (全自動, no manual ?refresh=1). The flag flips to true after one
+  // fetch attempt, so this never loops even if HKJC is briefly unreachable.
+  function hitRateCacheNeedsBoxRecompute(cached: any): boolean {
+    const s = cached && cached.summary;
+    if (!s) return false;
+    return s.boxDivsFetched !== true;
   }
 
   export async function readHitRateCache(db: D1Database, date: string, engine: string): Promise<any | null> {
@@ -487,7 +508,7 @@ export async function loadLgbScoresForMeeting(
 
 // 共用 helper：計算指定賽事日的命中率統計（被 /hit-rate 與 /hit-rate-rollup 共用）
 // alphaOverride: 用於 /admin/api/ensemble-tune α grid search (P4 backtest)。
-export async function computeHitRateStats(db: any, date: string, engine: EloEngine, alphaOverride?: number): Promise<
+export async function computeHitRateStats(db: any, date: string, engine: EloEngine, alphaOverride?: number, opts?: { boxPayouts?: boolean }): Promise<
   | { error: string; status: number }
   | { meeting: any; races: any[]; summary: any }
 > {
@@ -526,32 +547,17 @@ export async function computeHitRateStats(db: any, date: string, engine: EloEngi
   }
   const picksData = await computePicksFromEntries(db, date, meeting, entries, engine, alphaOverride);
   // ── 模型四揀複式 box-bet payouts (mirror tools/tg_notify build_extras) ──
-  // Official dividends read from D1. Historical D1 dividends were imported with a
-  // comma-truncation bug (fixed in scripts/import-csv.ts 2026-06-10); only meetings
-  // on/after DIVIDENDS_TRUSTWORTHY_FROM are guaranteed correct, so box payouts are
-  // gated to those dates. Coverage (4中N) is derived consumer-side from predicted/
-  // actual top-4 and is always available (incl. historical meetings).
-  const dividendsTrustworthy = date >= DIVIDENDS_TRUSTWORTHY_FROM;
-  const divByRaceNumber = new Map<number, Record<string, number>>();
-  if (dividendsTrustworthy) {
-    const idToRn = new Map<string, number>();
-    const divRaceIds = picksData.races.map((r: any) => {
-      const id = `race_${date}_${meeting.venue}_${r.raceNumber}`;
-      idToRn.set(id, r.raceNumber);
-      return id;
-    });
-    if (divRaceIds.length) {
-      const ph = divRaceIds.map(() => '?').join(',');
-      const { results: divRows } = await db.prepare(`SELECT race_id, pool_type, dividend FROM dividends WHERE pool_type IN ('FF','TRI','TCE','QTT') AND race_id IN (${ph})`).bind(...divRaceIds).all<any>().catch(() => ({ results: [] as any[] }));
-      for (const d of (divRows ?? [])) {
-        const rn = idToRn.get(d.race_id);
-        if (rn == null) continue;
-        const amt = Number(d.dividend);
-        if (!isFinite(amt)) continue;
-        if (!divByRaceNumber.has(rn)) divByRaceNumber.set(rn, {});
-        divByRaceNumber.get(rn)![String(d.pool_type)] = amt;
-      }
-    }
+  // Official dividends scraped LIVE from the HKJC results page (fetchHkjcBoxDivs)
+  // each compute — available for ALL dates incl. historical. Only fetched when
+  // opts.boxPayouts is set; coverage (4中N) is derived consumer-side and always shown.
+  const wantBoxPayouts = !!(opts && opts.boxPayouts);
+  let divByRaceNumber = new Map<number, Record<string, number>>();
+  let boxDivsComplete = false;
+  if (wantBoxPayouts) {
+    const rns = picksData.races.map((r: any) => r.raceNumber).filter((n: any) => n != null);
+    const fetched = await fetchHkjcBoxDivs(date, meeting.venue, rns);
+    divByRaceNumber = fetched.byRace;
+    boxDivsComplete = fetched.complete;
   }
   // HK pool hit metrics — computed per race, aggregated into summary.
     // racesEvaluated = denom for top1/top3-any/Q/QP/Trio/Tierce (need actual top-3).
@@ -620,7 +626,7 @@ export async function computeHitRateStats(db: any, date: string, engine: EloEngi
 
       // ── box-bet payouts for the model top-4 (mirror tg_notify build_extras) ──
       let boxPayouts: Array<{ pool: string; name: string; units: number; cost: number; dividend: number; net: number }> = [];
-      if (dividendsTrustworthy) {
+      {
         const m4nums = predictedTop4.map((p: any) => p.horseNumber).filter((v: any) => v != null && v !== '').map((v: any) => String(v));
         const mset = new Set<string>(m4nums);
         const a3nums = actualTop3.map((a: any) => a.horse_number).filter((v: any) => v != null && v !== '').map((v: any) => String(v));
@@ -724,7 +730,8 @@ export async function computeHitRateStats(db: any, date: string, engine: EloEngi
         scoreSourceBreakdown: { ensemble: ensembleRaces, eloOnly: eloOnlyRaces, total: races.length },
         lgbRunnerCoverage: lgbSlotsTotal ? { hits: lgbHitsTotal, slots: lgbSlotsTotal, pct: Math.round(lgbHitsTotal / lgbSlotsTotal * 1000) / 10 } : null,
         fallbackReason: ensembleRaces === 0 && races.length > 0 ? 'LGB_PREDICTIONS_MISSING' : null,
-        dividendsTrustworthy,
+        boxDivsFetched: wantBoxPayouts,
+        boxDivsComplete,
       },
     };
   }
@@ -2587,7 +2594,7 @@ analyzeRoutes.get('/factors', (c) => {
                 }
               } else {
                 const cached = await readHitRateCache(c.env.DB, date, engine);
-                if (cached && !hitRateCacheNeedsBoxRecompute(date, cached)) {
+                if (cached && !hitRateCacheNeedsBoxRecompute(cached)) {
                   return c.json({
                     date,
                     venue: cached.meeting?.venue,
@@ -2604,7 +2611,7 @@ analyzeRoutes.get('/factors', (c) => {
 
             await ensureHitRateCacheTable(c.env.DB).catch(() => {});
             if (hasAlpha) await ensureHitRateAlphaCacheTable(c.env.DB).catch(() => {});
-            const result = await computeHitRateStats(c.env.DB, date, engine, hasAlpha ? alphaOverride : undefined);
+            const result = await computeHitRateStats(c.env.DB, date, engine, hasAlpha ? alphaOverride : undefined, { boxPayouts: true });
             if ('error' in result) return c.json({ error: result.error }, result.status as any);
             if (hasAlpha) {
               await writeHitRateAlphaCache(c.env.DB, date, engine, alphaOverride as number, result).catch(() => {});

@@ -2956,7 +2956,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
           var head='<span class="cmp-covttl">本場四揀覆蓋</span><span class="cmp-covpill '+(cov===4?'ok':'')+'">'+covTxt+'</span>';
           var bp=race.boxPayouts||[];
           if(!bp.length){
-            var note=(cov===4||cov===3)?'未有官方派彩資料（歷史賽事只顯示覆蓋）':'四揀未中任何複式組合';
+            var note=(cov===4)?'派彩資料暫未提供':'四揀未中任何複式組合';
             el.innerHTML=head+'<div class="cmp-boxnote">'+note+'</div>';
             return;
           }

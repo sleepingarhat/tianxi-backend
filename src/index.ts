@@ -74,7 +74,7 @@ app.onError((err, c) => {
     let refreshed = 0, errors = 0;
     for (const row of (results ?? [])) {
       try {
-        const r = await computeHitRateStats(env.DB, row.date, 'v12');
+        const r = await computeHitRateStats(env.DB, row.date, 'v12', undefined, { boxPayouts: true });
         if ('error' in r) { errors++; continue; }
         await writeHitRateCache(env.DB, row.date, 'v12', r);
         refreshed++;
