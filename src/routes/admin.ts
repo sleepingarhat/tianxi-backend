@@ -1923,6 +1923,20 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
       .cmp-cell.match .cmp-draw{background:#f7e9b5;color:#7A5A20}
       .cmp-empty-box{padding:18px;text-align:center;color:var(--mut);font-size:12px}
       .cmp-status{font-size:11px;color:var(--mut);margin-left:auto}
+      .cmp-covdist{margin-top:12px;display:flex;flex-wrap:wrap;gap:8px;align-items:center;font-size:12px}
+      .cmp-covttl{font-weight:600;color:var(--ink,#222)}
+      .cmp-covpill{background:#f3f1ec;border:1px solid var(--rule);border-radius:12px;padding:2px 10px;color:var(--mut)}
+      .cmp-covpill.ok{background:#fff7d6;border-color:#e6cf7a;color:#7A5A20;font-weight:600}
+      .cmp-covpill.mut{background:transparent;border:none;color:var(--mut);padding-left:0}
+      .cmp-box{margin-top:10px;font-size:12px}
+      .cmp-boxlist{display:flex;flex-direction:column;gap:4px;margin-top:6px}
+      .cmp-boxrow{display:grid;grid-template-columns:1fr auto auto auto;gap:8px;align-items:center;padding:5px 8px;background:#fafafa;border:1px solid var(--rule);border-radius:4px}
+      .cmp-boxnm{font-weight:600}
+      .cmp-boxstk,.cmp-boxpay{color:var(--mut);white-space:nowrap}
+      .cmp-boxnet{font-weight:700;white-space:nowrap}
+      .cmp-boxnet.pos{color:var(--green,#1a7f37)}
+      .cmp-boxnet.neg{color:#b3261e}
+      .cmp-boxnote{color:var(--mut);margin-top:6px;font-size:11px}
       @media (max-width:520px){
         .cmp-grid{grid-template-columns:1fr;gap:8px}
         .cmp-col{aspect-ratio:auto;min-height:280px}
@@ -1941,6 +1955,8 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
         <div class="cmp-col"><h3>天喜預測 首 4 名</h3><div class="cmp-list" id="cmpLeft" aria-live="polite"><div class="cmp-empty-box">揀日期同場次以載入</div></div></div>
         <div class="cmp-col"><h3>實際賽果 首 4 名</h3><div class="cmp-list" id="cmpRight" aria-live="polite"><div class="cmp-empty-box">揀日期同場次以載入</div></div></div>
       </div>
+      <div class="cmp-covdist" id="cmpCovDist"></div>
+      <div class="cmp-box" id="cmpBox"></div>
     </section>
 
   <h2>資料來源覆蓋（14 個核心表）</h2>
@@ -2893,6 +2909,8 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
               raceSel.innerHTML = '<option>無場次</option>';
               status.textContent = date+' · 無比對資料';
               cmpRender([],[]);
+              cmpRenderCovDist([]);
+              cmpRenderBox(null);
               return;
             }
             raceSel.innerHTML = races.map(function(r){
@@ -2901,6 +2919,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
             }).join('');
             raceSel.disabled = false;
             status.textContent = date+' · '+races.length+' 場';
+            cmpRenderCovDist(races);
             cmpRenderRace(date, races[0].raceNumber);
           } catch(e){
             if (myToken !== _cmpToken) return;
@@ -2909,11 +2928,54 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
             cmpRender([],[]);
           }
         }
+        function cmpCovOf(race){
+          var m4=(race.predictedTop4||[]).map(function(p){return p.horseNumber;}).filter(function(v){return v!=null&&v!=='';}).map(String);
+          var a4=(race.actualTop4||[]).map(function(a){return a.horseNumber;}).filter(function(v){return v!=null&&v!=='';}).map(String);
+          if(!m4.length||!a4.length) return null;
+          var ms={}; m4.forEach(function(x){ ms[x]=true; });
+          if(Object.keys(ms).length!==4) return null;
+          var n=0; a4.forEach(function(x){ if(ms[x]) n++; });
+          return n;
+        }
+        function cmpRenderCovDist(races){
+          var el=document.getElementById('cmpCovDist'); if(!el) return;
+          var c4=0,c3=0,c2=0,eligible=0;
+          (races||[]).forEach(function(r){ var c=cmpCovOf(r); if(c==null) return; eligible++; if(c===4)c4++; else if(c===3)c3++; else if(c===2)c2++; });
+          if(!eligible){ el.innerHTML=''; return; }
+          el.innerHTML='<span class="cmp-covttl">模型四揀覆蓋（唔分名次）</span>'
+            +'<span class="cmp-covpill ok">全中 4/4：'+c4+' 場</span>'
+            +'<span class="cmp-covpill">4 中 3：'+c3+' 場</span>'
+            +'<span class="cmp-covpill">4 中 2：'+c2+' 場</span>'
+            +'<span class="cmp-covpill mut">合資格 '+eligible+' 場</span>';
+        }
+        function cmpRenderBox(race){
+          var el=document.getElementById('cmpBox'); if(!el) return;
+          if(!race){ el.innerHTML=''; return; }
+          var cov=cmpCovOf(race);
+          var covTxt=cov==null?'—':(cov===4?'全中 4/4':('4 中 '+cov));
+          var head='<span class="cmp-covttl">本場四揀覆蓋</span><span class="cmp-covpill '+(cov===4?'ok':'')+'">'+covTxt+'</span>';
+          var bp=race.boxPayouts||[];
+          if(!bp.length){
+            var note=(cov===4||cov===3)?'未有官方派彩資料（歷史賽事只顯示覆蓋）':'四揀未中任何複式組合';
+            el.innerHTML=head+'<div class="cmp-boxnote">'+note+'</div>';
+            return;
+          }
+          var rows=bp.map(function(p){
+            var gain=p.net>=0?('賺 $'+Number(p.net).toLocaleString()):('蝕 $'+Number(-p.net).toLocaleString());
+            var cls=p.net>=0?'pos':'neg';
+            return '<div class="cmp-boxrow"><span class="cmp-boxnm">'+cmpEsc(p.name)+'</span>'
+              +'<span class="cmp-boxstk">箱 '+p.units+' 注 $'+p.cost+'</span>'
+              +'<span class="cmp-boxpay">派 $'+Number(p.dividend).toLocaleString()+'</span>'
+              +'<span class="cmp-boxnet '+cls+'">'+gain+'</span></div>';
+          }).join('');
+          el.innerHTML=head+'<div class="cmp-boxlist">'+rows+'</div><div class="cmp-boxnote">買中嗰 4 隻打複式，一注 $10 起，本小利大。</div>';
+        }
         function cmpRenderRace(date, raceNum){
           var data = _cmpCache[date]; if (!data) return;
           var race = (data.races||[]).find(function(r){ return String(r.raceNumber)===String(raceNum); });
-          if (!race) { cmpRender([],[]); return; }
+          if (!race) { cmpRender([],[]); cmpRenderBox(null); return; }
           cmpRender(race.predictedTop4||race.predictedTop3||[], race.actualTop4||race.actualTop3||[]);
+          cmpRenderBox(race);
         }
         function cmpInit(){
           var dateSel = document.getElementById('cmpDate');

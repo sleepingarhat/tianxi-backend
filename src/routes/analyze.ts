@@ -499,6 +499,35 @@ export async function computeHitRateStats(db: any, date: string, engine: EloEngi
     actualByRace.get(r.race_number)!.push(r);
   }
   const picksData = await computePicksFromEntries(db, date, meeting, entries, engine, alphaOverride);
+  // ── 模型四揀複式 box-bet payouts (mirror tools/tg_notify build_extras) ──
+  // Official dividends read from D1. Historical D1 dividends were imported with a
+  // comma-truncation bug (fixed in scripts/import-csv.ts 2026-06-10); only meetings
+  // on/after DIVIDENDS_TRUSTWORTHY_FROM are guaranteed correct, so box payouts are
+  // gated to those dates. Coverage (4中N) is derived consumer-side from predicted/
+  // actual top-4 and is always available (incl. historical meetings).
+  const DIVIDENDS_TRUSTWORTHY_FROM = '2026-06-11';
+  const dividendsTrustworthy = date >= DIVIDENDS_TRUSTWORTHY_FROM;
+  const divByRaceNumber = new Map<number, Record<string, number>>();
+  if (dividendsTrustworthy) {
+    const idToRn = new Map<string, number>();
+    const divRaceIds = picksData.races.map((r: any) => {
+      const id = `race_${date}_${meeting.venue}_${r.raceNumber}`;
+      idToRn.set(id, r.raceNumber);
+      return id;
+    });
+    if (divRaceIds.length) {
+      const ph = divRaceIds.map(() => '?').join(',');
+      const { results: divRows } = await db.prepare(`SELECT race_id, pool_type, dividend FROM dividends WHERE pool_type IN ('FF','TRI','TCE','QTT') AND race_id IN (${ph})`).bind(...divRaceIds).all<any>().catch(() => ({ results: [] as any[] }));
+      for (const d of (divRows ?? [])) {
+        const rn = idToRn.get(d.race_id);
+        if (rn == null) continue;
+        const amt = Number(d.dividend);
+        if (!isFinite(amt)) continue;
+        if (!divByRaceNumber.has(rn)) divByRaceNumber.set(rn, {});
+        divByRaceNumber.get(rn)![String(d.pool_type)] = amt;
+      }
+    }
+  }
   // HK pool hit metrics — computed per race, aggregated into summary.
     // racesEvaluated = denom for top1/top3-any/Q/QP/Trio/Tierce (need actual top-3).
     // first4Eligible = denom for First 4 (need actual top-4).
@@ -564,6 +593,32 @@ export async function computeHitRateStats(db: any, date: string, engine: EloEngi
         top4SumIntersect += top4IntersectCount;
       }
 
+      // ── box-bet payouts for the model top-4 (mirror tg_notify build_extras) ──
+      let boxPayouts: Array<{ pool: string; name: string; units: number; cost: number; dividend: number; net: number }> = [];
+      if (dividendsTrustworthy) {
+        const m4nums = predictedTop4.map((p: any) => p.horseNumber).filter((v: any) => v != null && v !== '').map((v: any) => String(v));
+        const mset = new Set<string>(m4nums);
+        const a3nums = actualTop3.map((a: any) => a.horse_number).filter((v: any) => v != null && v !== '').map((v: any) => String(v));
+        const a4nums = actualTop4.map((a: any) => a.horse_number).filter((v: any) => v != null && v !== '').map((v: any) => String(v));
+        if (mset.size === 4) {
+          const trioWin = a3nums.length === 3 && a3nums.every((x: string) => mset.has(x));
+          const ffWin = a4nums.length === 4 && a4nums.every((x: string) => mset.has(x));
+          const divs = divByRaceNumber.get(race.raceNumber) ?? {};
+          const pools: Array<{ pool: string; d1: string; name: string; units: number; win: boolean }> = [
+            { pool: 'FF', d1: 'FF', name: '四連環（任序首4）', units: 1, win: ffWin },
+            { pool: 'TRIO', d1: 'TRI', name: '單T（任序首3）', units: 4, win: trioWin },
+            { pool: 'TIERCE', d1: 'TCE', name: '三重彩（依序首3）', units: 24, win: trioWin },
+            { pool: 'QUARTET', d1: 'QTT', name: '四重彩（依序首4）', units: 24, win: ffWin },
+          ];
+          for (const pl of pools) {
+            if (!pl.win) continue;
+            const amt = divs[pl.d1];
+            if (amt == null) continue;
+            const cost = pl.units * 10;
+            boxPayouts.push({ pool: pl.pool, name: pl.name, units: pl.units, cost, dividend: Math.round(amt), net: Math.round(amt - cost) });
+          }
+        }
+      }
       return {
         raceNumber: race.raceNumber, title: race.title, distance: race.distance, going: race.going,
         predictedTop3: predictedTop3.map((p: any) => ({
@@ -603,6 +658,7 @@ export async function computeHitRateStats(db: any, date: string, engine: EloEngi
         top1Hit, top3IntersectCount: intersect, top3AnyHit,
         top4IntersectCount,
         quinellaHit, qpHit, trioHit, tierceHit, first4Hit,
+        boxPayouts,
       };
     });
     const rate = (n: number, d: number) => d ? Math.round(n / d * 1000) / 10 : null;
@@ -643,6 +699,7 @@ export async function computeHitRateStats(db: any, date: string, engine: EloEngi
         scoreSourceBreakdown: { ensemble: ensembleRaces, eloOnly: eloOnlyRaces, total: races.length },
         lgbRunnerCoverage: lgbSlotsTotal ? { hits: lgbHitsTotal, slots: lgbSlotsTotal, pct: Math.round(lgbHitsTotal / lgbSlotsTotal * 1000) / 10 } : null,
         fallbackReason: ensembleRaces === 0 && races.length > 0 ? 'LGB_PREDICTIONS_MISSING' : null,
+        dividendsTrustworthy,
       },
     };
   }
