@@ -55,20 +55,26 @@ export const analyzeRoutes = new Hono<{ Bindings: Env }>();
     const labels: Array<[string, string]> = [['四連環', 'FF'], ['單T', 'TRI'], ['三重彩', 'TCE'], ['四重彩', 'QTT']];
     const settledOk = await Promise.allSettled(raceNumbers.map(async (rn) => {
       const url = `https://racing.hkjc.com/zh-hk/local/information/localresults?racedate=${racedate}&Racecourse=${venue}&RaceNo=${rn}`;
-      const resp = await fetch(url, { headers: { 'user-agent': UA, 'accept-language': 'zh-HK,zh;q=0.9', 'accept': 'text/html' } });
-      if (!resp.ok) return { rn, ok: false };
-      const body = await resp.text();
-      const settled = body.includes('勝出組合');
-      const divs: Record<string, number> = {};
-      for (const [label, pool] of labels) {
-        const m = body.match(new RegExp('>' + label + '</td>[^<]*<td[^>]*>([^<]*)</td>[^<]*<td[^>]*>([^<]*)</td>'));
-        if (!m) continue;
-        const amt = parseFloat(m[2].trim().replace(/,/g, ''));
-        if (!isFinite(amt) || amt <= 0) continue;
-        divs[pool] = amt;
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 10000);
+      try {
+        const resp = await fetch(url, { headers: { 'user-agent': UA, 'accept-language': 'zh-HK,zh;q=0.9', 'accept': 'text/html' }, signal: ctrl.signal });
+        if (!resp.ok) return { rn, ok: false };
+        const body = await resp.text();
+        const settled = body.includes('勝出組合');
+        const divs: Record<string, number> = {};
+        for (const [label, pool] of labels) {
+          const m = body.match(new RegExp('>' + label + '</td>[^<]*<td[^>]*>([^<]*)</td>[^<]*<td[^>]*>([^<]*)</td>'));
+          if (!m) continue;
+          const amt = parseFloat(m[2].trim().replace(/,/g, ''));
+          if (!isFinite(amt) || amt <= 0) continue;
+          divs[pool] = amt;
+        }
+        if (Object.keys(divs).length) byRace.set(rn, divs);
+        return { rn, ok: settled };
+      } finally {
+        clearTimeout(timer);
       }
-      if (Object.keys(divs).length) byRace.set(rn, divs);
-      return { rn, ok: settled };
     }));
     let okCount = 0;
     for (const r of settledOk) { if (r.status === 'fulfilled' && r.value.ok) okCount++; }
@@ -82,7 +88,11 @@ export const analyzeRoutes = new Hono<{ Bindings: Env }>();
   function hitRateCacheNeedsBoxRecompute(cached: any): boolean {
     const s = cached && cached.summary;
     if (!s) return false;
-    return s.boxDivsFetched !== true;
+    if (s.boxDivsFetched !== true) return true; // legacy/rollup cache without payouts -> fill once
+    if (s.boxDivsComplete === true) return false;
+    // a needed dividend fetch failed (e.g. HKJC briefly down) -> bounded retry, not a tight loop
+    const at = cached.cachedAt ? Date.parse(cached.cachedAt) : NaN;
+    return isFinite(at) && (Date.now() - at) > 6 * 3600 * 1000;
   }
 
   export async function readHitRateCache(db: D1Database, date: string, engine: string): Promise<any | null> {
@@ -2627,7 +2637,7 @@ analyzeRoutes.get('/factors', (c) => {
 
             await ensureHitRateCacheTable(c.env.DB).catch(() => {});
             if (hasAlpha) await ensureHitRateAlphaCacheTable(c.env.DB).catch(() => {});
-            const result = await computeHitRateStats(c.env.DB, date, engine, hasAlpha ? alphaOverride : undefined, { boxPayouts: true });
+            const result = await computeHitRateStats(c.env.DB, date, engine, hasAlpha ? alphaOverride : undefined, { boxPayouts: !hasAlpha });
             if ('error' in result) return c.json({ error: result.error }, result.status as any);
             if (hasAlpha) {
               await writeHitRateAlphaCache(c.env.DB, date, engine, alphaOverride as number, result).catch(() => {});
