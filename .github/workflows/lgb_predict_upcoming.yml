@@ -20,6 +20,10 @@ on:
   schedule:
     - cron: '0 20 * * *'  # 04:00 HKT — after capy_racecard daily sync
 
+concurrency:
+  group: lgb-predict-upcoming
+  cancel-in-progress: false
+
 jobs:
   predict:
     runs-on: ubuntu-latest
