@@ -230,6 +230,7 @@ CREATE TABLE IF NOT EXISTS entries_upcoming (
   priority_order TEXT,                 -- '正選' / '後備N'
   scraped_at TEXT,
   source_commit TEXT,
+  post_time TEXT,                      -- HKJC race postTime ISO (e.g. 2026-06-13T16:00:00+08:00) -> startTime HH:MM
   UNIQUE(race_date, venue, race_number, horse_number)
 );
 

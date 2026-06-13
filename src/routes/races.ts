@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 import type { Env } from '../types';
+import { hhmmFromPostTime, fetchPostTimeMap } from '../lib/race-time';
 
 export const racesRoutes = new Hono<{ Bindings: Env }>();
 
@@ -12,11 +13,13 @@ racesRoutes.get('/:id', async (c) => {
     FROM races r
     JOIN race_meetings rm ON rm.id = r.meeting_id
     WHERE r.id = ?
-  `).bind(id).first();
+  `).bind(id).first<any>();
 
   if (!race) {
     return c.json({ error: '找不到該場賽事' }, 404);
   }
+
+  const ptMap = await fetchPostTimeMap(c.env.DB, race.date, race.venue);
 
   // 出賽馬匹 + 賽果
   const { results: entries } = await c.env.DB.prepare(`
@@ -63,7 +66,7 @@ racesRoutes.get('/:id', async (c) => {
     track: race.track,
     course: race.course,
     prize: race.prize,
-    startTime: race.start_time,
+    startTime: hhmmFromPostTime(ptMap.get(race.race_number)) ?? race.start_time,
     videoUrl: race.video_url,
     horses: (entries ?? []).map((e: any) => ({
       id: e.horse_id,
@@ -124,6 +127,8 @@ racesRoutes.get('/:id/entries', async (c) => {
 
   if (!race) return c.json({ error: '找不到該場賽事' }, 404);
 
+  const ptMap = await fetchPostTimeMap(c.env.DB, race.date, race.venue);
+
   // All races in the same meeting (for chip-row navigation)
   const { results: siblings } = await c.env.DB.prepare(
     'SELECT id, race_number, start_time FROM races WHERE meeting_id = ? ORDER BY race_number'
@@ -160,13 +165,13 @@ racesRoutes.get('/:id/entries', async (c) => {
       going: race.going,
       track: race.track,
       course: race.course,
-      startTime: race.start_time,
+      startTime: hhmmFromPostTime(ptMap.get(race.race_number)) ?? race.start_time,
       handicapType: race.title,
     },
     meetingRaces: (siblings ?? []).map((r) => ({
       id: r.id,
       raceNumber: r.race_number,
-      startTime: r.start_time,
+      startTime: hhmmFromPostTime(ptMap.get(r.race_number)) ?? r.start_time,
     })),
     entries: (entries ?? []).map((e: any) => ({
       horseId: e.horse_id,

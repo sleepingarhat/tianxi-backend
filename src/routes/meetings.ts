@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 import type { Env, RaceMeetingRow } from '../types';
+import { hhmmFromPostTime, fetchPostTimeMap } from '../lib/race-time';
 
 export const meetingsRoutes = new Hono<{ Bindings: Env }>();
 
@@ -43,6 +44,8 @@ async function buildRacecardFromEntries(
       ORDER BY e.race_number, e.horse_number`
   ).bind(date, venue).all<any>();
 
+  const ptMap = await fetchPostTimeMap(db, date, venue);
+
   const byRace = new Map<number, any[]>();
   for (const r of rows ?? []) {
     if (!byRace.has(r.race_number)) byRace.set(r.race_number, []);
@@ -62,7 +65,7 @@ async function buildRacecardFromEntries(
       track: first.track ?? null,
       course: first.course ?? null,
       prize: null,
-      startTime: null,
+      startTime: hhmmFromPostTime(ptMap.get(rn)) ?? null,
       videoUrl: null,
       isDeclaredCard: true,
       horses: entries.map((e: any) => ({
@@ -242,6 +245,7 @@ meetingsRoutes.get('/:date', async (c) => {
     ).bind(meeting.id).all();
 
     // 每場賽事附帶出賽馬匹
+    const ptMap = await fetchPostTimeMap(c.env.DB, meeting.date, meeting.venue);
     const racesWithHorses = await Promise.all(
       (races ?? []).map(async (race: any) => {
         const { results: entries } = await c.env.DB.prepare(`
@@ -269,7 +273,7 @@ meetingsRoutes.get('/:date', async (c) => {
           track: race.track,
           course: race.course,
           prize: race.prize,
-          startTime: race.start_time,
+          startTime: hhmmFromPostTime(ptMap.get(race.race_number)) ?? race.start_time,
           videoUrl: race.video_url,
           horses: (entries ?? []).map((e: any) => ({
             id: e.horse_id,

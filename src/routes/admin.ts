@@ -1292,6 +1292,21 @@ adminRoutes.post('/api/migrate-prediction-log-lgb', async (c) => {
     }, 410);
   });
 
+  // ── /api/migrate-entries-post-time — one-shot: add entries_upcoming.post_time ──
+  // Adds post_time TEXT so the racecard enricher can persist HKJC race postTime
+  // (ISO). meetings/races endpoints then expose startTime HH:MM for dashboard +
+  // schedule + race detail. Idempotent (duplicate-column swallowed).
+  adminRoutes.post('/api/migrate-entries-post-time', async (c) => {
+    try {
+      await c.env.DB.prepare('ALTER TABLE entries_upcoming ADD COLUMN post_time TEXT').run();
+      return c.json({ ok: true, migrated: true });
+    } catch (err: any) {
+      const msg = String(err?.message ?? err);
+      if (/duplicate column/i.test(msg)) return c.json({ ok: true, migrated: false, note: 'already exists' });
+      return c.json({ ok: false, error: msg }, 500);
+    }
+  });
+
   adminRoutes.post('/api/sql-read', async (c) => {
     try {
       const body = await c.req.json<{ sql?: string }>();

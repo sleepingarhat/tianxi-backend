@@ -115,8 +115,8 @@
          (id, race_date, venue, race_number, race_class, distance, track, course,
           horse_id, horse_number, horse_code, draw, jockey_name, jockey_id,
           trainer_name, trainer_id, actual_weight, declared_weight, gear,
-          rating, priority_order, scraped_at, source_commit)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          rating, priority_order, post_time, scraped_at, source_commit)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(race_date, venue, race_number, horse_number) DO UPDATE SET
          race_class      = excluded.race_class,
          distance        = excluded.distance,
@@ -134,6 +134,7 @@
          gear            = excluded.gear,
          rating          = excluded.rating,
          priority_order  = excluded.priority_order,
+         post_time       = excluded.post_time,
          scraped_at      = excluded.scraped_at,
          source_commit   = excluded.source_commit`,
     );
@@ -205,6 +206,7 @@
         const track: string | null = race.raceTrack?.description_en ?? null;
         const course: string | null = race.raceCourse?.displayCode ?? race.raceCourse?.description_en ?? null;
         const raceClass: string | null = race.claCode ?? race.raceClass_en ?? null;
+        const postTime: string | null = race.postTime ?? null;
         const runners: any[] = race.runners ?? [];
 
         for (const runner of runners) {
@@ -246,7 +248,7 @@
             draw, jNameCh || null, null, // jockey_id = null (avoids FK; name kept for display)
             tNameCh || null, null, // trainer_id = null (avoids FK; name kept for display)
             actualWeight, declaredWeight, gear,
-            rating, priorityOrder,
+            rating, priorityOrder, postTime,
             new Date().toISOString(), sourceCommit,
           );
           inserted++;
