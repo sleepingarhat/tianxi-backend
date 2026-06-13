@@ -30,8 +30,12 @@ export async function fetchPostTimeMap(
     for (const r of results ?? []) {
       if (!out.has(r.race_number)) out.set(r.race_number, r.post_time);
     }
-  } catch {
-    // post_time column not present yet (pre-migration) — degrade gracefully.
+  } catch (err) {
+    // The post_time column exists post-migration, so a throw here is a real
+    // D1/query error, not the expected pre-migration state. Log it (visible via
+    // wrangler tail) instead of silently rendering every start time as a
+    // placeholder; still return an empty map so the rest of the meeting renders.
+    console.error('fetchPostTimeMap failed', { date, venue, err: String(err) });
   }
   return out;
 }
