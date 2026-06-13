@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import type { Env, RaceMeetingRow } from '../types';
 import { hhmmFromPostTime, fetchPostTimeMap } from '../lib/race-time';
-import { fetchWinOddsMap } from '../lib/live-odds';
+import { fetchLatestWinOddsByRace, normHorseKey } from '../lib/market-blend';
 
 export const meetingsRoutes = new Hono<{ Bindings: Env }>();
 
@@ -46,7 +46,7 @@ async function buildRacecardFromEntries(
   ).bind(date, venue).all<any>();
 
   const ptMap = await fetchPostTimeMap(db, date, venue);
-  const oddsMap = await fetchWinOddsMap(db, date, venue);
+  const oddsByRace = await fetchLatestWinOddsByRace(db, date, venue);
 
   const byRace = new Map<number, any[]>();
   for (const r of rows ?? []) {
@@ -83,7 +83,7 @@ async function buildRacecardFromEntries(
         trainerCh: e.trainer_name,
         finishingPosition: null,
         finishTime: null,
-        winOdds: oddsMap.get(rn)?.get(e.horse_number) ?? null,
+        winOdds: oddsByRace.get(rn)?.odds.get(normHorseKey(e.horse_number)) ?? null,
         runningPosition: null,
         lbw: null,
         gear: e.gear,
