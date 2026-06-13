@@ -17,6 +17,81 @@ async function declaredRaceCount(db: Env['DB'], date: string, venue: string): Pr
   return row?.n ?? 0;
 }
 
+// Pre-results racecard: the post-race `races` table is empty until results
+// land, but the declared field (entries_upcoming) exists from the moment the
+// racecard is published. Build race rows in the same shape as /:date so the
+// dashboard RACE CARD + schedule featured meeting can show the day's races
+// (field size, class, distance) BEFORE the meeting runs. Post times / going /
+// prize are unknown pre-results and fill in once the races table is populated.
+async function buildRacecardFromEntries(
+  db: Env['DB'],
+  date: string,
+  venue: string,
+  trackCondition: string | null,
+): Promise<any[]> {
+  const { results: rows } = await db.prepare(
+    `SELECT
+        e.race_number, e.race_class, e.distance, e.track, e.course,
+        e.horse_id, e.horse_number, e.horse_code, e.draw,
+        e.jockey_name, e.trainer_name, e.actual_weight, e.declared_weight,
+        e.rating, e.gear, e.priority_order,
+        h.name_en, h.name_ch, h.code, h.current_rating, h.sire, h.dam, h.dam_sire
+       FROM entries_upcoming e
+       LEFT JOIN horses h ON h.id = e.horse_id
+      WHERE e.race_date = ? AND e.venue = ? AND e.race_number > 0
+        AND (e.priority_order IS NULL OR e.priority_order NOT LIKE '後備%')
+      ORDER BY e.race_number, e.horse_number`
+  ).bind(date, venue).all<any>();
+
+  const byRace = new Map<number, any[]>();
+  for (const r of rows ?? []) {
+    if (!byRace.has(r.race_number)) byRace.set(r.race_number, []);
+    byRace.get(r.race_number)!.push(r);
+  }
+
+  return Array.from(byRace.keys()).sort((a, b) => a - b).map((rn) => {
+    const entries = byRace.get(rn)!;
+    const first = entries[0];
+    return {
+      id: `race_${date}_${venue}_${rn}`,
+      raceNumber: rn,
+      title: null,
+      class: first.race_class ?? null,
+      distance: first.distance ?? null,
+      going: trackCondition ?? null,
+      track: first.track ?? null,
+      course: first.course ?? null,
+      prize: null,
+      startTime: null,
+      videoUrl: null,
+      isDeclaredCard: true,
+      horses: entries.map((e: any) => ({
+        id: e.horse_id,
+        horseNumber: e.horse_number,
+        name: e.name_en,
+        nameCh: e.name_ch,
+        code: e.code ?? e.horse_code,
+        draw: e.draw,
+        jockey: e.jockey_name,
+        jockeyCh: e.jockey_name,
+        trainer: e.trainer_name,
+        trainerCh: e.trainer_name,
+        finishingPosition: null,
+        finishTime: null,
+        winOdds: null,
+        runningPosition: null,
+        lbw: null,
+        gear: e.gear,
+        weight: e.declared_weight ?? e.actual_weight,
+        rating: e.current_rating ?? e.rating,
+        sire: e.sire,
+        dam: e.dam,
+        damSire: e.dam_sire,
+      })),
+    };
+  });
+}
+
 // GET /api/meetings — 賽事日列表
 // Query params: ?from=2026-01-01&to=2026-04-16&venue=ST&limit=20&offset=0
 meetingsRoutes.get('/', async (c) => {
@@ -223,7 +298,16 @@ meetingsRoutes.get('/:date', async (c) => {
       })
     );
 
-    let totalRaces = racesWithHorses.length || meeting.total_races;
+    // Pre-results fallback: surface the declared racecard when the post-race
+    // `races` table isn't populated yet, so upcoming meetings aren't blank.
+    let racesOut: any[] = racesWithHorses;
+    if (racesOut.length === 0) {
+      racesOut = await buildRacecardFromEntries(
+        c.env.DB, meeting.date, meeting.venue, meeting.track_condition,
+      );
+    }
+
+    let totalRaces = racesOut.length || meeting.total_races;
     if (!totalRaces) totalRaces = await declaredRaceCount(c.env.DB, meeting.date, meeting.venue);
 
     return c.json({
@@ -234,7 +318,7 @@ meetingsRoutes.get('/:date', async (c) => {
       trackCondition: meeting.track_condition,
       weather: meeting.weather,
       totalRaces,
-      races: racesWithHorses,
+      races: racesOut,
     });
   });
 
