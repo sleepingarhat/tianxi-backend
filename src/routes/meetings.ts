@@ -3,6 +3,20 @@ import type { Env, RaceMeetingRow } from '../types';
 
 export const meetingsRoutes = new Hono<{ Bindings: Env }>();
 
+// Declared race count from the upcoming entry list (racecard). Used when a
+// meeting's races table isn't populated yet (pre-results) so single-meeting
+// endpoints report the declared field size (e.g. 11 場) instead of 0/null,
+// mirroring the COALESCE fallback already used by the list endpoint.
+async function declaredRaceCount(db: Env['DB'], date: string, venue: string): Promise<number> {
+  const row = await db
+    .prepare(
+      "SELECT COUNT(DISTINCT race_number) AS n FROM entries_upcoming WHERE race_date = ? AND venue = ? AND race_number > 0"
+    )
+    .bind(date, venue)
+    .first<{ n: number }>();
+  return row?.n ?? 0;
+}
+
 // GET /api/meetings — 賽事日列表
 // Query params: ?from=2026-01-01&to=2026-04-16&venue=ST&limit=20&offset=0
 meetingsRoutes.get('/', async (c) => {
@@ -98,6 +112,9 @@ meetingsRoutes.get('/next', async (c) => {
     'SELECT id, race_number, title, class, distance, going, track, course, start_time FROM races WHERE meeting_id = ? ORDER BY race_number'
   ).bind(meeting.id).all<any>();
 
+  let totalRaces = (races ?? []).length || meeting.total_races;
+  if (!totalRaces) totalRaces = await declaredRaceCount(c.env.DB, meeting.date, meeting.venue);
+
   return c.json({
     id: meeting.id,
     date: meeting.date,
@@ -105,7 +122,7 @@ meetingsRoutes.get('/next', async (c) => {
     venueName: meeting.venue === 'ST' ? '沙田' : meeting.venue === 'HV' ? '跑馬地' : meeting.venue,
     trackCondition: meeting.track_condition,
     weather: meeting.weather,
-    totalRaces: (races ?? []).length || meeting.total_races,
+    totalRaces,
     fallback,
     races: (races ?? []).map((r) => ({
       id: r.id,
@@ -206,6 +223,9 @@ meetingsRoutes.get('/:date', async (c) => {
       })
     );
 
+    let totalRaces = racesWithHorses.length || meeting.total_races;
+    if (!totalRaces) totalRaces = await declaredRaceCount(c.env.DB, meeting.date, meeting.venue);
+
     return c.json({
       id: meeting.id,
       date: meeting.date,
@@ -213,7 +233,7 @@ meetingsRoutes.get('/:date', async (c) => {
       venueName: meeting.venue === 'ST' ? '沙田' : meeting.venue === 'HV' ? '跑馬地' : meeting.venue,
       trackCondition: meeting.track_condition,
       weather: meeting.weather,
-      totalRaces: racesWithHorses.length || meeting.total_races,
+      totalRaces,
       races: racesWithHorses,
     });
   });
@@ -230,6 +250,9 @@ meetingsRoutes.get('/next/upcoming', async (c) => {
     return c.json({ error: '暫時冇即將舉行的賽事' }, 404);
   }
 
+  let totalRaces = meeting.total_races;
+  if (!totalRaces) totalRaces = await declaredRaceCount(c.env.DB, meeting.date, meeting.venue);
+
   return c.json({
     id: meeting.id,
     date: meeting.date,
@@ -237,7 +260,7 @@ meetingsRoutes.get('/next/upcoming', async (c) => {
     venueName: meeting.venue === 'ST' ? '沙田' : meeting.venue === 'HV' ? '跑馬地' : meeting.venue,
     trackCondition: meeting.track_condition,
     weather: meeting.weather,
-    totalRaces: meeting.total_races,
+    totalRaces,
   });
 });
 
@@ -260,6 +283,8 @@ meetingsRoutes.get('/smart/current', async (c) => {
   }
 
   const isFuture = upcoming != null;
+  let totalRaces = pick.total_races;
+  if (!totalRaces) totalRaces = await declaredRaceCount(c.env.DB, pick.date, pick.venue);
   return c.json({
     id: pick.id,
     date: pick.date,
@@ -267,7 +292,7 @@ meetingsRoutes.get('/smart/current', async (c) => {
     venueName: pick.venue === 'ST' ? '沙田' : pick.venue === 'HV' ? '跑馬地' : pick.venue,
     trackCondition: pick.track_condition,
     weather: pick.weather,
-    totalRaces: pick.total_races,
+    totalRaces,
     mode: isFuture ? 'upcoming' : 'historical',
     isEntryListOnly: isFuture, // 未開跑 = 只有排位表
   });
