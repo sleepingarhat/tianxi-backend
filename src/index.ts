@@ -175,9 +175,80 @@ app.onError((err, c) => {
     }
   }
 
+  // ── Downsampled odds ARCHIVE (2026-06-16) ──────────────────────────
+  // Before the latest-day prune deletes the retention window, copy a thin
+  // slice of WIN/PLA odds + pool_totals (first + last 6 snapshots per series
+  // ≈ 7 timepoints) into permanent *_archive tables. Self-migrating
+  // (CREATE TABLE IF NOT EXISTS) so no manual D1 migration is needed.
+  // ~47MB/yr vs ~37GB/yr for full retention. The engine still ignores odds;
+  // this is groundwork for a future market-drift signal. MUST run BEFORE prune.
+  async function archiveOddsBeforePrune(env: Env): Promise<{
+    ok: boolean;
+    oddsArchived: number;
+    poolTotalsArchived: number;
+    error?: string;
+  }> {
+    try {
+      await env.DB.prepare(
+        `CREATE TABLE IF NOT EXISTS odds_archive (id TEXT PRIMARY KEY, race_date TEXT NOT NULL, venue TEXT NOT NULL, race_number INTEGER NOT NULL, pool_type TEXT NOT NULL, combination TEXT NOT NULL, odds REAL, snapshot_at TEXT NOT NULL, source_commit TEXT)`
+      ).run();
+      await env.DB.prepare(
+        `CREATE INDEX IF NOT EXISTS idx_odds_archive_lookup ON odds_archive (race_date, venue, race_number, pool_type, combination, snapshot_at)`
+      ).run();
+      await env.DB.prepare(
+        `CREATE TABLE IF NOT EXISTS pool_totals_archive (id TEXT PRIMARY KEY, race_date TEXT NOT NULL, venue TEXT NOT NULL, race_number INTEGER NOT NULL, pool_type TEXT NOT NULL, total_investment REAL, snapshot_at TEXT NOT NULL, source_commit TEXT)`
+      ).run();
+      await env.DB.prepare(
+        `CREATE INDEX IF NOT EXISTS idx_pool_totals_archive_lookup ON pool_totals_archive (race_date, venue, race_number, pool_type, snapshot_at)`
+      ).run();
+
+      // WIN/PLA odds: keep first + last 6 snapshots per series for the days the
+      // prune is about to delete (race_date < MAX). INSERT OR IGNORE on the
+      // shared id → idempotent across cron ticks.
+      const a1 = await env.DB.prepare(
+        `INSERT OR IGNORE INTO odds_archive (id, race_date, venue, race_number, pool_type, combination, odds, snapshot_at, source_commit)
+         SELECT id, race_date, venue, race_number, pool_type, combination, odds, snapshot_at, source_commit FROM (
+           SELECT *,
+             ROW_NUMBER() OVER (PARTITION BY race_date,venue,race_number,pool_type,combination ORDER BY snapshot_at ASC)  AS rn_asc,
+             ROW_NUMBER() OVER (PARTITION BY race_date,venue,race_number,pool_type,combination ORDER BY snapshot_at DESC) AS rn_desc
+           FROM odds_snapshots
+           WHERE pool_type IN ('WIN','PLA') AND race_date < (SELECT MAX(race_date) FROM odds_snapshots)
+         )
+         WHERE rn_asc = 1 OR rn_desc <= 6`
+      ).run();
+
+      // pool_totals (all pools — small money-flow signal): same downsample.
+      const a2 = await env.DB.prepare(
+        `INSERT OR IGNORE INTO pool_totals_archive (id, race_date, venue, race_number, pool_type, total_investment, snapshot_at, source_commit)
+         SELECT id, race_date, venue, race_number, pool_type, total_investment, snapshot_at, source_commit FROM (
+           SELECT *,
+             ROW_NUMBER() OVER (PARTITION BY race_date,venue,race_number,pool_type ORDER BY snapshot_at ASC)  AS rn_asc,
+             ROW_NUMBER() OVER (PARTITION BY race_date,venue,race_number,pool_type ORDER BY snapshot_at DESC) AS rn_desc
+           FROM pool_totals
+           WHERE race_date < (SELECT MAX(race_date) FROM pool_totals)
+         )
+         WHERE rn_asc = 1 OR rn_desc <= 6`
+      ).run();
+
+      return {
+        ok: true,
+        oddsArchived: (a1 as any)?.meta?.changes ?? 0,
+        poolTotalsArchived: (a2 as any)?.meta?.changes ?? 0,
+      };
+    } catch (e: any) {
+      return { ok: false, oddsArchived: 0, poolTotalsArchived: 0, error: e?.message ?? String(e) };
+    }
+  }
+
   // Manual trigger for admin verification.
   app.post('/admin/api/prune-odds', async (c) => {
     const out = await pruneOddsToLatestDay(c.env);
+    return c.json({ ...out, ranAt: new Date().toISOString() });
+  });
+
+  // Manual trigger for the downsampled odds archive (idempotent; safe anytime).
+  app.post('/admin/api/archive-odds', async (c) => {
+    const out = await archiveOddsBeforePrune(c.env);
     return c.json({ ...out, ranAt: new Date().toISOString() });
   });
 
@@ -193,10 +264,15 @@ app.onError((err, c) => {
       ctx.waitUntil(
         backfillPredictionResults(env).then((r) => console.log('[cron] prediction backfill', r)),
       );
-      // Run odds prune LAST so any same-day join in the above tasks has
-      // already executed. Single-day retention; engine doesn't need odds.
+      // Archive a thin WIN/PLA + pool_totals slice, THEN prune. Chained (not a
+      // separate waitUntil) so the archive copy always finishes before the
+      // prune deletes those rows. Archive is non-fatal (returns {ok:false}
+      // instead of throwing) → prune still runs even if archiving fails.
       ctx.waitUntil(
-        pruneOddsToLatestDay(env).then((r) => console.log('[cron] odds prune', r)),
+        archiveOddsBeforePrune(env)
+          .then((a) => console.log('[cron] odds archive', a))
+          .then(() => pruneOddsToLatestDay(env))
+          .then((r) => console.log('[cron] odds prune', r)),
       );
     },
   };
