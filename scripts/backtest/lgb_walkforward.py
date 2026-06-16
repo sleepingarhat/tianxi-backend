@@ -91,6 +91,10 @@ FEATURE_COLS = [
       # dump-features.ts (leak-safe, free) — re-add the names here to re-test a
       # future interaction, but do NOT promote to predict_upcoming.py without a
       # walk-forward lift. (Same verdict as ①試閘 / ③場內相對.)
+      # ⑴ MARKET ODDS ("有賠率" parallel model ONLY — the no-odds model excludes
+      # these 4 via --exclude to stay byte-identical). Derived in load() from
+      # win_odds (SP, known at race-off → leak-safe pre-race feature).
+      "implied_prob", "implied_prob_norm", "log_win_odds", "market_rank",
       # going_code is appended below as a categorical feature.
   ]
 
@@ -124,6 +128,18 @@ def load(path: str) -> pd.DataFrame:
 
     # Sort: chronological day, then by race_id so groups are contiguous.
     df = df.sort_values(["race_date", "race_id"]).reset_index(drop=True)
+
+    # ⑴ Market-odds features (for the "有賠率" model). Derived from win_odds (SP).
+    # Invalid/missing odds -> NaN (LightGBM-native; eval loop fills -1.0 sentinel).
+    _o = pd.to_numeric(df["win_odds"], errors="coerce")
+    _o = _o.where(_o > 0)
+    df["implied_prob"] = 1.0 / _o
+    df["log_win_odds"] = np.log(_o)
+    df["_o_tmp"] = _o
+    _g = df.groupby("race_id")
+    df["market_rank"] = _g["_o_tmp"].rank(method="min", ascending=True)
+    df["implied_prob_norm"] = df["implied_prob"] / _g["implied_prob"].transform("sum")
+    df = df.drop(columns=["_o_tmp"])
 
     # Coerce numerics + sentinel for missing.
     for c in FEATURE_COLS:
