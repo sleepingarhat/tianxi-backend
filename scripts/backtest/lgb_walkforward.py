@@ -242,13 +242,13 @@ BOX_POOLS = [
     # 4 horses; a box wins iff the actual placed set is covered by our top-4, so the
     # exact-order pools (TCE/TRI/QTT) reuse the unordered trio/ff win flag.
     # POOL CODES follow the dividends-TABLE convention (import-csv.ts normalizePool):
-    #   四連環(任序首4)=FF, 單T(任序首3)=TCE, 三重彩(依序首3)=TRI, 四重彩(任序首4)=QTT.
+    #   四連環(任序首4)=FF, 單T(任序首3)=TCE, 三重彩(依序首3)=TRI, 四重彩(依序首4)=QTT.
     # NOTE analyze.ts LIVE HKJC scrape uses the OPPOSITE TRI/TCE labels - we read
     # the dividends table here, so we MUST use the table convention or 單T/三重彩 swap.
     ("FF",  "四連環(任序首4)", 1,  10,  "ff"),
     ("TCE", "單T(任序首3)",   4,  40,  "trio"),
     ("TRI", "三重彩(依序首3)", 24, 240, "trio"),
-    ("QTT", "四重彩(任序首4)", 24, 240, "ff"),
+    ("QTT", "四重彩(依序首4)", 24, 240, "ff"),
 ]
 _BOX_CODES = tuple(p[0] for p in BOX_POOLS)
 
