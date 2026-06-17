@@ -195,6 +195,39 @@ def train_booster(train_df: pd.DataFrame, args: argparse.Namespace, feat_cols: l
     return lgb.train(params, ds, num_boost_round=args.n_estimators)
 
 
+def rank_metrics(ranked, actual_top1, actual_top3, actual_top4):
+    # Box-coverage + place-rate metrics for ONE race given a model ranked
+    # horse_id list (best first). None when ranking unavailable or the actual
+    # placed set is incomplete (abandoned / short field). Box coverage is the
+    # product north-star (see replit.md / tx-betting-objective):
+    #   trio_nN   = P(actual top-3 within predicted top-N)   -> 三重彩 / 三T box
+    #   first4_nN = P(actual top-4 within predicted top-N)   -> 四重彩 box
+    #   qp_nN     = P(>=2 of actual top-3 within pred top-N) -> 位置Q / 連贏
+    #   place_in_topK = fraction of the 4 picks that finished top-K -> 入名率
+    keys = ("top1_hit", "top3_hit", "trio_n4", "trio_n5", "trio_n6",
+            "first4_n4", "first4_n5", "first4_n6", "qp_n4", "qp_n5", "qp_n6",
+            "place_in_top3", "place_in_top4")
+    if not ranked:
+        return {k: None for k in keys}
+    out = {}
+    out["top1_hit"] = bool(ranked[0] == actual_top1) if actual_top1 else None
+    out["top3_hit"] = (bool(ranked[0] in actual_top3)
+                       if len(actual_top3) == 3 else None)
+    for N in (4, 5, 6):
+        s = set(ranked[:N])
+        out["trio_n%d" % N] = (bool(actual_top3.issubset(s))
+                               if len(actual_top3) == 3 else None)
+        out["first4_n%d" % N] = (bool(actual_top4.issubset(s))
+                                 if len(actual_top4) == 4 else None)
+        out["qp_n%d" % N] = (bool(len(s & actual_top3) >= 2)
+                             if len(actual_top3) == 3 else None)
+    s4 = set(ranked[:4])
+    out["place_in_top3"] = (len(s4 & actual_top3) / 4.0
+                            if len(actual_top3) == 3 else None)
+    out["place_in_top4"] = (len(s4 & actual_top4) / 4.0
+                            if len(actual_top4) == 4 else None)
+    return out
+
 def main() -> int:
     args = parse_args()
     df = load(args.features)
@@ -237,68 +270,86 @@ def main() -> int:
         scores = booster.predict(Xt)
         ta = test_df.reset_index(drop=True)
 
-        actual_top1 = ta.loc[ta["finishing_position"].idxmin(), "horse_id"]
-        actual_top2 = set(ta.nsmallest(2, "finishing_position")["horse_id"].tolist())
-        actual_top3 = set(ta.nsmallest(3, "finishing_position")["horse_id"].tolist())
-        actual_top4 = set(ta.nsmallest(4, "finishing_position")["horse_id"].tolist())
+        # ----- actual finishing order (best first) -----
+        ta_fin = ta.dropna(subset=["finishing_position"]).copy()
+        ta_fin["finishing_position"] = ta_fin["finishing_position"].astype(float)
+        ta_fin = ta_fin.sort_values("finishing_position")
+        actual_order = ta_fin["horse_id"].tolist()
+        actual_top1 = actual_order[0] if actual_order else None
+        actual_top3 = set(actual_order[:3])
+        actual_top4 = set(actual_order[:4])
 
+        # ----- LGB ranking (model score desc) -----
         order = np.argsort(-scores)
         lgb_ranked = ta.iloc[order]["horse_id"].tolist()
-        lgb_top1 = lgb_ranked[0]
-        lgb_top2_set = set(lgb_ranked[:2])
-        lgb_top3_set = set(lgb_ranked[:3])
-        lgb_top4_set = set(lgb_ranked[:min(4, len(lgb_ranked))])
 
-        # ELO+factor baseline pick (highest baseline_score)
+        # ----- ELO+factor ranking (baseline_score desc) -----
         bs = pd.to_numeric(ta["baseline_score"], errors="coerce")
-        elo_top1 = ta.loc[bs.idxmax(), "horse_id"] if bs.notna().any() else None
+        if bs.notna().sum() >= 4:
+            elo_ranked = (ta.assign(_b=bs)
+                          .sort_values("_b", ascending=False, na_position="last")
+                          ["horse_id"].tolist())
+        else:
+            elo_ranked = None
 
-        # Market favourite (lowest positive win_odds)
+        # ----- Market ranking (win_odds asc = favourite first) -----
         odds = pd.to_numeric(ta["win_odds"], errors="coerce")
-        odds_valid = ta[odds > 0]
-        market_top1 = (
-            odds_valid.loc[odds_valid["win_odds"].astype(float).idxmin(), "horse_id"]
-            if len(odds_valid) >= 3 else None
-        )
+        odds = odds.where(odds > 0)
+        if odds.notna().sum() >= 4:
+            market_ranked = (ta.assign(_o=odds)
+                             .sort_values("_o", ascending=True, na_position="last")
+                             ["horse_id"].tolist())
+        else:
+            market_ranked = None
 
-        per_race.append({
+        rec = {
             "race_id": str(rid),
             "date": str(ta["race_date"].iloc[0]),
             "field_size": int(len(ta)),
-            "lgb_top1_hit": bool(lgb_top1 == actual_top1),
-            "lgb_top2_hit": bool(bool(lgb_top2_set & actual_top2)),
-            "lgb_top3_hit": bool(bool(lgb_top3_set & actual_top3)),
-            "lgb_top4_hit": bool(bool(lgb_top4_set & actual_top4)),
-            "elo_top1_hit": None if elo_top1 is None else bool(elo_top1 == actual_top1),
-            "elo_top3_hit": None if elo_top1 is None else bool(elo_top1 in actual_top3),
-            "market_top1_hit": None if market_top1 is None else bool(market_top1 == actual_top1),
-        })
+            # full ranked lists + actual order -> coverage recomputable OFFLINE
+            "actual_order6": actual_order[:6],
+            "lgb_top6": lgb_ranked[:6],
+            "elo_top6": (elo_ranked[:6] if elo_ranked else None),
+            "market_top6": (market_ranked[:6] if market_ranked else None),
+        }
+        for name, ranked in (("lgb", lgb_ranked),
+                             ("elo", elo_ranked),
+                             ("market", market_ranked)):
+            for k, v in rank_metrics(ranked, actual_top1,
+                                     actual_top3, actual_top4).items():
+                rec["%s_%s" % (name, k)] = v
+        per_race.append(rec)
 
         if args.verbose and (i + 1) % 200 == 0:
             print(f"  [{i + 1}/{len(race_ids)}] evaluated", file=sys.stderr)
 
     rdf = pd.DataFrame(per_race)
 
-    def rate(col: str) -> float | None:
-        if col not in rdf.columns or len(rdf) == 0:
+    _metric_keys = ("top1_hit", "top3_hit", "trio_n4", "trio_n5", "trio_n6",
+                    "first4_n4", "first4_n5", "first4_n6", "qp_n4", "qp_n5",
+                    "qp_n6", "place_in_top3", "place_in_top4")
+
+    def rate_on(sub, col):
+        if col not in sub.columns or len(sub) == 0:
             return None
-        s = rdf[col].dropna()
+        s = sub[col].dropna()
         return float(s.mean()) if len(s) else None
+
+    def metric_block(sub):
+        return {"%s_%s" % (name, k): rate_on(sub, "%s_%s" % (name, k))
+                for name in ("lgb", "elo", "market") for k in _metric_keys}
+
+    rdf8 = rdf[rdf["field_size"] >= 8] if len(rdf) else rdf
 
     summary = {
         "n_races_evaluated": int(len(rdf)),
+        "n_races_field8": int(len(rdf8)),
         "date_range": (
             [str(rdf["date"].min()), str(rdf["date"].max())] if len(rdf) else None
         ),
-        "metrics": {
-            "lgb_top1_hit_rate":    rate("lgb_top1_hit"),
-            "lgb_top2_hit_rate":    rate("lgb_top2_hit"),
-            "lgb_top3_hit_rate":    rate("lgb_top3_hit"),
-            "lgb_top4_hit_rate":    rate("lgb_top4_hit"),
-            "elo_top1_hit_rate":    rate("elo_top1_hit"),
-            "elo_top3_hit_rate":    rate("elo_top3_hit"),
-            "market_top1_hit_rate": rate("market_top1_hit"),
-        },
+        "field_size_mean": (float(rdf["field_size"].mean()) if len(rdf) else None),
+        "metrics": metric_block(rdf),
+        "metrics_field8": metric_block(rdf8),
         "feature_importance_gain": (
             dict(zip(feat_cols,
                      booster.feature_importance(importance_type="gain").tolist()))
@@ -312,6 +363,7 @@ def main() -> int:
             "n_estimators": args.n_estimators,
             "learning_rate": args.learning_rate,
             "min_data_in_leaf": args.min_data_in_leaf,
+            "excluded_features": sorted(exclude & set(FEATURE_COLS)),
         },
     }
 
