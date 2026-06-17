@@ -23,6 +23,7 @@ Usage:
 from __future__ import annotations
 import argparse
 import json
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -117,6 +118,9 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--verbose", action="store_true")
     ap.add_argument("--exclude", default="",
                     help="comma-separated FEATURE_COLS to drop (A/B ablation control)")
+    ap.add_argument("--db", default="bulk-local.db",
+                    help="sqlite DB holding the dividends table for box-bet ROI "
+                         "(same DB dump-features.ts reads); missing -> ROI disabled")
     return ap.parse_args()
 
 
@@ -228,9 +232,124 @@ def rank_metrics(ranked, actual_top1, actual_top3, actual_top4):
                             if len(actual_top4) == 4 else None)
     return out
 
+
+# ── Box-bet ROI (北極星: 入名率/箱形派彩, not top1). Mirrors the per-race box
+# payout in src/routes/analyze.ts but aggregated across the whole walk-forward so
+# model variants are judged by money won, not only coverage%. EVAL-ONLY: no train
+# / param change, so predict_upcoming.py needs NO mirror.
+BOX_POOLS = [
+    # (code, label, units, cost, win_key). units = #($10) combinations when boxing
+    # 4 horses; a box wins iff the actual placed set is covered by our top-4, so the
+    # exact-order pools (TCE/TRI/QTT) reuse the unordered trio/ff win flag.
+    # POOL CODES follow the dividends-TABLE convention (import-csv.ts normalizePool):
+    #   四連環(任序首4)=FF, 單T(任序首3)=TCE, 三重彩(依序首3)=TRI, 四重彩(任序首4)=QTT.
+    # NOTE analyze.ts LIVE HKJC scrape uses the OPPOSITE TRI/TCE labels - we read
+    # the dividends table here, so we MUST use the table convention or 單T/三重彩 swap.
+    ("FF",  "四連環(任序首4)", 1,  10,  "ff"),
+    ("TCE", "單T(任序首3)",   4,  40,  "trio"),
+    ("TRI", "三重彩(依序首3)", 24, 240, "trio"),
+    ("QTT", "四重彩(任序首4)", 24, 240, "ff"),
+]
+_BOX_CODES = tuple(p[0] for p in BOX_POOLS)
+
+
+def load_dividends(db_path: str) -> dict:
+    """race_id -> {pool_code: dividend}, straight from the bulk-local.db `dividends`
+    table (the same DB dump-features.ts reads). MAX() collapses the rare dead-heat
+    multi-combo rows. Returns {} (box-ROI silently disabled) when the DB/table is
+    absent so a CSV-only local run still works."""
+    if not Path(db_path).exists():
+        print(f"[lgb-wf] WARN: --db {db_path} not found -> box-bet ROI disabled", file=sys.stderr)
+        return {}
+    try:
+        con = sqlite3.connect(db_path)
+        rows = con.execute(
+            "SELECT race_id, pool_type, MAX(dividend) FROM dividends "
+            "WHERE pool_type IN ('FF','TCE','TRI','QTT') AND dividend IS NOT NULL "
+            "GROUP BY race_id, pool_type").fetchall()
+        con.close()
+    except Exception as e:
+        print(f"[lgb-wf] WARN: dividends load failed ({e}) -> box-ROI disabled", file=sys.stderr)
+        return {}
+    out: dict = {}
+    sums: dict = {}
+    for rid, pool, div in rows:
+        out.setdefault(str(rid), {})[str(pool)] = float(div)
+        s = sums.setdefault(str(pool), [0, 0.0])
+        s[0] += 1
+        s[1] += float(div)
+    # Sanity: 三重彩(TRI, exact-order) must pay FAR more than 單T(TCE, any-order);
+    # if this prints reversed the table pool-code convention has changed.
+    summ = {p: (n, round(t / n, 1) if n else None) for p, (n, t) in sums.items()}
+    print(f"[lgb-wf] dividends for {len(out):,} races; per-pool (n, mean$): {summ}", file=sys.stderr)
+    return out
+
+
+def box_roi(records: list[dict]) -> dict:
+    """Realised P&L of boxing each source's top-4 into each pool EVERY race.
+    Stake = units*$10/race; return = the pool dividend on a win. A winning box with
+    a missing dividend is dropped from BOTH stake and return for that pool (kept
+    unbiased) and counted in wins_nodiv. '_ALL' = box all four pools every race."""
+    res: dict = {}
+    for src in ("lgb", "elo", "market"):
+        acc = {c: dict(bets=0, wins=0, wins_nodiv=0, stake=0.0, ret=0.0) for c in _BOX_CODES}
+        for r in records:
+            top6 = r.get("%s_top6" % src)
+            if not top6:
+                continue
+            top4 = set(top6[:4])
+            ao = r.get("actual_order6") or []
+            a3, a4 = set(ao[:3]), set(ao[:4])
+            trio_ok = len(a3) == 3 and a3.issubset(top4)
+            ff_ok = len(a4) == 4 and a4.issubset(top4)
+            divs = r.get("box_divs") or {}
+            for code, _label, _units, cost, wk in BOX_POOLS:
+                settleable = (len(a3) == 3) if wk == "trio" else (len(a4) == 4)
+                if not settleable:
+                    continue
+                win = trio_ok if wk == "trio" else ff_ok
+                a = acc[code]
+                if win:
+                    amt = divs.get(code)
+                    if amt is None:
+                        a["wins_nodiv"] += 1
+                        continue
+                    a["bets"] += 1
+                    a["wins"] += 1
+                    a["stake"] += cost
+                    a["ret"] += amt
+                else:
+                    a["bets"] += 1
+                    a["stake"] += cost
+        out: dict = {}
+        tot = dict(bets=0, wins=0, stake=0.0, ret=0.0)
+        for code, label, units, cost, _wk in BOX_POOLS:
+            a = acc[code]
+            net = a["ret"] - a["stake"]
+            out[code] = dict(
+                label=label, units=units, cost_per_race=cost,
+                bets=a["bets"], wins=a["wins"], wins_nodiv=a["wins_nodiv"],
+                hit_rate=(a["wins"] / a["bets"] if a["bets"] else None),
+                stake=round(a["stake"], 1), ret=round(a["ret"], 1), net=round(net, 1),
+                roi_pct=(round(100 * net / a["stake"], 2) if a["stake"] else None),
+                avg_win_div=(round(a["ret"] / a["wins"], 1) if a["wins"] else None))
+            tot["bets"] += a["bets"]
+            tot["wins"] += a["wins"]
+            tot["stake"] += a["stake"]
+            tot["ret"] += a["ret"]
+        net = tot["ret"] - tot["stake"]
+        out["_ALL"] = dict(
+            label="四式全打/場", bets=tot["bets"], wins=tot["wins"],
+            stake=round(tot["stake"], 1), ret=round(tot["ret"], 1), net=round(net, 1),
+            roi_pct=(round(100 * net / tot["stake"], 2) if tot["stake"] else None))
+        res[src] = out
+    return res
+
+
 def main() -> int:
     args = parse_args()
     df = load(args.features)
+    box_divs_by_race = load_dividends(args.db)
     exclude = {c.strip() for c in args.exclude.split(",") if c.strip()}
     if exclude:
         miss = exclude - set(FEATURE_COLS)
@@ -311,6 +430,12 @@ def main() -> int:
             "lgb_top6": lgb_ranked[:6],
             "elo_top6": (elo_ranked[:6] if elo_ranked else None),
             "market_top6": (market_ranked[:6] if market_ranked else None),
+            # per-race box dividends (table convention; see BOX_POOLS) -> ROI
+            # fully recomputable OFFLINE alongside coverage.
+            "box_divs": {c: box_divs_by_race[str(rid)][c]
+                         for c in _BOX_CODES
+                         if str(rid) in box_divs_by_race
+                         and c in box_divs_by_race[str(rid)]},
         }
         for name, ranked in (("lgb", lgb_ranked),
                              ("elo", elo_ranked),
@@ -350,6 +475,8 @@ def main() -> int:
         "field_size_mean": (float(rdf["field_size"].mean()) if len(rdf) else None),
         "metrics": metric_block(rdf),
         "metrics_field8": metric_block(rdf8),
+        "box_roi": box_roi(per_race),
+        "box_roi_field8": box_roi([r for r in per_race if r["field_size"] >= 8]),
         "feature_importance_gain": (
             dict(zip(feat_cols,
                      booster.feature_importance(importance_type="gain").tolist()))
