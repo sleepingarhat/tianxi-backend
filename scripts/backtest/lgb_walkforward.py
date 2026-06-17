@@ -307,20 +307,21 @@ def box_roi(records: list[dict]) -> dict:
                 settleable = (len(a3) == 3) if wk == "trio" else (len(a4) == 4)
                 if not settleable:
                     continue
+                amt = divs.get(code)
                 win = trio_ok if wk == "trio" else ff_ok
                 a = acc[code]
-                if win:
-                    amt = divs.get(code)
-                    if amt is None:
+                if amt is None:
+                    # dividend unavailable for this race/pool -> NOT scoreable for
+                    # ANY source (winner OR loser) so per-pool denominators stay
+                    # identical across lgb/elo/market. Track would-be wins only.
+                    if win:
                         a["wins_nodiv"] += 1
-                        continue
-                    a["bets"] += 1
+                    continue
+                a["bets"] += 1
+                a["stake"] += cost
+                if win:
                     a["wins"] += 1
-                    a["stake"] += cost
                     a["ret"] += amt
-                else:
-                    a["bets"] += 1
-                    a["stake"] += cost
         out: dict = {}
         tot = dict(bets=0, wins=0, stake=0.0, ret=0.0)
         for code, label, units, cost, _wk in BOX_POOLS:
@@ -475,8 +476,11 @@ def main() -> int:
         "field_size_mean": (float(rdf["field_size"].mean()) if len(rdf) else None),
         "metrics": metric_block(rdf),
         "metrics_field8": metric_block(rdf8),
-        "box_roi": box_roi(per_race),
-        "box_roi_field8": box_roi([r for r in per_race if r["field_size"] >= 8]),
+        "box_roi": (box_roi(per_race) if box_divs_by_race
+                    else {"_disabled": "no dividends loaded from --db"}),
+        "box_roi_field8": (box_roi([r for r in per_race if r["field_size"] >= 8])
+                           if box_divs_by_race
+                           else {"_disabled": "no dividends loaded from --db"}),
         "feature_importance_gain": (
             dict(zip(feat_cols,
                      booster.feature_importance(importance_type="gain").tolist()))
