@@ -251,6 +251,9 @@ BOX_POOLS = [
     ("QTT", "四重彩(依序首4)", 24, 240, "ff"),
 ]
 _BOX_CODES = tuple(p[0] for p in BOX_POOLS)
+# QIN(連贏) is an EVAL-ONLY banker-wheel/parlay pool (NOT in BOX_POOLS, so box_roi
+# stays untouched); we still store its per-race dividend alongside the box ones.
+_DIV_CODES = _BOX_CODES + ("QIN",)
 
 
 def load_dividends(db_path: str) -> dict:
@@ -265,7 +268,7 @@ def load_dividends(db_path: str) -> dict:
         con = sqlite3.connect(db_path)
         rows = con.execute(
             "SELECT race_id, pool_type, MAX(dividend) FROM dividends "
-            "WHERE pool_type IN ('FF','TCE','TRI','QTT') AND dividend IS NOT NULL "
+            "WHERE pool_type IN ('FF','TCE','TRI','QTT','QIN') AND dividend IS NOT NULL "
             "GROUP BY race_id, pool_type").fetchall()
         con.close()
     except Exception as e:
@@ -345,6 +348,115 @@ def box_roi(records: list[dict]) -> dict:
             roi_pct=(round(100 * net / tot["stake"], 2) if tot["stake"] else None))
         res[src] = out
     return res
+
+
+# ───────── QIN(連贏) banker-wheel + 過關 (EVAL-ONLY) ─────────
+# No training / param change. 連贏 has a SINGLE winning combination per race =
+# the actual (1st,2nd) pair, and that dividend is complete in the source CSVs
+# (unlike 位置/位置Q which only store the winner / the (1,2)-pair), so QIN is the
+# only quinella/place-family pool we can score honestly. Win-determination needs
+# NO 馬號 mapping: records carry actual_order6 and {src}_top6 as horse_ids, and a
+# held pair wins iff it equals the actual top-2 set.
+_QIN_SRCS = ("lgb", "elo", "market")
+
+
+def _qin_eligible(rec: dict) -> bool:
+    """A race is QIN-comparable iff the (1st,2nd) pair, its dividend, race_no and a
+    top-4 for EVERY source are present. Requiring all sources keeps the denominators
+    identical across lgb/elo/market (clean money comparison)."""
+    ao = rec.get("actual_order6") or []
+    if len(ao) < 2 or ao[0] == ao[1]:
+        return False
+    if rec.get("race_no") is None:
+        return False
+    if (rec.get("box_divs") or {}).get("QIN") is None:
+        return False
+    for src in _QIN_SRCS:
+        top = rec.get(src + "_top6")
+        if not top or len(top) < 4:
+            return False
+    return True
+
+
+def _qin_hit(rec: dict, src: str) -> bool:
+    """Banker(top1) wheels with partners(top2..4): wins iff the banker is in the
+    actual top-2 AND the other top-2 horse is one of the 3 partners."""
+    top = rec[src + "_top6"]
+    banker, partners = top[0], set(top[1:4])
+    top2 = set(rec["actual_order6"][:2])
+    if banker not in top2:
+        return False
+    other = top2 - {banker}
+    return len(other) == 1 and next(iter(other)) in partners
+
+
+def qin_wheel_roi(records, min_field=None) -> dict:
+    """連贏拖式: banker(首選) 拖 #2/#3/#4 = 3 注 x $10 = $30/場.
+    命中派彩 = 該場連贏賠率(每 $10)."""
+    elig = [r for r in records
+            if _qin_eligible(r) and (min_field is None or r["field_size"] >= min_field)]
+    out = {"n_races": len(elig), "units": 3, "cost_per_race": 30}
+    for src in _QIN_SRCS:
+        bets = len(elig)
+        wins = stake = ret = 0.0
+        for r in elig:
+            stake += 30.0
+            if _qin_hit(r, src):
+                wins += 1
+                ret += r["box_divs"]["QIN"]
+        net = ret - stake
+        out[src] = dict(
+            bets=int(bets), wins=int(wins),
+            hit_rate=(round(wins / bets, 4) if bets else None),
+            stake=round(stake, 1), ret=round(ret, 1), net=round(net, 1),
+            roi_pct=(round(100 * net / stake, 2) if stake else None),
+            avg_win_div=(round(ret / wins, 1) if wins else None))
+    return out
+
+
+def qin_parlay_roi(records, legs, min_field=None) -> dict:
+    """連贏過關 (legs 關): each leg = the QIN banker-wheel for one race. Buys the
+    full cross-product of held combos = 3**legs lines x $10. At most ONE line can win
+    (each leg has a single true QIN pair); if EVERY leg's wheel hits, the winning line
+    rolls over = product(qin_div) / 10**(legs-1). Windows = same-day races with
+    CONSECUTIVE race_no, sliding (R1-R2, R2-R3, ...). Windows are defined by
+    eligibility (all-source) so denominators are identical across sources."""
+    by_date = {}
+    for r in records:
+        if _qin_eligible(r) and (min_field is None or r["field_size"] >= min_field):
+            by_date.setdefault(r["date"], {})[r["race_no"]] = r
+    n_lines = 3 ** legs
+    line_cost = 10.0
+    out = {"legs": legs, "lines": n_lines, "cost_per_window": n_lines * line_cost}
+    n_windows = 0
+    for byno in by_date.values():
+        for start in byno:
+            if all((start + k) in byno for k in range(legs)):
+                n_windows += 1
+    out["n_windows"] = n_windows
+    for src in _QIN_SRCS:
+        windows = wins = stake = ret = 0.0
+        for byno in by_date.values():
+            for start in sorted(byno):
+                legs_recs = [byno.get(start + k) for k in range(legs)]
+                if any(x is None for x in legs_recs):
+                    continue
+                windows += 1
+                stake += n_lines * line_cost
+                if all(_qin_hit(x, src) for x in legs_recs):
+                    wins += 1
+                    payout = 1.0
+                    for x in legs_recs:
+                        payout *= x["box_divs"]["QIN"]
+                    ret += payout / (10 ** (legs - 1))
+        net = ret - stake
+        out[src] = dict(
+            windows=int(windows), wins=int(wins),
+            hit_rate=(round(wins / windows, 4) if windows else None),
+            stake=round(stake, 1), ret=round(ret, 1), net=round(net, 1),
+            roi_pct=(round(100 * net / stake, 2) if stake else None),
+            avg_win_payout=(round(ret / wins, 1) if wins else None))
+    return out
 
 
 def main() -> int:
@@ -433,8 +545,10 @@ def main() -> int:
             "market_top6": (market_ranked[:6] if market_ranked else None),
             # per-race box dividends (table convention; see BOX_POOLS) -> ROI
             # fully recomputable OFFLINE alongside coverage.
+            "race_no": (int(ta["race_no"].iloc[0])
+                        if pd.notna(ta["race_no"].iloc[0]) else None),
             "box_divs": {c: box_divs_by_race[str(rid)][c]
-                         for c in _BOX_CODES
+                         for c in _DIV_CODES
                          if str(rid) in box_divs_by_race
                          and c in box_divs_by_race[str(rid)]},
         }
@@ -481,6 +595,17 @@ def main() -> int:
         "box_roi_field8": (box_roi([r for r in per_race if r["field_size"] >= 8])
                            if box_divs_by_race
                            else {"_disabled": "no dividends loaded from --db"}),
+        "qin_wheel_roi": (qin_wheel_roi(per_race) if box_divs_by_race
+                          else {"_disabled": "no dividends loaded from --db"}),
+        "qin_wheel_roi_field8": (qin_wheel_roi(per_race, 8) if box_divs_by_race
+                                 else {"_disabled": "no dividends loaded from --db"}),
+        "qin_parlay_roi": ({"leg2": qin_parlay_roi(per_race, 2),
+                            "leg3": qin_parlay_roi(per_race, 3)} if box_divs_by_race
+                           else {"_disabled": "no dividends loaded from --db"}),
+        "qin_parlay_roi_field8": ({"leg2": qin_parlay_roi(per_race, 2, 8),
+                                   "leg3": qin_parlay_roi(per_race, 3, 8)}
+                                  if box_divs_by_race
+                                  else {"_disabled": "no dividends loaded from --db"}),
         "feature_importance_gain": (
             dict(zip(feat_cols,
                      booster.feature_importance(importance_type="gain").tolist()))
