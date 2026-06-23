@@ -194,7 +194,50 @@ export const analyzeRoutes = new Hono<{ Bindings: Env }>();
     } catch { return null; }
   }
 
+  // ── FREEZE GUARD (PREDICTION VS RESULT accountability) ─────────────────
+  // True once an HK (ST/HV) race day's races have actual finishing positions.
+  // The race-day prediction (what was bettable when the user placed bets) must
+  // be IMMUTABLE. Otherwise the daily refresh cron — or even a /picks-by-date
+  // page-view, which calls runRaceDayReportCompute and FALLS BACK to MAX(date)
+  // when no upcoming meeting exists — recomputes the past meeting with drifted
+  // ELO/entries and silently overwrites prediction_log + race_day_report_cache
+  // (this is how 2026-06-21 R9's 11-3-5-7 became 4-3-10-11). writePredictionLog
+  // and writeRaceDayReportCache freeze (skip the write) when this is true.
+  // HK-only (venue ST/HV, finishing_position > 0) so a same-date overseas /
+  // simulcast / ghost result row can NEVER falsely freeze a live HK card. Fails
+  // OPEN (false on error) so a transient read failure never blocks a legit
+  // pre-race write; post-race the underlying query is stable so freeze is firm.
+  export async function dateHasSettledResults(db: D1Database, date: string | null | undefined, venue?: string | null): Promise<boolean> {
+    if (!date) return false;
+    const hk = (venue === 'ST' || venue === 'HV') ? venue : null;
+    try {
+      let row: unknown;
+      if (hk) {
+        row = await db.prepare(
+          `SELECT 1 AS x FROM race_meetings m
+             JOIN races r ON r.meeting_id = m.id
+             JOIN race_results rr ON rr.race_id = r.id
+            WHERE m.date = ? AND m.venue = ? AND rr.finishing_position > 0
+            LIMIT 1`
+        ).bind(date, hk).first().catch(() => null);
+      } else {
+        row = await db.prepare(
+          `SELECT 1 AS x FROM race_meetings m
+             JOIN races r ON r.meeting_id = m.id
+             JOIN race_results rr ON rr.race_id = r.id
+            WHERE m.date = ? AND m.venue IN ('ST','HV') AND rr.finishing_position > 0
+            LIMIT 1`
+        ).bind(date).first().catch(() => null);
+      }
+      return !!row;
+    } catch {
+      return false;
+    }
+  }
+
   export async function writeRaceDayReportCache(db: D1Database, date: string, engine: string, venue: string | null, payload: any, computeMs: number): Promise<void> {
+    // FREEZE GUARD: never overwrite a settled (results-in) HK race day’s cached report.
+    if (await dateHasSettledResults(db, date, venue)) return;
     await ensureRaceDayReportCacheTable(db);
     await db.prepare(
       `INSERT INTO race_day_report_cache (date, engine, venue, payload_json, generated_at, compute_ms)
@@ -246,8 +289,11 @@ export const analyzeRoutes = new Hono<{ Bindings: Env }>();
   }
 
   // Write all per-horse rows for a single race-day report payload. Idempotent.
-  export async function writePredictionLog(db: D1Database, payload: any, variant: string = 'baseline'): Promise<{ rows: number }> {
+  export async function writePredictionLog(db: D1Database, payload: any, variant: string = 'baseline'): Promise<{ rows: number; frozen?: boolean }> {
     if (!payload?.date || !Array.isArray(payload?.races)) return { rows: 0 };
+    // FREEZE GUARD: once the HK race day has results, the bettable prediction is
+    // immutable — never let a post-race recompute overwrite it.
+    if (await dateHasSettledResults(db, payload.date, payload.venue)) return { rows: 0, frozen: true };
     await ensurePredictionLogTable(db);
     const engine = payload.eloEngine ?? 'v12';
     const generatedAt = payload.generatedAt ?? new Date().toISOString();
