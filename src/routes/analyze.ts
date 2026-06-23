@@ -519,6 +519,105 @@ export async function loadLgbScoresForMeeting(
 
 // 共用 helper：計算指定賽事日的命中率統計（被 /hit-rate 與 /hit-rate-rollup 共用）
 // alphaOverride: 用於 /admin/api/ensemble-tune α grid search (P4 backtest)。
+// Load the FROZEN per-horse predictions for a past race day from prediction_log
+// (the real bettable snapshot written by writePredictionLog during today-picks,
+// i.e. the SAME compute path that powers the live predictor the user bets on).
+// Returns picks in the subset-shape the hit-rate consumers need, or null to
+// signal "fall back to live recompute".
+// Guards (architect-reviewed):
+//   • filter by engine + variant (PK includes engine) so we never read wrong rows;
+//   • require EVERY race that has results to be fully represented (>=4 ranked picks)
+//     — never return a partial frozen set, which would shrink denominators and
+//     create a second misleading scorecard; partial/empty/error → null → recompute.
+async function loadFrozenPicksForHitRate(
+  db: any,
+  date: string,
+  engine: string,
+  entries: any[],
+): Promise<{ races: any[] } | null> {
+  // Race metadata + ordered race set derived from the results entries.
+  const metaByRace = new Map<number, { distance: any; going: any }>();
+  const raceOrder: number[] = [];
+  for (const e of (entries ?? [])) {
+    if (e?.race_number == null) continue;
+    if (!metaByRace.has(e.race_number)) {
+      metaByRace.set(e.race_number, { distance: e.distance ?? null, going: e.going ?? null });
+      raceOrder.push(e.race_number);
+    }
+  }
+  if (!raceOrder.length) return null;
+  let rows: any[] = [];
+  try {
+    const res = await db.prepare(
+      `SELECT pl.race_number, pl.horse_id, pl.horse_number, pl.draw, pl.horse_elo,
+              pl.elo_composite, pl.factor_bonus, pl.final_score, pl.p_win, pl.p_top3,
+              pl.predicted_rank, pl.lgb_score, pl.lgb_model_version, pl.score_source,
+              h.name_ch AS name_ch
+         FROM prediction_log pl
+         LEFT JOIN horses h ON h.id = pl.horse_id
+        WHERE pl.date = ? AND pl.engine = ? AND pl.variant = 'baseline'
+          AND pl.predicted_rank IS NOT NULL
+        ORDER BY pl.race_number ASC, pl.predicted_rank ASC`,
+    ).bind(date, engine).all<any>();
+    rows = res?.results ?? [];
+  } catch {
+    return null; // table missing / query error → recompute fallback
+  }
+  if (!rows.length) return null;
+  const byRace = new Map<number, any[]>();
+  for (const r of rows) {
+    if (!byRace.has(r.race_number)) byRace.set(r.race_number, []);
+    byRace.get(r.race_number)!.push(r);
+  }
+  // Completeness guard: every result race must have a complete frozen prediction.
+  for (const rn of raceOrder) {
+    const pk = byRace.get(rn);
+    if (!pk || pk.length < 4) return null;
+  }
+  const races = raceOrder.map((rn: number) => {
+    const picks = (byRace.get(rn) ?? [])
+      .slice()
+      .sort((a: any, b: any) => (a.predicted_rank ?? 999) - (b.predicted_rank ?? 999))
+      .map((r: any) => ({
+        horseId: r.horse_id,
+        horseNumber: r.horse_number,
+        draw: r.draw,
+        nameCh: r.name_ch ?? (r.horse_number != null ? String(r.horse_number) : null),
+        nameEn: null,
+        jockeyCh: null,
+        trainerCh: null,
+        horseElo: r.horse_elo,
+        jockeyElo: null,
+        trainerElo: null,
+        eloComposite: r.elo_composite,
+        factorBonus: r.factor_bonus,
+        finalScore: r.final_score,
+        pWin: r.p_win,
+        pTop3: r.p_top3,
+        rank: r.predicted_rank,
+        lgbScore: r.lgb_score,
+        lgbModelVersion: r.lgb_model_version,
+        scoreSource: r.score_source,
+      }));
+    const lgbHits = picks.filter((p: any) => p.scoreSource === 'lgb' || p.lgbScore != null).length;
+    const anyLgb = lgbHits > 0;
+    const meta = metaByRace.get(rn) ?? { distance: null, going: null };
+    return {
+      raceNumber: rn,
+      title: null,
+      distance: meta.distance,
+      going: meta.going,
+      picks,
+      // Race-level scoreSource kept compatible with summary aggregation
+      // (includes('tx-oracle') → ensemble; startsWith('elo') → elo-only).
+      scoreSource: anyLgb ? `tx-oracle-v3 (frozen, lgb=${lgbHits})` : 'elo (frozen)',
+      lgbModelVersion: picks.find((p: any) => p.lgbModelVersion)?.lgbModelVersion ?? null,
+      lgbCoverage: { hits: lgbHits, total: picks.length, applied: anyLgb },
+    };
+  });
+  return { races };
+}
+
 export async function computeHitRateStats(db: any, date: string, engine: EloEngine, alphaOverride?: number, opts?: { boxPayouts?: boolean }): Promise<
   | { error: string; status: number }
   | { meeting: any; races: any[]; summary: any }
@@ -556,7 +655,20 @@ export async function computeHitRateStats(db: any, date: string, engine: EloEngi
     if (!actualByRace.has(r.race_number)) actualByRace.set(r.race_number, []);
     actualByRace.get(r.race_number)!.push(r);
   }
-  const picksData = await computePicksFromEntries(db, date, meeting, entries, engine, alphaOverride);
+  // ── PREDICTION VS RESULT accountability fix ───────────────────────────
+  // For PAST dates, source the predicted side from the FROZEN prediction_log
+  // (what was actually bettable) instead of a live recompute, which drifts:
+  // results-derived entries drop scratched runners (changing per-race z-norm),
+  // ELO is read as-of-date but post-race backfill mutates it, and the LGB
+  // lookup race_id can shift. Recompute is kept ONLY for the α grid-search
+  // backtest (alphaOverride != null) and as a fallback when no complete frozen
+  // log exists (e.g. meetings predating prediction_log).
+  let picksData: any = (alphaOverride == null)
+    ? await loadFrozenPicksForHitRate(db, date, engine, entries)
+    : null;
+  if (!picksData) {
+    picksData = await computePicksFromEntries(db, date, meeting, entries, engine, alphaOverride);
+  }
   // ── 模型四揀複式 box-bet payouts (mirror tools/tg_notify build_extras) ──
   // Official dividends scraped LIVE from the HKJC results page (fetchHkjcBoxDivs)
   // each compute — available for ALL dates incl. historical. Only fetched when
