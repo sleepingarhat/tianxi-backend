@@ -238,26 +238,35 @@ racesRoutes.get('/:id/dividends', async (c) => {
   return c.json({
     dividends: (results ?? []).map((d: any) => ({
       poolType: d.pool_type,
-      poolName: getPoolName(d.pool_type),
+      poolName: getPoolName(d.pool_type, id),
       combination: d.combination,
       dividend: d.dividend,
     })),
   });
 });
 
-function getPoolName(type: string): string {
+function getPoolName(type: string, raceId?: string): string {
+  // TCE/TRI pool codes were historically swapped vs the HKJC standard
+  // (三重彩 = TCE/Tierce/依序首3, 單T = TRI/Trio/任序首3). Fixed 2026-06-25:
+  // normalizePool now writes standard codes and engine-era D1 rows
+  // (race_date >= 2026-05-20) were backfilled to match. Older rows keep the
+  // legacy swapped codes, so interpret per-era to avoid regressing historical
+  // race pages. raceId format: race_YYYY-MM-DD_VENUE_N → date at slice(5, 15).
+  const date = raceId && raceId.length >= 15 ? raceId.slice(5, 15) : '';
+  const engineEra = date >= '2026-05-20';
   const names: Record<string, string> = {
     WIN: '獨贏',
     PLA: '位置',
     QIN: '連贏',
     QPL: '位置Q',
-    TRI: '三重彩',
     FF: '四連環',
-    TCE: '三寶',
     QTT: '四重彩',
     DBL: '孖寶',
     TBL: '三串一',
     SIX: '六環彩',
+    ...(engineEra
+      ? { TCE: '三重彩', TRI: '單T' }
+      : { TRI: '三重彩', TCE: '三寶' }),
   };
   return names[type] || type;
 }

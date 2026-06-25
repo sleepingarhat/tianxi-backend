@@ -54,9 +54,9 @@ function normalizePool(zhPool: string): string {
     '位置': 'PLA',
     '連贏': 'QIN',
     '位置Q': 'QPL',
-    '三重彩': 'TRI',
+    '三重彩': 'TCE',          // Tierce 依序首3 (HKJC standard: 三重彩 = TCE)
     '四連環': 'FF',
-    '單T': 'TCE',
+    '單T': 'TRI',            // Trio 任序首3 (HKJC standard: 單T = TRI)
     '孖T': 'DTC',
     '三T': 'TTT',
     '四重彩': 'QTT',

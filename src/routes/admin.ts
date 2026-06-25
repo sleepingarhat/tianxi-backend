@@ -870,6 +870,63 @@ adminRoutes.post('/api/set-alpha', async (c) => {
   });
 });
 
+// ── /api/fix-dividend-pool-swap ─ ONE-TIME migration (TCE↔TRI relabel) ──
+// 2026-06-25: import-csv.ts normalizePool historically mapped 三重彩→TRI and
+// 單T→TCE — swapped vs the HKJC standard (TCE = Tierce = 三重彩 = 依序首3,
+// TRI = Trio = 單T = 任序首3). The scraper wrote correct Chinese names,
+// combinations and dividends; ONLY the persisted pool_type CODE label was
+// swapped. This relabels the engine-era buggy window [2026-05-20 .. 2026-06-24]
+// to standard codes exactly once. NOT idempotent (a relabel swap is
+// self-inverse) → guarded by an app_settings flag so a 2nd call is a safe
+// no-op. Bearer-only (same posture as set-alpha). Future rows are already
+// correct via the normalizePool fix; pre-engine rows are left as-is (scope).
+// Usage: curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
+//   "https://tianxi.racing/admin/api/fix-dividend-pool-swap"
+adminRoutes.post('/api/fix-dividend-pool-swap', async (c) => {
+  const expected = c.env.ADMIN_TOKEN;
+  const header = c.req.header('authorization') || '';
+  const bearer = header.startsWith('Bearer ') ? header.slice(7) : '';
+  if (!expected || bearer !== expected) {
+    return c.json({ error: 'unauthorized (Bearer required)' }, 401);
+  }
+  const FLAG = 'dividend_tce_tri_swap_v1_done';
+  const FROM = '2026-05-20';
+  const TO = '2026-06-24';
+  await c.env.DB.prepare(
+    `CREATE TABLE IF NOT EXISTS app_settings (
+       key TEXT PRIMARY KEY,
+       value TEXT NOT NULL,
+       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+     )`
+  ).run().catch(() => {});
+  const done = await c.env.DB.prepare(
+    `SELECT value FROM app_settings WHERE key = ?`
+  ).bind(FLAG).first<{ value: string }>();
+  if (done?.value) {
+    return c.json({ ok: true, skipped: true, reason: 'already applied (run-once)', appliedAt: done.value });
+  }
+  const audit = async () =>
+    (await c.env.DB.prepare(
+      `SELECT pool_type, COUNT(*) AS n
+         FROM dividends
+        WHERE pool_type IN ('TCE','TRI') AND substr(race_id, 6, 10) BETWEEN ? AND ?
+        GROUP BY pool_type ORDER BY pool_type`
+    ).bind(FROM, TO).all()).results;
+  const before = await audit();
+  // 3-step swap via a temp placeholder so the UNIQUE(race_id, pool_type,
+  // combination) index is never transiently violated (a race whose top-3
+  // finished in ascending horse-number order has identical TCE/TRI
+  // combinations). D1 batch() runs all four statements in ONE atomic txn.
+  await c.env.DB.batch([
+    c.env.DB.prepare(`UPDATE dividends SET pool_type = '__TCE_TMP' WHERE pool_type = 'TCE' AND substr(race_id, 6, 10) BETWEEN ? AND ?`).bind(FROM, TO),
+    c.env.DB.prepare(`UPDATE dividends SET pool_type = 'TCE' WHERE pool_type = 'TRI' AND substr(race_id, 6, 10) BETWEEN ? AND ?`).bind(FROM, TO),
+    c.env.DB.prepare(`UPDATE dividends SET pool_type = 'TRI' WHERE pool_type = '__TCE_TMP' AND substr(race_id, 6, 10) BETWEEN ? AND ?`).bind(FROM, TO),
+    c.env.DB.prepare(`INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`).bind(FLAG, new Date().toISOString()),
+  ]);
+  const after = await audit();
+  return c.json({ ok: true, skipped: false, window: { from: FROM, to: TO }, before, after });
+});
+
 // ── /api/entries-upcoming-export ─ feed for GH Actions predict pipeline ──
 adminRoutes.get('/api/entries-upcoming-export', async (c) => {
   const today = new Date().toISOString().slice(0, 10);
