@@ -2073,6 +2073,18 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
         .cmp-grid{grid-template-columns:1fr;gap:8px}
         .cmp-col{aspect-ratio:auto;min-height:280px}
       }
+      /* Lemniscate Bloom loader */
+      .tx-lemni-host{display:flex;align-items:center;justify-content:center;width:100%;min-height:84px;padding:14px 8px}
+      .tx-lemni-host--lg{min-height:150px}
+      .tx-lemni-host--sm{display:inline-flex;width:auto;min-height:0;padding:0;vertical-align:middle}
+      .tx-lemni{display:flex;flex-direction:column;align-items:center;gap:9px}
+      .tx-lemni--sm{flex-direction:row;gap:6px}
+      .tx-lemni__fig{width:60px;height:60px;color:var(--accent)}
+      .tx-lemni--lg .tx-lemni__fig{width:100px;height:100px}
+      .tx-lemni--sm .tx-lemni__fig{width:1.05em;height:1.05em}
+      .tx-lemni__fig svg{width:100%;height:100%;overflow:visible;display:block;color:inherit}
+      .tx-lemni__label{font-size:12px;line-height:1.35;color:var(--mut);letter-spacing:.02em;text-align:center}
+      .tx-lemni--sm .tx-lemni__label{font-size:inherit;color:inherit}
     </style>
 
     <section class="cmp-wrap" id="cmpSection">
@@ -2127,6 +2139,91 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
   const D = ${JSON.stringify(preloaded).replace(/</g, "\\u003c")};
   const TOKEN = ${JSON.stringify(token).replace(/</g, "\\u003c")};
   console.log('[admin] SSR D loaded:', { has_coverage: !!(D && D.coverage), has_meetings: !!(D && D.meetings), has_status: !!(D && D.status), keys: D ? Object.keys(D) : null });
+  // ── Lemniscate Bloom loader (loading indicator; backtick/backslash-free) ──
+  (function(){
+    var NS='http://www.w3.org/2000/svg';
+    var N=62,TRAIL=0.68,DUR=3500,PULSE=2800,A=25,BOOST=10.8;
+    var reduce=false;
+    try{ reduce=!!(window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches); }catch(e){}
+    function pt(p,sc){ var t=p*Math.PI*2; var a=A+sc*BOOST; var s=Math.sin(t); var dn=1+s*s; return { x:50+(a*Math.cos(t))/dn, y:50+(a*s*Math.cos(t))/dn }; }
+    function nm(p){ return ((p%1)+1)%1; }
+    var insts=[];
+    function build(host){
+      for(var q=insts.length-1;q>=0;q--){ if(insts[q].host===host) insts.splice(q,1); }
+      var label=host.getAttribute('data-label')||'';
+      var size=host.getAttribute('data-size')||'';
+      host.classList.add('tx-lemni-host');
+      if(size) host.classList.add('tx-lemni-host--'+size);
+      host.setAttribute('data-tx-init','1');
+      host.setAttribute('role','status');
+      host.setAttribute('aria-live','polite');
+      var wrap=document.createElement('div');
+      wrap.className='tx-lemni'+(size?' tx-lemni--'+size:'');
+      var fig=document.createElement('div');
+      fig.className='tx-lemni__fig';
+      var svg=document.createElementNS(NS,'svg');
+      svg.setAttribute('viewBox','0 0 100 100');
+      svg.setAttribute('aria-hidden','true');
+      var g=document.createElementNS(NS,'g');
+      svg.appendChild(g); fig.appendChild(svg); wrap.appendChild(fig);
+      var parts=[];
+      if(reduce){
+        var path=document.createElementNS(NS,'path');
+        var d='';
+        for(var n=0;n<=240;n++){ var sp=pt(n/240,1); d+=(n===0?'M':'L')+' '+sp.x.toFixed(2)+' '+sp.y.toFixed(2)+' '; }
+        path.setAttribute('d',d); path.setAttribute('fill','none'); path.setAttribute('stroke','currentColor');
+        path.setAttribute('stroke-width','4.7'); path.setAttribute('stroke-linecap','round'); path.setAttribute('opacity','0.42');
+        g.appendChild(path);
+      } else {
+        for(var i=0;i<N;i++){ var c=document.createElementNS(NS,'circle'); c.setAttribute('fill','currentColor'); g.appendChild(c); parts.push(c); }
+      }
+      if(label){ var lab=document.createElement('div'); lab.className='tx-lemni__label'; lab.textContent=label; wrap.appendChild(lab); }
+      host.innerHTML=''; host.appendChild(wrap);
+      if(!reduce){ insts.push({ g:g, parts:parts }); kick(); }
+    }
+    var running=false;
+    function fr(now){
+      var pulse=(now%PULSE)/PULSE;
+      var sc=0.52+((Math.sin(pulse*Math.PI*2+0.55)+1)/2)*0.48;
+      var pr=(now%DUR)/DUR;
+      for(var k=insts.length-1;k>=0;k--){
+        var it=insts[k];
+        if(!it.g.isConnected){ insts.splice(k,1); continue; }
+        var ps=it.parts;
+        for(var i=0;i<ps.length;i++){
+          var to=i/(N-1);
+          var p=pt(nm(pr-to*TRAIL),sc);
+          var fade=Math.pow(1-to,0.56);
+          var nd=ps[i];
+          nd.setAttribute('cx',p.x.toFixed(2));
+          nd.setAttribute('cy',p.y.toFixed(2));
+          nd.setAttribute('r',(0.9+fade*2.7).toFixed(2));
+          nd.setAttribute('opacity',(0.04+fade*0.96).toFixed(3));
+        }
+      }
+      if(!insts.length){ running=false; return; }
+      requestAnimationFrame(fr);
+    }
+    function kick(){ if(running||reduce||!insts.length)return; running=true; requestAnimationFrame(fr); }
+    function up(el){ if(!el||el.getAttribute('data-tx-init'))return; build(el); }
+    function scan(root){ var l=(root||document).querySelectorAll('[data-tx-loader]:not([data-tx-init])'); for(var i=0;i<l.length;i++) up(l[i]); }
+    function esc(v){ return String(v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+    window.txLemniHTML=function(label,size){
+      var tag=size==='sm'?'span':'div';
+      return '<'+tag+' class="tx-lemni-host'+(size?' tx-lemni-host--'+size:'')+'" data-tx-loader'+(label?' data-label="'+esc(label)+'"':'')+(size?' data-size="'+size+'"':'')+'></'+tag+'>';
+    };
+    function boot(){
+      scan(document);
+      try{
+        var mo=new MutationObserver(function(ms){
+          for(var i=0;i<ms.length;i++){ var an=ms[i].addedNodes; for(var j=0;j<an.length;j++){ var nd=an[j]; if(nd.nodeType!==1)continue; if(nd.hasAttribute&&nd.hasAttribute('data-tx-loader')&&!nd.getAttribute('data-tx-init')) up(nd); if(nd.querySelectorAll) scan(nd); } }
+        });
+        mo.observe(document.body,{childList:true,subtree:true});
+      }catch(e){}
+    }
+    if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',boot,{once:true}); else boot();
+  })();
+
   function fmtNum(n) { return n == null ? '—' : Number(n).toLocaleString() }
   function fmtDate(s) { return s || '—' }
 
@@ -2278,7 +2375,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
     const stat = document.getElementById('rollupStatus');
     const body = document.getElementById('rollupContent');
     if (!stat || !body) return;
-    stat.textContent = '運算中…（首次需評估每場）';
+    stat.innerHTML = txLemniHTML('運算中…（首次需評估每場）','sm');
     body.innerHTML = '';
     try {
       const r = await fetch('/api/analyze/hit-rate-rollup?days=' + days);
@@ -2328,7 +2425,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
     const m = window._meetingList && window._meetingList[i];
     if (!m) return;
     const panel = document.getElementById('meetingPanel');
-    panel.innerHTML = '<div style="padding:10px;color:var(--mut);font-size:12px">運算 ' + m.date + ' 預測中（每場約 5-10 秒）…</div>';
+    panel.innerHTML = txLemniHTML('運算 ' + m.date + ' 預測中（每場約 5-10 秒）…','');
     try {
       const res = await fetch('/api/analyze/picks-by-date?date=' + encodeURIComponent(m.date));
       const data = await res.json();
@@ -2343,7 +2440,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
     const m = window._meetingList && window._meetingList[i];
     if (!m) return;
     const panel = document.getElementById('meetingPanel');
-    panel.innerHTML = '<div style="padding:10px;color:var(--mut);font-size:12px">運算 ' + m.date + ' 比對報告中…</div>';
+    panel.innerHTML = txLemniHTML('運算 ' + m.date + ' 比對報告中…','');
     window._meetingHits[m.date] = 'loading';
     renderMeetings();
     try {
@@ -2615,7 +2712,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
         var resultsEl = document.getElementById('todayPredictResults');
         if (btn) btn.disabled = true;
         if (btnForce) btnForce.disabled = true;
-        statusEl.textContent = force ? '強制重新運算中（每場約 5-10 秒）…' : '載入快取報告中…';
+        statusEl.innerHTML = txLemniHTML(force ? '強制重新運算中（每場約 5-10 秒）…' : '載入快取報告中…','sm');
         try {
           var url = force ? '/api/analyze/today-picks?fresh=1' : '/api/analyze/today-picks';
           var res = await fetch(url);
@@ -2653,7 +2750,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
       var statusEl = document.getElementById('roiStatus');
       var resultsEl = document.getElementById('roiResults');
       var days = document.getElementById('roiDays').value || '60';
-      statusEl.textContent = '載入中…'; resultsEl.innerHTML = '';
+      statusEl.innerHTML = txLemniHTML('載入中…','sm'); resultsEl.innerHTML = '';
       try {
         var res = await fetch('/api/analyze/roi?days=' + days);
         var data = await res.json();
@@ -2702,7 +2799,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
       var resultsEl = document.getElementById('vpResults');
       var minV = document.getElementById('vpMin').value || '3';
       var maxV = document.getElementById('vpMax').value || '8';
-      statusEl.textContent = '計算中…'; resultsEl.innerHTML = '';
+      statusEl.innerHTML = txLemniHTML('計算中…','sm'); resultsEl.innerHTML = '';
       try {
         var res = await fetch('/api/analyze/value-picks?min=' + minV + '&max=' + maxV);
         var data = await res.json();
@@ -2748,7 +2845,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
       var statusEl = document.getElementById('accStatus');
       var resultsEl = document.getElementById('predAccuracyResults');
       var days = document.getElementById('accDays').value || '30';
-      statusEl.textContent = '載入中…';
+      statusEl.innerHTML = txLemniHTML('載入中…','sm');
       try {
         var res = await fetch('/api/analyze/prediction-accuracy?days=' + days);
         var data = await res.json();
@@ -3022,7 +3119,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
           var raceSel = document.getElementById('cmpRace');
           var status = document.getElementById('cmpStatus');
           raceSel.innerHTML = '<option>載入中…</option>'; raceSel.disabled = true;
-          status.textContent = '載入 '+date+' 比對資料中…';
+          status.innerHTML = txLemniHTML('載入 '+date+' 比對資料中…','sm');
           var myToken = ++_cmpToken;
           try {
             var data;
