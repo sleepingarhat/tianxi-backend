@@ -16,6 +16,7 @@ import {
   signSession,
   verifySession,
 } from '../lib/admin-auth';
+import { parseHkjcDividends, BOX_POOL_MAP } from '../lib/parse-dividends';
 
 interface AdminEnv {
   DB: D1Database;
@@ -925,6 +926,65 @@ adminRoutes.post('/api/fix-dividend-pool-swap', async (c) => {
   ]);
   const after = await audit();
   return c.json({ ok: true, skipped: false, window: { from: FROM, to: TO }, before, after });
+});
+
+// ── /api/refresh-race-dividends ─ re-scrape official dividends for ONE race ──
+// Idempotent maintenance tool: fetches the HKJC localresults page for the given
+// race and UPSERTs every winning combination of the four 四揀複式 box pools
+// (FF/TRI/TCE/QTT). Fixes dead-heat races whose 2nd+ combos were dropped by the
+// scraper, and any comma-truncated legacy amounts. Bearer-only, HK venue only.
+// Usage: curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
+//   "https://tianxi.racing/admin/api/refresh-race-dividends?raceId=race_2026-06-24_HV_8"
+adminRoutes.post('/api/refresh-race-dividends', async (c) => {
+  const expected = c.env.ADMIN_TOKEN;
+  const header = c.req.header('authorization') || '';
+  const bearer = header.startsWith('Bearer ') ? header.slice(7) : '';
+  if (!expected || bearer !== expected) {
+    return c.json({ error: 'unauthorized (Bearer required)' }, 401);
+  }
+  const raceId = (c.req.query('raceId') || '').trim();
+  const m = raceId.match(/^race_(\d{4}-\d{2}-\d{2})_(HV|ST)_(\d{1,2})$/);
+  if (!m) {
+    return c.json({ error: 'bad raceId (expect race_YYYY-MM-DD_<HV|ST>_<n>)' }, 400);
+  }
+  const date = m[1], venue = m[2], raceNo = m[3];
+  const genDivId = (poolType: string, combo: string) =>
+    `div_${[date, venue, raceNo, poolType, combo].join('_').replace(/[^a-zA-Z0-9_\-]/g, '_').slice(0, 180)}`;
+  const audit = async () =>
+    (await c.env.DB.prepare(
+      `SELECT pool_type, combination, dividend FROM dividends
+        WHERE race_id = ? AND pool_type IN ('FF','TRI','TCE','QTT')
+        ORDER BY pool_type, combination`
+    ).bind(raceId).all()).results;
+  const before = await audit();
+  const racedate = date.replace(/-/g, '/');
+  const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
+  const url = `https://racing.hkjc.com/zh-hk/local/information/localresults?racedate=${racedate}&Racecourse=${venue}&RaceNo=${raceNo}`;
+  let body: string;
+  try {
+    const resp = await fetch(url, { headers: { 'user-agent': UA, 'accept-language': 'zh-HK,zh;q=0.9', 'accept': 'text/html' } });
+    if (!resp.ok) return c.json({ error: `HKJC fetch failed (${resp.status})`, url }, 502);
+    body = await resp.text();
+  } catch (e: any) {
+    return c.json({ error: `HKJC fetch error: ${e?.message || e}`, url }, 502);
+  }
+  if (!body.includes('勝出組合')) {
+    return c.json({ error: 'HKJC page has no dividend table (race not settled?)', url }, 409);
+  }
+  const rows = parseHkjcDividends(body)
+    .map((r) => ({ pool: BOX_POOL_MAP[r.poolZh], combination: r.combination, dividend: r.dividend }))
+    .filter((r) => !!r.pool);
+  if (!rows.length) {
+    return c.json({ error: 'parsed 0 box-pool dividends', url }, 409);
+  }
+  const stmt = c.env.DB.prepare(
+    `INSERT OR REPLACE INTO dividends (id, race_id, pool_type, combination, dividend) VALUES (?, ?, ?, ?, ?)`
+  );
+  await c.env.DB.batch(
+    rows.map((r) => stmt.bind(genDivId(r.pool, r.combination), raceId, r.pool, r.combination, r.dividend))
+  );
+  const after = await audit();
+  return c.json({ ok: true, raceId, upserted: rows.length, before, after });
 });
 
 // ── /api/entries-upcoming-export ─ feed for GH Actions predict pipeline ──

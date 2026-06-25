@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import type { Env, AnalyzeRequest } from '../types';
 import { generateAnalysisSummary } from '../services/ai';
 import { fetchLatestWinOddsByRace, attachMarketBlend, MARKET_BLEND_BETA, normHorseKey } from '../lib/market-blend';
+import { parseHkjcDividends, BOX_POOL_MAP } from '../lib/parse-dividends';
 
 export const analyzeRoutes = new Hono<{ Bindings: Env }>();
   // ── Hit-rate cache (cron-driven) ────────────────────────────────────
@@ -42,17 +43,19 @@ export const analyzeRoutes = new Hono<{ Bindings: Env }>();
   // historical (the D1 dividend history was comma-truncated garbage). One fetch per
   // race; only when computeHitRateStats is called with { boxPayouts: true } (single-
   // meeting route + cron) so the rollup / α-tuner never fire a fetch storm.
+  // One winning combination of a box pool: the horse numbers in it + its $10
+  // dividend. Dead-heat races pay >1 combo per pool, hence an array per pool.
+  type BoxCombo = { nums: string[]; div: number };
   async function fetchHkjcBoxDivs(
     date: string,
     venue: string,
     raceNumbers: number[],
-  ): Promise<{ byRace: Map<number, Record<string, number>>; complete: boolean }> {
-    const byRace = new Map<number, Record<string, number>>();
+  ): Promise<{ byRace: Map<number, Record<string, BoxCombo[]>>; complete: boolean }> {
+    const byRace = new Map<number, Record<string, BoxCombo[]>>();
     if (venue !== 'HV' && venue !== 'ST') return { byRace, complete: false };
     if (!raceNumbers.length) return { byRace, complete: true };
     const racedate = date.replace(/-/g, '/');
     const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
-    const labels: Array<[string, string]> = [['四連環', 'FF'], ['單T', 'TRI'], ['三重彩', 'TCE'], ['四重彩', 'QTT']];
     const settledOk = await Promise.allSettled(raceNumbers.map(async (rn) => {
       const url = `https://racing.hkjc.com/zh-hk/local/information/localresults?racedate=${racedate}&Racecourse=${venue}&RaceNo=${rn}`;
       const ctrl = new AbortController();
@@ -62,13 +65,16 @@ export const analyzeRoutes = new Hono<{ Bindings: Env }>();
         if (!resp.ok) return { rn, ok: false };
         const body = await resp.text();
         const settled = body.includes('勝出組合');
-        const divs: Record<string, number> = {};
-        for (const [label, pool] of labels) {
-          const m = body.match(new RegExp('>' + label + '</td>[^<]*<td[^>]*>([^<]*)</td>[^<]*<td[^>]*>([^<]*)</td>'));
-          if (!m) continue;
-          const amt = parseFloat(m[2].trim().replace(/,/g, ''));
-          if (!isFinite(amt) || amt <= 0) continue;
-          divs[pool] = amt;
+        // Parse EVERY winning combination (dead-heat pools pay multiple) and
+        // group by box-pool code; the per-combo coverage is resolved below.
+        const divs: Record<string, BoxCombo[]> = {};
+        for (const row of parseHkjcDividends(body)) {
+          const pool = BOX_POOL_MAP[row.poolZh];
+          if (!pool) continue;
+          const nums = row.combination.split(',').map((s) => s.trim()).filter(Boolean);
+          if (!nums.length) continue;
+          if (!divs[pool]) divs[pool] = [];
+          divs[pool].push({ nums, div: row.dividend });
         }
         if (Object.keys(divs).length) byRace.set(rn, divs);
         return { rn, ok: settled };
@@ -720,7 +726,7 @@ export async function computeHitRateStats(db: any, date: string, engine: EloEngi
   // each compute — available for ALL dates incl. historical. Only fetched when
   // opts.boxPayouts is set; coverage (4中N) is derived consumer-side and always shown.
   const wantBoxPayouts = !!(opts && opts.boxPayouts);
-  let divByRaceNumber = new Map<number, Record<string, number>>();
+  let divByRaceNumber = new Map<number, Record<string, BoxCombo[]>>();
   let boxDivsComplete = false;
   if (wantBoxPayouts) {
     // Only fetch dividends for races where the model top-4 actually won a box pool
@@ -732,12 +738,15 @@ export async function computeHitRateStats(db: any, date: string, engine: EloEngi
       const m4 = (race.picks ?? []).slice(0, 4).map((p: any) => p.horseNumber).filter((v: any) => v != null && v !== '').map((v: any) => String(v));
       const mset = new Set<string>(m4);
       if (mset.size !== 4) continue;
-      const sorted = (actualByRace.get(race.raceNumber) ?? []).slice().sort((a: any, b: any) => a.finishing_position - b.finishing_position);
-      const a3 = sorted.slice(0, 3).map((a: any) => a.horse_number).filter((v: any) => v != null && v !== '').map((v: any) => String(v));
-      const a4 = sorted.slice(0, 4).map((a: any) => a.horse_number).filter((v: any) => v != null && v !== '').map((v: any) => String(v));
-      const trioWin = a3.length === 3 && a3.every((x: string) => mset.has(x));
-      const ffWin = a4.length === 4 && a4.every((x: string) => mset.has(x));
-      if (trioWin || ffWin) needRns.push(race.raceNumber);
+      // Any box pool (trio/tierce need 3 horses, FF/quartet need 4) can only pay
+      // if the model box covers >=3 of the placed runners. Use finishing_position
+      // <=4 so dead-heat placers (a tie can leave >4 horses in the top 4) are all
+      // eligible; the precise per-combo payout is resolved after fetch below.
+      const placed = (actualByRace.get(race.raceNumber) ?? [])
+        .filter((a: any) => a.finishing_position != null && a.finishing_position <= 4)
+        .map((a: any) => String(a.horse_number));
+      const overlap = placed.filter((x: string) => mset.has(x)).length;
+      if (overlap >= 3) needRns.push(race.raceNumber);
     }
     const fetched = await fetchHkjcBoxDivs(date, meeting.venue, needRns);
     divByRaceNumber = fetched.byRace;
@@ -809,26 +818,30 @@ export async function computeHitRateStats(db: any, date: string, engine: EloEngi
       }
 
       // ── box-bet payouts for the model top-4 (mirror tg_notify build_extras) ──
+      // A 四揀複式 box covers every ordering of the model's 4 picks, so it wins a
+      // pool's combo iff that combo's horses are ALL within the box. Dead-heat
+      // races pay multiple combos per pool — sum every covered combo. (A blind
+      // per-pool sum would overstate when the box misses a tied placer, so we
+      // gate each combo on coverage rather than crediting the whole pool.)
       let boxPayouts: Array<{ pool: string; name: string; units: number; cost: number; dividend: number; net: number }> = [];
       {
         const m4nums = predictedTop4.map((p: any) => p.horseNumber).filter((v: any) => v != null && v !== '').map((v: any) => String(v));
         const mset = new Set<string>(m4nums);
-        const a3nums = actualTop3.map((a: any) => a.horse_number).filter((v: any) => v != null && v !== '').map((v: any) => String(v));
-        const a4nums = actualTop4.map((a: any) => a.horse_number).filter((v: any) => v != null && v !== '').map((v: any) => String(v));
         if (mset.size === 4) {
-          const trioWin = a3nums.length === 3 && a3nums.every((x: string) => mset.has(x));
-          const ffWin = a4nums.length === 4 && a4nums.every((x: string) => mset.has(x));
           const divs = divByRaceNumber.get(race.raceNumber) ?? {};
-          const pools: Array<{ pool: string; d1: string; name: string; units: number; win: boolean }> = [
-            { pool: 'FF', d1: 'FF', name: '四連環（任序首4）', units: 1, win: ffWin },
-            { pool: 'TRIO', d1: 'TRI', name: '單T（任序首3）', units: 4, win: trioWin },
-            { pool: 'TIERCE', d1: 'TCE', name: '三重彩（依序首3）', units: 24, win: trioWin },
-            { pool: 'QUARTET', d1: 'QTT', name: '四重彩（依序首4）', units: 24, win: ffWin },
+          const pools: Array<{ pool: string; d1: string; name: string; units: number }> = [
+            { pool: 'FF', d1: 'FF', name: '四連環（任序首4）', units: 1 },
+            { pool: 'TRIO', d1: 'TRI', name: '單T（任序首3）', units: 4 },
+            { pool: 'TIERCE', d1: 'TCE', name: '三重彩（依序首3）', units: 24 },
+            { pool: 'QUARTET', d1: 'QTT', name: '四重彩（依序首4）', units: 24 },
           ];
           for (const pl of pools) {
-            if (!pl.win) continue;
-            const amt = divs[pl.d1];
-            if (amt == null) continue;
+            const combos = divs[pl.d1] ?? [];
+            let amt = 0;
+            for (const cb of combos) {
+              if (cb.nums.length && cb.nums.every((n: string) => mset.has(n))) amt += cb.div;
+            }
+            if (amt <= 0) continue;
             const cost = pl.units * 10;
             boxPayouts.push({ pool: pl.pool, name: pl.name, units: pl.units, cost, dividend: Math.round(amt), net: Math.round(amt - cost) });
           }
