@@ -252,11 +252,57 @@ app.onError((err, c) => {
     return c.json({ ...out, ranAt: new Date().toISOString() });
   });
 
+  // ── Strategy-P&L aggregate warmup (2026-06-26) ─────────────────────
+  // The /strategy-pnl per-day aggregate (key `__strategy_pnl_<from>`) is only
+  // built lazily on the first visit after each new race day, and only cached
+  // when pending===0 with to===today. After a race day's results land — or once
+  // the UTC day rolls over — that cache goes stale, so the next first-visitor
+  // eats a slow recompute. This warmup pre-builds it from the cron so every
+  // visitor gets an instant chart (全自動, no first-visitor penalty).
+  //
+  // Runs AFTER refreshHitRateCache so each settled day's per-meeting boxPayouts
+  // cache is fresh first; the endpoint then just reads + aggregates (cheap) and
+  // writes the synthetic aggregate row. First attempt is non-refresh (a warm
+  // same-UTC-day cache short-circuits to `cached:true` → zero work); later
+  // attempts force ?refresh=1 to fill one more pending day each (endpoint
+  // FILL_BUDGET=1) so small backlogs clear within a single tick. Bounded by
+  // MAX_ATTEMPTS; any still-pending day self-heals on the next cron/visit.
+  async function warmStrategyPnl(env: Env): Promise<{ ok: boolean; pending: number; attempts: number; cached?: boolean; error?: string }> {
+    const MAX_ATTEMPTS = 6;
+    let pending = -1, attempts = 0;
+    try {
+      for (let i = 0; i < MAX_ATTEMPTS; i++) {
+        attempts++;
+        const qs = i === 0 ? '' : '?refresh=1';
+        const req = new Request(`https://internal/api/analyze/strategy-pnl${qs}`, { method: 'GET' });
+        const res = await app.fetch(req, env, { waitUntil: () => {}, passThroughOnException: () => {} } as any);
+        const data: any = await res.json().catch(() => ({}));
+        if (data?.error) return { ok: false, pending, attempts, error: data.error };
+        if (data?.cached === true) return { ok: true, pending: 0, attempts, cached: true };
+        pending = Number(data?.pending ?? 0);
+        if (pending === 0) return { ok: true, pending, attempts };
+      }
+      return { ok: false, pending, attempts };
+    } catch (e: any) { return { ok: false, pending, attempts, error: e?.message ?? String(e) }; }
+  }
+
+  // Manual trigger for the strategy-pnl warmup (idempotent; safe anytime).
+  app.post('/admin/api/warm-strategy-pnl', async (c) => {
+    const out = await warmStrategyPnl(c.env);
+    return c.json({ ...out, ranAt: new Date().toISOString() });
+  });
+
   export default {
     fetch: app.fetch,
     async scheduled(_event: any, env: Env, ctx: any): Promise<void> {
+      // Refresh per-meeting boxPayouts caches first, THEN warm the strategy-pnl
+      // aggregate off those fresh per-day caches (chained, not a separate
+      // waitUntil) so the aggregate never reads a half-filled day.
       ctx.waitUntil(
-        refreshHitRateCache(env).then((r) => console.log('[cron] hit-rate refresh', r)),
+        refreshHitRateCache(env)
+          .then((r) => console.log('[cron] hit-rate refresh', r))
+          .then(() => warmStrategyPnl(env))
+          .then((r) => console.log('[cron] strategy-pnl warmup', r)),
       );
       ctx.waitUntil(
         refreshRaceDayReport(env).then((r) => console.log('[cron] race-day report refresh', r)),
