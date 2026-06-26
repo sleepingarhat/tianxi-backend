@@ -253,37 +253,30 @@ app.onError((err, c) => {
   });
 
   // ── Strategy-P&L aggregate warmup (2026-06-26) ─────────────────────
-  // The /strategy-pnl per-day aggregate (key `__strategy_pnl_<from>`) is only
-  // built lazily on the first visit after each new race day, and only cached
-  // when pending===0 with to===today. After a race day's results land — or once
-  // the UTC day rolls over — that cache goes stale, so the next first-visitor
-  // eats a slow recompute. This warmup pre-builds it from the cron so every
-  // visitor gets an instant chart (全自動, no first-visitor penalty).
+  // The /strategy-pnl per-day aggregate (synthetic key `__strategy_pnl_<from>`)
+  // is only built lazily on the first visit after each new race day, and only
+  // cached when pending===0 with to===today. After a race day's results land —
+  // or once the UTC calendar day rolls over — that cache goes stale (to!==today),
+  // so the next first-visitor eats a slow recompute. This warmup acts as a
+  // synthetic daily visitor from the cron so a real cold load returns the cached
+  // line instantly (全自動, no first-visitor penalty).
   //
-  // Runs AFTER refreshHitRateCache so each settled day's per-meeting boxPayouts
-  // cache is fresh first; the endpoint then just reads + aggregates (cheap) and
-  // writes the synthetic aggregate row. First attempt is non-refresh (a warm
-  // same-UTC-day cache short-circuits to `cached:true` → zero work); later
-  // attempts force ?refresh=1 to fill one more pending day each (endpoint
-  // FILL_BUDGET=1) so small backlogs clear within a single tick. Bounded by
-  // MAX_ATTEMPTS; any still-pending day self-heals on the next cron/visit.
-  async function warmStrategyPnl(env: Env): Promise<{ ok: boolean; pending: number; attempts: number; cached?: boolean; error?: string }> {
-    const MAX_ATTEMPTS = 6;
-    let pending = -1, attempts = 0;
+  // Runs AFTER refreshHitRateCache so each newly-settled day's per-meeting
+  // boxPayouts cache is fresh first; a single endpoint hit then re-aggregates
+  // off those per-day caches and writes the synthetic aggregate row when
+  // pending===0. A warm same-UTC-day cache short-circuits to `cached:true` (zero
+  // work); a stale cache is rebuilt. We deliberately do ONE call (not a fill
+  // loop) — the endpoint self-heals at most one pending day per request, so the
+  // warmup never turns into a heavy backlog drain (any long historical backlog
+  // is filled gradually by refreshHitRateCache + per-request self-heal, not here).
+  async function warmStrategyPnl(env: Env): Promise<{ ok: boolean; pending: number; cached?: boolean; error?: string }> {
     try {
-      for (let i = 0; i < MAX_ATTEMPTS; i++) {
-        attempts++;
-        const qs = i === 0 ? '' : '?refresh=1';
-        const req = new Request(`https://internal/api/analyze/strategy-pnl${qs}`, { method: 'GET' });
-        const res = await app.fetch(req, env, { waitUntil: () => {}, passThroughOnException: () => {} } as any);
-        const data: any = await res.json().catch(() => ({}));
-        if (data?.error) return { ok: false, pending, attempts, error: data.error };
-        if (data?.cached === true) return { ok: true, pending: 0, attempts, cached: true };
-        pending = Number(data?.pending ?? 0);
-        if (pending === 0) return { ok: true, pending, attempts };
-      }
-      return { ok: false, pending, attempts };
-    } catch (e: any) { return { ok: false, pending, attempts, error: e?.message ?? String(e) }; }
+      const req = new Request('https://internal/api/analyze/strategy-pnl', { method: 'GET' });
+      const res = await app.fetch(req, env, { waitUntil: () => {}, passThroughOnException: () => {} } as any);
+      const data: any = await res.json().catch(() => ({}));
+      if (data?.error) return { ok: false, pending: -1, error: data.error };
+      return { ok: true, pending: Number(data?.pending ?? 0), cached: data?.cached === true };
+    } catch (e: any) { return { ok: false, pending: -1, error: e?.message ?? String(e) }; }
   }
 
   // Manual trigger for the strategy-pnl warmup (idempotent; safe anytime).
