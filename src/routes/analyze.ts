@@ -3105,10 +3105,15 @@ analyzeRoutes.get('/factors', (c) => {
           const COST_FF = 10, COST_TRIO = 40, COST_TIERCE = 240, COST_QUARTET = 240;
           const PER_RACE = COST_FF + COST_TRIO + COST_TIERCE + COST_QUARTET; // 530
           const poolCost: Record<string, number> = { FF: COST_FF, TRIO: COST_TRIO, TIERCE: COST_TIERCE, QUARTET: COST_QUARTET };
-          // Bound on-demand fills: a cold recompute is ~30s (full model rebuild), so
+          // Bound on-demand fills: a cold recompute is ~25s (full model rebuild), so
           // cap per request to avoid a Worker timeout / HKJC storm. Most days are
-          // already cron-filled (boxPayouts:true) → pending≈0 in practice.
-          const FILL_BUDGET = 2;
+          // already cron-filled (boxPayouts:true) → pending≈0 in practice. Budget=1
+          // + a wall-clock guard (skip fills once FILL_DEADLINE_MS elapsed) keep a
+          // single request safely under the Worker CPU/time ceiling; remaining pending
+          // days self-heal on subsequent loads (the page auto-refreshes while pending>0).
+          const FILL_BUDGET = 1;
+          const FILL_DEADLINE_MS = 15000;
+          const tStart = Date.now();
           let fillsUsed = 0, pending = 0, cum = 0;
           const points: any[] = [];
           const pools: Record<string, { cost: number; payout: number; net: number; wins: number; bets: number }> = {
@@ -3122,7 +3127,7 @@ analyzeRoutes.get('/factors', (c) => {
           for (const d of dayRows) {
             let cached: any = await readHitRateCache(db, d.date, engine);
             let ok = !!(cached && cached.summary && cached.summary.boxDivsFetched === true);
-            if (!ok && fillsUsed < FILL_BUDGET) {
+            if (!ok && fillsUsed < FILL_BUDGET && (Date.now() - tStart) < FILL_DEADLINE_MS) {
               fillsUsed++;
               try {
                 const computed = await computeHitRateStats(db, d.date, engine, undefined, { boxPayouts: true });
