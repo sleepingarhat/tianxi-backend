@@ -271,7 +271,7 @@ app.onError((err, c) => {
   // is filled gradually by refreshHitRateCache + per-request self-heal, not here).
   async function warmStrategyPnl(env: Env): Promise<{ ok: boolean; pending: number; cached?: boolean; error?: string }> {
     try {
-      const req = new Request('https://internal/api/analyze/strategy-pnl', { method: 'GET' });
+      const req = new Request('https://internal/api/analyze/strategy-pnl?refresh=1', { method: 'GET' });
       const res = await app.fetch(req, env, { waitUntil: () => {}, passThroughOnException: () => {} } as any);
       const data: any = await res.json().catch(() => ({}));
       if (data?.error) return { ok: false, pending: -1, error: data.error };
