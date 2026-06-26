@@ -3045,6 +3045,150 @@ analyzeRoutes.get('/factors', (c) => {
         }
       });
 
+      // GET /api/analyze/strategy-pnl?engine=v12 — 天喜策略累計盈虧
+      // 由引擎開始記錄(最早快取賽日)至今，每場以 $10/注 複式箱形投注模型首4，
+      // 同時落齊四個箱形彩池：四連環(FF,任序首4,1注)、單T(TRIO,任序首3,4注)、
+      // 三重彩(TIERCE,依序首3,24注)、四重彩(QUARTET,依序首4,24注) = $530/場。
+      // 由 $0 起始本金，逐個賽日彙總 cost / payout / net + 累計，並附每池細分。
+      // ⚠ 設計上係 −EV(每場每池全落)，累計線預期向下；此為透明紀錄，唔會「修正」蝕數。
+      // 中獎派彩沿用 meeting_hit_rate_cache 內每場 boxPayouts(只記中獎池)；
+      // 落注成本則按「設定有效4馬箱 + 已開賽」之場數 × $530 計(輸注亦計成本)。
+      analyzeRoutes.get('/strategy-pnl', async (c) => {
+        try {
+          const db = c.env.DB;
+          const engine: EloEngine = c.req.query('engine') === 'v11' ? 'v11' : 'v12';
+          const today = new Date().toISOString().substring(0, 10);
+          const refresh = c.req.query('refresh') === '1';
+          const engKey = _engineKey(engine);
+          // engine-start anchor = earliest REAL cached race day (cron writes one per
+          // race day going forward, so this self-defines「由引擎開始記錄」). The
+          // `date LIKE '____-__-__'` filter excludes the __rollup_* / __strategy_pnl_*
+          // synthetic keys. Overridable via ?from=YYYY-MM-DD.
+          let from = c.req.query('from') || '';
+          if (!/^\d{4}-\d{2}-\d{2}$/.test(from)) {
+            const minRow = await db.prepare(
+              "SELECT MIN(date) AS d FROM meeting_hit_rate_cache WHERE engine=? AND date LIKE '____-__-__'"
+            ).bind(engKey).first<{ d: string | null }>().catch(() => null);
+            from = minRow?.d || '';
+          }
+          if (!/^\d{4}-\d{2}-\d{2}$/.test(from)) {
+            // no per-meeting cache yet → fall back to earliest settled HK day (last ~400d)
+            const fb = await db.prepare(
+              "SELECT MIN(m.date) AS d FROM race_meetings m WHERE m.venue IN ('ST','HV') AND m.date >= ?" +
+              " AND EXISTS (SELECT 1 FROM races r JOIN race_results rr ON rr.race_id=r.id WHERE r.meeting_id=m.id AND rr.finishing_position>0)"
+            ).bind(new Date(Date.now() - 400 * 86400000).toISOString().substring(0, 10)).first<{ d: string | null }>().catch(() => null);
+            from = fb?.d || today;
+          }
+          // Per-UTC-day aggregate cache (only served when fully filled: pending===0).
+          // Same table, synthetic key, version-derived engine tag (mirrors rollup).
+          const pnlKey = `__strategy_pnl_${from}`;
+          const pnlEng = `${engKey}-pnl`;
+          if (!refresh) {
+            try {
+              const row = await db.prepare("SELECT payload_json FROM meeting_hit_rate_cache WHERE date=? AND engine=?").bind(pnlKey, pnlEng).first<{ payload_json: string }>();
+              if (row?.payload_json) {
+                const parsed = JSON.parse(row.payload_json);
+                if (parsed && parsed.to === today && parsed.pending === 0) return c.json({ ...parsed, cached: true });
+              }
+            } catch (e) { console.warn('strategy-pnl cache read failed', e); /* fall through */ }
+          }
+          // Universe = settled HK race days from `from` to today (today's results count
+          // as soon as in D1; EXISTS gate restricts to settled, no UTC upper bound).
+          const datesQ = await db.prepare(
+            "SELECT DISTINCT m.date AS date, m.venue AS venue FROM race_meetings m" +
+            " WHERE m.date >= ? AND m.venue IN ('ST','HV')" +
+            " AND EXISTS (SELECT 1 FROM races r JOIN race_results rr ON rr.race_id=r.id WHERE r.meeting_id=m.id AND rr.finishing_position>0)" +
+            " ORDER BY m.date ASC"
+          ).bind(from).all<any>().catch(() => ({ results: [] as any[] }));
+          const dayRows: any[] = (datesQ.results as any[]) || [];
+
+          const COST_FF = 10, COST_TRIO = 40, COST_TIERCE = 240, COST_QUARTET = 240;
+          const PER_RACE = COST_FF + COST_TRIO + COST_TIERCE + COST_QUARTET; // 530
+          const poolCost: Record<string, number> = { FF: COST_FF, TRIO: COST_TRIO, TIERCE: COST_TIERCE, QUARTET: COST_QUARTET };
+          // Bound on-demand fills: a cold recompute is ~30s (full model rebuild), so
+          // cap per request to avoid a Worker timeout / HKJC storm. Most days are
+          // already cron-filled (boxPayouts:true) → pending≈0 in practice.
+          const FILL_BUDGET = 2;
+          let fillsUsed = 0, pending = 0, cum = 0;
+          const points: any[] = [];
+          const pools: Record<string, { cost: number; payout: number; net: number; wins: number; bets: number }> = {
+            FF: { cost: 0, payout: 0, net: 0, wins: 0, bets: 0 },
+            TRIO: { cost: 0, payout: 0, net: 0, wins: 0, bets: 0 },
+            TIERCE: { cost: 0, payout: 0, net: 0, wins: 0, bets: 0 },
+            QUARTET: { cost: 0, payout: 0, net: 0, wins: 0, bets: 0 },
+          };
+          let totalCost = 0, totalPayout = 0, totalRacesBet = 0, daysEvaluated = 0;
+
+          for (const d of dayRows) {
+            let cached: any = await readHitRateCache(db, d.date, engine);
+            let ok = !!(cached && cached.summary && cached.summary.boxDivsFetched === true);
+            if (!ok && fillsUsed < FILL_BUDGET) {
+              fillsUsed++;
+              try {
+                const computed = await computeHitRateStats(db, d.date, engine, undefined, { boxPayouts: true });
+                if (!('error' in computed)) {
+                  await writeHitRateCache(db, d.date, engine, computed).catch(() => {});
+                  cached = computed;
+                  ok = !!(cached.summary && cached.summary.boxDivsFetched === true);
+                }
+              } catch (e) { /* leave pending */ }
+            }
+            if (!ok) { pending++; continue; } // don't fold a partial day into the line
+            let dayCost = 0, dayPayout = 0, racesBet = 0;
+            const dp: Record<string, { payout: number; wins: number }> = {
+              FF: { payout: 0, wins: 0 }, TRIO: { payout: 0, wins: 0 }, TIERCE: { payout: 0, wins: 0 }, QUARTET: { payout: 0, wins: 0 },
+            };
+            for (const race of (cached.races || [])) {
+              const a3 = Array.isArray(race.actualTop3) ? race.actualTop3.length : 0;
+              const a4 = Array.isArray(race.actualTop4) ? race.actualTop4.length : 0;
+              const settled = a3 >= 3 || a4 >= 3;
+              const m4 = (race.predictedTop4 || []).map((p: any) => p.horseNumber).filter((v: any) => v != null && v !== '').map((v: any) => String(v));
+              if (!settled || new Set(m4).size !== 4) continue; // we only bet a valid 4-horse box on a settled race
+              racesBet++;
+              dayCost += PER_RACE;
+              for (const k of ['FF', 'TRIO', 'TIERCE', 'QUARTET']) { pools[k].cost += poolCost[k]; pools[k].bets++; }
+              for (const bp of (race.boxPayouts || [])) {
+                if (!dp[bp.pool]) continue;
+                const div = Number(bp.dividend) || 0;
+                dayPayout += div; dp[bp.pool].payout += div; dp[bp.pool].wins += 1;
+              }
+            }
+            if (!racesBet) continue; // no bettable settled race that day
+            const dayNet = dayPayout - dayCost;
+            cum += dayNet;
+            totalCost += dayCost; totalPayout += dayPayout; totalRacesBet += racesBet; daysEvaluated++;
+            for (const k of ['FF', 'TRIO', 'TIERCE', 'QUARTET']) { pools[k].payout += dp[k].payout; pools[k].wins += dp[k].wins; }
+            points.push({ date: d.date, venue: d.venue, racesBet, cost: dayCost, payout: dayPayout, net: dayNet, cum });
+          }
+          for (const k of ['FF', 'TRIO', 'TIERCE', 'QUARTET']) pools[k].net = pools[k].payout - pools[k].cost;
+          const totalNet = totalPayout - totalCost;
+          const roiPct = totalCost ? Math.round((totalNet / totalCost) * 1000) / 10 : null;
+          const payload: any = {
+            engine, from, to: today,
+            startBankroll: 0, unit: 10, perRaceCost: PER_RACE,
+            poolDefs: [
+              { pool: 'FF', name: '四連環（任序首4）', units: 1, cost: COST_FF },
+              { pool: 'TRIO', name: '單T（任序首3）', units: 4, cost: COST_TRIO },
+              { pool: 'TIERCE', name: '三重彩（依序首3）', units: 24, cost: COST_TIERCE },
+              { pool: 'QUARTET', name: '四重彩（依序首4）', units: 24, cost: COST_QUARTET },
+            ],
+            daysFound: dayRows.length, daysEvaluated, racesBet: totalRacesBet,
+            totalCost, totalPayout, totalNet, roiPct, cumNet: cum,
+            poolBreakdown: pools, points, pending,
+            generatedAt: new Date().toISOString(),
+          };
+          if (pending === 0) {
+            try {
+              await db.prepare("INSERT OR REPLACE INTO meeting_hit_rate_cache (date, engine, payload_json, computed_at) VALUES (?, ?, ?, ?)")
+                .bind(pnlKey, pnlEng, JSON.stringify(payload), new Date().toISOString()).run();
+            } catch (e) { console.warn('strategy-pnl cache write failed', e); /* best-effort */ }
+          }
+          return c.json(payload);
+        } catch (err: any) {
+          return c.json({ error: 'strategy-pnl failed', detail: err?.message ?? String(err) }, 500);
+        }
+      });
+
       // GET /api/analyze/ensemble-tune?days=30&apply=0
       // P4: TX-Oracle v3 α grid search. Runs computeHitRateStats for α ∈
       // {0.40, 0.50, 0.62, 0.75, 0.85} over last N days of meetings with
