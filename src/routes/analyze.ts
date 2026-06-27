@@ -147,17 +147,15 @@ export const analyzeRoutes = new Hono<{ Bindings: Env }>();
     const engKey = _engineKey(engine);
     let from = opts?.from || '';
     if (!/^\d{4}-\d{2}-\d{2}$/.test(from)) {
-      const minRow = await db.prepare(
-        "SELECT MIN(date) AS d FROM meeting_hit_rate_cache WHERE engine=? AND date LIKE '____-__-__'",
-      ).bind(engKey).first<{ d: string | null }>().catch(() => null);
-      from = minRow?.d || '';
-    }
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(from)) {
+      // Stats start at the FIRST HK race day of June 2026 onward; pre-June
+      // history is intentionally excluded (product decision). Resolve the floor
+      // to the first settled ST/HV meeting so points[0] is a real race day.
+      const STRATEGY_PNL_ANCHOR = '2026-06-01';
       const fb = await db.prepare(
         "SELECT MIN(m.date) AS d FROM race_meetings m WHERE m.venue IN ('ST','HV') AND m.date >= ?" +
         " AND EXISTS (SELECT 1 FROM races r JOIN race_results rr ON rr.race_id=r.id WHERE r.meeting_id=m.id AND rr.finishing_position>0)",
-      ).bind(new Date(Date.now() - 400 * 86400000).toISOString().substring(0, 10)).first<{ d: string | null }>().catch(() => null);
-      from = fb?.d || today;
+      ).bind(STRATEGY_PNL_ANCHOR).first<{ d: string | null }>().catch(() => null);
+      from = fb?.d || STRATEGY_PNL_ANCHOR;
     }
     const FILL_BUDGET = opts?.fillBudget ?? 1;
     const FILL_DEADLINE_MS = opts?.deadlineMs ?? 15000;
@@ -3208,17 +3206,14 @@ analyzeRoutes.get('/factors', (c) => {
           // engine-start anchor (mirror computeStrategyPnl) so the cache key matches.
           let from = c.req.query('from') || '';
           if (!/^\d{4}-\d{2}-\d{2}$/.test(from)) {
-            const minRow = await db.prepare(
-              "SELECT MIN(date) AS d FROM meeting_hit_rate_cache WHERE engine=? AND date LIKE '____-__-__'",
-            ).bind(engKey).first<{ d: string | null }>().catch(() => null);
-            from = minRow?.d || '';
-          }
-          if (!/^\d{4}-\d{2}-\d{2}$/.test(from)) {
+            // Mirror computeStrategyPnl: anchor to the first HK race day of June
+            // 2026 onward (pre-June history excluded) so the cache key matches.
+            const STRATEGY_PNL_ANCHOR = '2026-06-01';
             const fb = await db.prepare(
               "SELECT MIN(m.date) AS d FROM race_meetings m WHERE m.venue IN ('ST','HV') AND m.date >= ?" +
               " AND EXISTS (SELECT 1 FROM races r JOIN race_results rr ON rr.race_id=r.id WHERE r.meeting_id=m.id AND rr.finishing_position>0)",
-            ).bind(new Date(Date.now() - 400 * 86400000).toISOString().substring(0, 10)).first<{ d: string | null }>().catch(() => null);
-            from = fb?.d || today;
+            ).bind(STRATEGY_PNL_ANCHOR).first<{ d: string | null }>().catch(() => null);
+            from = fb?.d || STRATEGY_PNL_ANCHOR;
           }
           const pnlKey = `__strategy_pnl_${from}`;
           const pnlEng = `${engKey}-pnl`;
