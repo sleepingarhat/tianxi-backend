@@ -23,6 +23,7 @@ Usage:
 from __future__ import annotations
 import argparse
 import json
+import math
 import sqlite3
 import sys
 from pathlib import Path
@@ -30,6 +31,19 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import lightgbm as lgb
+
+import pl_calibration as pl  # Phase-1 PL/Henery calibration head (eval-only)
+
+# ── PL/Henery calibration head config (eval-only; prod untouched) ──
+# A monotone transform of the single LGB score → top-N selection and realized
+# box coverage/ROI are UNCHANGED (architect-confirmed). This block measures
+# probability CALIBRATION only. τ/γ are fit LEAK-SAFE on a trailing window of
+# already-evaluated (out-of-fold) races, frozen for future test races.
+CALIB_MIN_OOF = 150        # warm-up: OOF races before calibrator activates
+CALIB_REFIT_EVERY = 50     # refit τ/γ every N evaluated races
+CALIB_WINDOW_MAX = 800     # trailing OOF window cap (bounds cost, stays current)
+CALIB_MAXPOS = 4           # fit γ2..γ4 (Henery exponents for positions 2..4)
+_HARVILLE = [1.0, 1.0, 1.0, 1.0]
 
 
 FEATURE_COLS = [
@@ -459,6 +473,69 @@ def qin_parlay_roi(records, legs, min_field=None) -> dict:
     return out
 
 
+def _calibration_report(rows, races, n_mismatch, tau, gamma, n_oof_final) -> dict:
+    """Assemble the Phase-1 calibration report from the eval-only accumulators."""
+    if not rows:
+        return {"_status": "insufficient_oof",
+                "note": "calibrator never warmed up (need >= %d OOF races)" % CALIB_MIN_OOF}
+    A = np.asarray(rows, dtype=float)
+    pw, ywin, p3h, p3e, p4h, p4e, y3, y4 = (A[:, j] for j in range(8))
+
+    def cal(p, y):
+        return {"brier": round(pl.brier(p, y), 5),
+                "ece": round(pl.ece(p, y), 5),
+                "logloss": round(pl.binary_logloss(p, y), 5),
+                "pred_mean": round(float(np.mean(p)), 5),
+                "obs_mean": round(float(np.mean(y)), 5)}
+
+    cov = {}
+    for fam in ("trio", "first4"):
+        for nsel in (4, 5, 6):
+            preds = np.array([r[fam][nsel][0] for r in races
+                              if fam in r and nsel in r[fam]])
+            obs = np.array([r[fam][nsel][1] for r in races
+                            if fam in r and nsel in r[fam]])
+            if len(preds):
+                cov["%s_n%d" % (fam, nsel)] = {
+                    "n": int(len(preds)),
+                    "pred_mean": round(float(preds.mean()), 5),
+                    "obs_mean": round(float(obs.mean()), 5),
+                    "brier": round(pl.brier(preds, obs), 5),
+                    "ece": round(pl.ece(preds, obs), 5),
+                    "deciles": pl.reliability_deciles(preds, obs)}
+
+    nll_h = np.array([r["nll3"][0] for r in races if "nll3" in r], dtype=float)
+    nll_e = np.array([r["nll3"][1] for r in races if "nll3" in r], dtype=float)
+    win_p = np.array([r["pwin_winner"] for r in races if "pwin_winner" in r],
+                     dtype=float)
+    return {
+        "_status": "ok",
+        "n_horse_rows": int(len(A)),
+        "n_oof_races_final": int(n_oof_final),
+        "tau_final": round(float(tau), 4),
+        "gamma_final": [round(float(g), 4) for g in gamma],
+        "pwin": cal(pw, ywin),
+        "winner_nll_mean": (round(float(np.mean(
+            -np.log(np.clip(win_p, 1e-12, 1.0)))), 5) if len(win_p) else None),
+        "pTop3": {"harville": cal(p3h, y3), "henery": cal(p3e, y3)},
+        "pTop4": {"harville": cal(p4h, y4), "henery": cal(p4e, y4)},
+        "toporder_nll3": {
+            "harville_mean": (round(float(np.nanmean(nll_h)), 5) if len(nll_h) else None),
+            "henery_mean": (round(float(np.nanmean(nll_e)), 5) if len(nll_e) else None),
+            "henery_better_pct": (round(float(np.mean(nll_e < nll_h)) * 100, 2)
+                                  if len(nll_h) else None),
+            "n": int(len(nll_h))},
+        "coverage_reliability": cov,
+        "invariant_topN_mismatch": int(n_mismatch),
+        "box_roi_unchanged_by_calibration": True,
+        "note": ("PL/Henery worth = exp(score/tau) is a monotone transform of the "
+                 "single LGB score -> top-N selection and realized coverage/box ROI "
+                 "are UNCHANGED. This block measures probability CALIBRATION only "
+                 "(pWin/pTop3/pTop4 + analytic E[box coverage]); Henery gamma vs "
+                 "Harville is the lower-place calibration test."),
+    }
+
+
 def main() -> int:
     args = parse_args()
     df = load(args.features)
@@ -480,6 +557,16 @@ def main() -> int:
     booster: lgb.Booster | None = None
     last_trained_at = -10**9
     per_race: list[dict] = []
+
+    # PL/Henery calibration head accumulators (eval-only, leak-safe)
+    calib_oof: list = []                  # trailing OOF buffer: (scores, order_local)
+    calib_tau = 1.0
+    calib_gamma = [1.0, 1.0, 1.0, 1.0]
+    calib_warm = False
+    races_since_refit = 0
+    calib_rows: list = []                 # per-horse (pw,ywin,p3h,p3e,p4h,p4e,y3,y4)
+    calib_race: list = []                 # per-race coverage forecasts + nll
+    n_invariant_mismatch = 0
 
     for i, rid in enumerate(race_ids):
         test_df = race_to_rows[rid]
@@ -560,6 +647,52 @@ def main() -> int:
                 rec["%s_%s" % (name, k)] = v
         per_race.append(rec)
 
+        # ── PL/Henery calibration head (eval-only, leak-safe) ──
+        # Fit τ/γ ONLY on OOF races strictly before this one; score THIS race
+        # (still out-of-fold for the booster) with the frozen calibrator.
+        hid_to_local = {h: k for k, h in enumerate(ta["horse_id"].tolist())}
+        order_local = [hid_to_local[h] for h in actual_order if h in hid_to_local]
+        if len(order_local) >= 3 and len(scores) == len(ta):
+            if ((not calib_warm or races_since_refit >= CALIB_REFIT_EVERY)
+                    and len(calib_oof) >= CALIB_MIN_OOF):
+                window = calib_oof[-CALIB_WINDOW_MAX:]
+                calib_tau, calib_gamma = pl.fit_calibrator(window, max_pos=CALIB_MAXPOS)
+                calib_warm = True
+                races_since_refit = 0
+            if calib_warm:
+                sc = np.asarray(scores, dtype=float)
+                vv = pl.worths(sc, calib_tau)
+                pwv = pl.pwin(vv)
+                tk_h = pl.top_k_probs(vv, _HARVILLE, 4)
+                tk_e = pl.top_k_probs(vv, calib_gamma, 4)
+                t3s, t4s = set(order_local[:3]), set(order_local[:4])
+                for k in range(len(sc)):
+                    calib_rows.append((
+                        float(pwv[k]), 1.0 if k == order_local[0] else 0.0,
+                        float(tk_h[k, 2]), float(tk_e[k, 2]),
+                        float(tk_h[k, 3]), float(tk_e[k, 3]),
+                        1.0 if k in t3s else 0.0, 1.0 if k in t4s else 0.0))
+                order_sc = np.argsort(-sc)
+                if (set(order_sc[:4].tolist())
+                        != set(np.argsort(-tk_e[:, 2])[:4].tolist())):
+                    n_invariant_mismatch += 1
+                rfc = {"pwin_winner": float(pwv[order_local[0]]),
+                       "trio": {}, "first4": {}}
+                for Nsel in (4, 5, 6):
+                    S = order_sc[:Nsel].tolist()
+                    Ss = set(S)
+                    rfc["trio"][Nsel] = (pl.coverage_prob(vv, calib_gamma, S, 3),
+                                         1.0 if t3s.issubset(Ss) else 0.0)
+                    if len(order_local) >= 4:
+                        rfc["first4"][Nsel] = (
+                            pl.coverage_prob(vv, calib_gamma, S, 4),
+                            1.0 if t4s.issubset(Ss) else 0.0)
+                rfc["nll3"] = (pl.toporder_nll(vv, _HARVILLE, order_local[:3]),
+                               pl.toporder_nll(vv, calib_gamma, order_local[:3]))
+                calib_race.append(rfc)
+            races_since_refit += 1
+            calib_oof.append((np.asarray(scores, dtype=float), order_local))
+
         if args.verbose and (i + 1) % 200 == 0:
             print(f"  [{i + 1}/{len(race_ids)}] evaluated", file=sys.stderr)
 
@@ -606,6 +739,9 @@ def main() -> int:
                                    "leg3": qin_parlay_roi(per_race, 3, 8)}
                                   if box_divs_by_race
                                   else {"_disabled": "no dividends loaded from --db"}),
+        "calibration": _calibration_report(calib_rows, calib_race,
+                                           n_invariant_mismatch, calib_tau,
+                                           calib_gamma, len(calib_oof)),
         "feature_importance_gain": (
             dict(zip(feat_cols,
                      booster.feature_importance(importance_type="gain").tolist()))
