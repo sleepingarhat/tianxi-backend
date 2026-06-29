@@ -15,11 +15,38 @@ coverage/EV lift (architect-confirmed monotonicity 2026-06-29).
 from __future__ import annotations
 import math
 import numpy as np
-from scipy.optimize import minimize_scalar
 
 GAMMA_BOUNDS = (0.05, 5.0)
 TAU_BOUNDS = (0.01, 100.0)
 _EPS = 1e-12
+
+
+def _minimize_1d(f, lo: float, hi: float, grid: int = 33,
+                 iters: int = 60, tol: float = 1e-6) -> float:
+    """Minimize a smooth, ~unimodal 1-D function on [lo, hi]: a coarse grid
+    locates the bracket, then golden-section refines it. numpy-only (no scipy
+    dependency, since CI installs only lightgbm/pandas/numpy)."""
+    xs = np.linspace(lo, hi, grid)
+    fs = [f(float(x)) for x in xs]
+    j = int(np.argmin(fs))
+    a = float(xs[max(0, j - 1)])
+    b = float(xs[min(grid - 1, j + 1)])
+    invphi = (math.sqrt(5.0) - 1.0) / 2.0
+    c = b - invphi * (b - a)
+    d = a + invphi * (b - a)
+    fc, fd = f(c), f(d)
+    for _ in range(iters):
+        if (b - a) < tol:
+            break
+        if fc < fd:
+            b, d, fd = d, c, fc
+            c = b - invphi * (b - a)
+            fc = f(c)
+        else:
+            a, c, fc = c, d, fd
+            d = a + invphi * (b - a)
+            fd = f(d)
+    return 0.5 * (a + b)
 
 
 def worths(scores, tau: float = 1.0) -> np.ndarray:
@@ -145,9 +172,8 @@ def fit_tau(races) -> float:
             n += 1
         return tot / n if n else float("inf")
 
-    res = minimize_scalar(loss, bounds=(math.log(TAU_BOUNDS[0]), math.log(TAU_BOUNDS[1])),
-                          method="bounded")
-    return float(math.exp(res.x))
+    best = _minimize_1d(loss, math.log(TAU_BOUNDS[0]), math.log(TAU_BOUNDS[1]))
+    return float(math.exp(best))
 
 
 def fit_gamma_pos(races, tau: float, pos: int) -> float:
@@ -179,9 +205,8 @@ def fit_gamma_pos(races, tau: float, pos: int) -> float:
             n += 1
         return tot / n if n else float("inf")
 
-    res = minimize_scalar(loss, bounds=(math.log(GAMMA_BOUNDS[0]), math.log(GAMMA_BOUNDS[1])),
-                          method="bounded")
-    return float(math.exp(res.x))
+    best = _minimize_1d(loss, math.log(GAMMA_BOUNDS[0]), math.log(GAMMA_BOUNDS[1]))
+    return float(math.exp(best))
 
 
 def fit_calibrator(races, max_pos: int = 3):
