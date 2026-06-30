@@ -3,6 +3,7 @@ import type { Env, AnalyzeRequest } from '../types';
 import { generateAnalysisSummary } from '../services/ai';
 import { fetchLatestWinOddsByRace, attachMarketBlend, MARKET_BLEND_BETA, normHorseKey } from '../lib/market-blend';
 import { parseHkjcDividends, BOX_POOL_MAP } from '../lib/parse-dividends';
+import { computeRaceProbabilities, roundCoverage } from '../lib/pl-prob';
 
 export const analyzeRoutes = new Hono<{ Bindings: Env }>();
   // ── Hit-rate cache (cron-driven) ────────────────────────────────────
@@ -1685,12 +1686,12 @@ async function computeComposite(
     };
   }));
 
-  // Plackett-Luce-ish softmax
-  const expScores = enriched.map((s) => Math.exp(s._score));
-  const Z = expScores.reduce((a, b) => a + b, 0) || 1;
+  // Plackett-Luce / Harville place probabilities. pWin is identical to the
+  // prior softmax; pTop3/pTop4 are exact Harville (replaces crude min(pWin*3)).
+  // See src/lib/pl-prob.ts (ported from the validated Phase-1 calibration head).
+  const _prob = computeRaceProbabilities(enriched.map((s) => s._score));
   const withProb = enriched.map((s, i) => {
-    const pWin = expScores[i] / Z;
-    const pTop3 = Math.min(pWin * 3, 0.99);
+    const pWin = _prob.pWin[i];
     const mkt = s.win_odds && s.win_odds > 1 ? 1 / s.win_odds : null;
     const valueDelta = mkt != null ? pWin - mkt : null;
     return {
@@ -1718,7 +1719,8 @@ async function computeComposite(
       scoreSource: (s as any).scoreSource ?? 'elo',
       lgbModelVersion: (s as any).lgbModelVersion ?? null,
       pWin: Math.round(pWin * 1000) / 1000,
-      pTop3: Math.round(pTop3 * 1000) / 1000,
+      pTop3: Math.round(_prob.pTop3[i] * 1000) / 1000,
+      pTop4: Math.round(_prob.pTop4[i] * 1000) / 1000,
       valueDelta: valueDelta != null ? Math.round(valueDelta * 1000) / 1000 : null,
     };
   });
@@ -2388,13 +2390,12 @@ analyzeRoutes.get('/factors', (c) => {
           const { raceHasLgb, lgbHits, lgbModelVerForRace } = applyEnsembleBlend(
             enriched as any[], effectiveAlpha, lgbScoreByRaceHorse, lgbLookupRaceId,
           );
-          const expScores = enriched.map((s) => Math.exp(s._score));
-          const Z = expScores.reduce((a, b) => a + b, 0) || 1;
-          const picks = enriched.map((s, i) => { const { _score, ...rest } = s as any; return { ...rest, pWin: Math.round((expScores[i]/Z)*1000)/1000, pTop3: Math.round(Math.min((expScores[i]/Z)*3,0.99)*1000)/1000 }; });
+          const _prob = computeRaceProbabilities((enriched as any[]).map((s) => s._score));
+          const picks = enriched.map((s, i) => { const { _score, ...rest } = s as any; return { ...rest, pWin: Math.round(_prob.pWin[i]*1000)/1000, pTop3: Math.round(_prob.pTop3[i]*1000)/1000, pTop4: Math.round(_prob.pTop4[i]*1000)/1000 }; });
           picks.sort((a: any, b: any) => b.pWin - a.pWin);
           picks.forEach((p: any, i: number) => { p.rank = i + 1; });
           const _txTotal = (enriched as any[]).length;
-          return { raceId, lgbLookupRaceId, raceNumber: raceNum, title: raceTitle, class: raceClass, distance: raceDistance, going: raceGoing, track: raceTrack, course: raceCourse, picks, scoreSource: raceHasLgb ? `tx-oracle-v3 (lgb=${lgbHits}/${_txTotal}, α=${effectiveAlpha.toFixed(2)})` : 'elo+factor', lgbCoverage: { hits: lgbHits, total: _txTotal, applied: raceHasLgb }, lgbModelVersion: lgbModelVerForRace, ensembleAlpha: effectiveAlpha };
+          return { raceId, lgbLookupRaceId, raceNumber: raceNum, title: raceTitle, class: raceClass, distance: raceDistance, going: raceGoing, track: raceTrack, course: raceCourse, picks, scoreSource: raceHasLgb ? `tx-oracle-v3 (lgb=${lgbHits}/${_txTotal}, α=${effectiveAlpha.toFixed(2)})` : 'elo+factor', lgbCoverage: { hits: lgbHits, total: _txTotal, applied: raceHasLgb }, lgbModelVersion: lgbModelVerForRace, ensembleAlpha: effectiveAlpha, expectedBoxCoverage: roundCoverage(_prob.coverage), probabilityModel: _prob.model };
         });
         const eloReady = racePredictions.some((r) => r.picks?.some((p: any) => p.eloComposite != null));
         return { date: targetDate, venue: meeting.venue, trackCondition: meeting.track_condition, eloEngine: engine, eloWeights: ELO_WEIGHTS, eloReady, races: racePredictions, lgbModelVersion: helperLgbModelVersion, lgbCoverage: { rows: lgbScoreByRaceHorse.size }, generatedAt: new Date().toISOString() };
@@ -2592,15 +2593,14 @@ analyzeRoutes.get('/factors', (c) => {
             const { raceHasLgb, lgbHits, lgbModelVerForRace } = applyEnsembleBlend(
               enriched as any[], todayPicksAlpha, lgbScoreByRaceHorse, lgbLookupRaceId,
             );
-            const expScores = enriched.map((s) => Math.exp(s._score));
-          const Z = expScores.reduce((a, b) => a + b, 0) || 1;
-          const picks = enriched.map((s, i) => { const { _score, ...rest } = s as any; return { ...rest, pWin: Math.round((expScores[i]/Z)*1000)/1000, pTop3: Math.round(Math.min((expScores[i]/Z)*3,0.99)*1000)/1000 }; });
+            const _prob = computeRaceProbabilities((enriched as any[]).map((s) => s._score));
+          const picks = enriched.map((s, i) => { const { _score, ...rest } = s as any; return { ...rest, pWin: Math.round(_prob.pWin[i]*1000)/1000, pTop3: Math.round(_prob.pTop3[i]*1000)/1000, pTop4: Math.round(_prob.pTop4[i]*1000)/1000 }; });
           picks.sort((a: any, b: any) => b.pWin - a.pWin);
           picks.forEach((p: any, i: number) => { p.rank = i + 1; });
           const _mbOdds = liveWinOddsByRace.get(raceNum) ?? null;
           const _mb = attachMarketBlend(picks, _mbOdds?.odds ?? null);
           const _txTotal2 = (enriched as any[]).length;
-          return { raceId, lgbLookupRaceId, raceNumber: raceNum, title: raceTitle, class: raceClass, distance: raceDistance, going: raceGoing, track: raceTrack, course: raceCourse, picks, scoreSource: raceHasLgb ? `tx-oracle-v3 (lgb=${lgbHits}/${_txTotal2}, α=${todayPicksAlpha.toFixed(2)})` : 'elo+factor', lgbCoverage: { hits: lgbHits, total: _txTotal2, applied: raceHasLgb }, lgbModelVersion: lgbModelVerForRace, ensembleAlpha: todayPicksAlpha, marketReady: _mb.marketReady, oddsSnapshotAt: _mbOdds?.snapshotAt ?? null, marketBeta: MARKET_BLEND_BETA };
+          return { raceId, lgbLookupRaceId, raceNumber: raceNum, title: raceTitle, class: raceClass, distance: raceDistance, going: raceGoing, track: raceTrack, course: raceCourse, picks, scoreSource: raceHasLgb ? `tx-oracle-v3 (lgb=${lgbHits}/${_txTotal2}, α=${todayPicksAlpha.toFixed(2)})` : 'elo+factor', lgbCoverage: { hits: lgbHits, total: _txTotal2, applied: raceHasLgb }, lgbModelVersion: lgbModelVerForRace, ensembleAlpha: todayPicksAlpha, marketReady: _mb.marketReady, oddsSnapshotAt: _mbOdds?.snapshotAt ?? null, marketBeta: MARKET_BLEND_BETA, expectedBoxCoverage: roundCoverage(_prob.coverage), probabilityModel: _prob.model };
         });
         const eloReady = racePredictions.some((r) => r.picks?.some((p: any) => p.eloComposite != null));
         const computeMs = Date.now() - t0;
