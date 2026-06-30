@@ -181,6 +181,16 @@ function main() {
     horse_form_records: ['horse_id', 'race_date', 'venue', 'race_number'],
   };
 
+  // FK-parent tables pushed with INSERT OR IGNORE (existence only) whose name
+  // columns must still be backfilled. INSERT OR IGNORE never updates an existing
+  // row, so a stub seeded with a null/placeholder name (HKJC had not yet
+  // published the Chinese name at declaration) would stay nameless forever.
+  const NAME_BACKFILL_COLS: Record<string, string[]> = {
+    horses: ['name_ch', 'name_en'],
+    jockeys: ['name_ch', 'name_en'],
+    trainers: ['name_ch', 'name_en'],
+  };
+
   for (const { table, where } of plan) {
     const tableInfo = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string; pk: number }>;
     const cols = tableInfo.map((r) => r.name);
@@ -259,6 +269,36 @@ function main() {
           sql = `INSERT OR REPLACE INTO ${table} (${cols.join(',')}) VALUES\n${valuesSql};`;
         }
         stmts.push(sql);
+
+        // Name backfill for FK-parent tables. The INSERT OR IGNORE above never
+        // updates an existing row, so a horse/jockey/trainer stub seeded with a
+        // null/placeholder name (HKJC had not published the Chinese name yet at
+        // declaration) would stay nameless forever — newly-registered horses
+        // surfaced their bare code (e.g. "L291") instead of "升升雙息". Emit
+        // additive UPDATE-by-PK statements that backfill name_ch/name_en once a
+        // real name is available. UPDATE-by-id cannot violate the secondary
+        // UNIQUE(code), and the WHERE guard only fills NULL/placeholder values so
+        // a real, already-correct name is never clobbered. Skipped at generation
+        // time when the incoming value is itself a placeholder (equals the code).
+        const nameCols = skipUpdate ? NAME_BACKFILL_COLS[table] : undefined;
+        if (nameCols && nameCols.length) {
+          const idCol = pkCols[0] ?? 'id';
+          for (const r of batch) {
+            const idVal = r[idCol];
+            if (idVal === null || idVal === undefined) continue;
+            const codePart = String(idVal).replace(/^(horse_|jockey_|trainer_)/, '');
+            for (const nc of nameCols) {
+              if (!cols.includes(nc)) continue;
+              const v = r[nc];
+              if (v === null || v === undefined) continue;
+              const sv = String(v).trim();
+              if (sv === '' || sv === codePart) continue; // incoming is a placeholder, not a real name
+              stmts.push(
+                `UPDATE ${table} SET ${nc}=${esc(v)} WHERE ${idCol}=${esc(idVal)} AND (${nc} IS NULL OR ${nc}=${esc(codePart)});`,
+              );
+            }
+          }
+        }
       }
       const fn = join(outDir, `${table}-${String(chunkIdx).padStart(4, '0')}.sql`);
       writeFileSync(fn, stmts.join('\n') + '\n');
