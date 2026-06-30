@@ -13,6 +13,14 @@
   // hit-rate); it does NOT catch 冷馬. β from that sweep.
   export const MARKET_BLEND_BETA = 0.4;
 
+  // Overlay / 值博 flag threshold. A runner is flagged value:'overlay' when the
+  // model's (renormalized) win prob exceeds the market-implied win prob by at
+  // least this many absolute probability points — i.e. the model rates it higher
+  // than the market does (model≠market DIVERGENCE, the only open edge lever). It
+  // is ADDITIVE only and NEVER touches model rank/pWin/finalScore. 3pp ≈ a
+  // meaningful gap over a typical 8-14 horse field without flooding every race.
+  export const VALUE_EDGE_MIN = 0.03;
+
   // odds_snapshots.combination is zero-padded ("01".."12") from the HKJC combString
   // while picks carry an unpadded numeric horseNumber. BOTH the odds-map side AND the
   // pick side MUST be normalized through THIS one function so a padded "01" matches an
@@ -79,6 +87,7 @@
     // (scratched / no odds) are unambiguous for downstream consumers.
     for (const p of picks) {
       p.liveWinOdds = null; p.marketProb = null; p.blendProb = null; p.marketRank = null;
+      p.valueEdge = null; p.value = null;
     }
     const invSum = withOdds.reduce(
       (a, p) => a + 1 / oddsByHorseNo.get(normHorseKey(p.horseNumber))!, 0
@@ -92,7 +101,7 @@
       const blendScore =
         (1 - MARKET_BLEND_BETA) * Math.log(modelP + eps) +
         MARKET_BLEND_BETA * Math.log(mktP + eps);
-      return { p, o, mktP, blendScore };
+      return { p, o, mktP, modelP, blendScore };
     });
     const mx = Math.max(...scored.map((s) => s.blendScore));
     const exps = scored.map((s) => Math.exp(s.blendScore - mx));
@@ -101,6 +110,13 @@
       s.p.liveWinOdds = Math.round(s.o * 10) / 10;
       s.p.marketProb = Math.round(s.mktP * 1000) / 1000;
       s.p.blendProb = Math.round((exps[i] / Z) * 1000) / 1000;
+      // ADDITIVE overlay/值博 signal: model win-prob minus market-implied win-prob
+      // (both renormalized over the SAME covered set → directly comparable). A
+      // positive edge ≥ VALUE_EDGE_MIN means the model rates this runner higher
+      // than the market does. Does NOT move model rank/pWin/finalScore.
+      const _edge = s.modelP - s.mktP;
+      s.p.valueEdge = Math.round(_edge * 1000) / 1000;
+      s.p.value = _edge >= VALUE_EDGE_MIN ? 'overlay' : null;
     });
     [...scored]
       .sort((a, b) => b.blendScore - a.blendScore)

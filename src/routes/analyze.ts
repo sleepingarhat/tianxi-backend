@@ -2295,6 +2295,33 @@ analyzeRoutes.get('/factors', (c) => {
       return { raceHasLgb, lgbHits, lgbModelVerForRace };
     }
 
+      // ── attachRaceQuality: relative WITHIN-DAY race ranking by box coverage ──
+      // expectedBoxCoverage is the model's analytic estimate, which UNDER-predicts
+      // realized coverage by ~1-4pp → it is ONLY meaningful as a same-day RELATIVE
+      // signal (揀場), never an absolute probability. Primary metric = trio_n4
+      // (任序首3 box of the model's top-4) = the north-star top-4 box use case.
+      // Tie-break first4_n4, then race number. Tier = within-day terciles (高/中/低).
+      // ADDITIVE: writes only a new raceQuality field; picks/pWin/coverage untouched.
+      function attachRaceQuality(racePredictions: any[]): void {
+        for (const r of racePredictions) r.raceQuality = null;
+        const ranked = racePredictions
+          .map((r) => ({
+            r,
+            m: (r.expectedBoxCoverage && typeof r.expectedBoxCoverage.trio_n4 === 'number') ? r.expectedBoxCoverage.trio_n4 as number : null,
+            m2: (r.expectedBoxCoverage && typeof r.expectedBoxCoverage.first4_n4 === 'number') ? r.expectedBoxCoverage.first4_n4 as number : 0,
+          }))
+          .filter((x): x is { r: any; m: number; m2: number } => x.m != null);
+        const total = ranked.length;
+        if (!total) return;
+        ranked.sort((a, b) => (b.m - a.m) || (b.m2 - a.m2) || ((a.r.raceNumber ?? 0) - (b.r.raceNumber ?? 0)));
+        const third = Math.ceil(total / 3);
+        ranked.forEach((x, i) => {
+          const rank = i + 1;
+          const tier = rank <= third ? '高' : rank > total - third ? '低' : '中';
+          x.r.raceQuality = { rank, total, tier, metric: 'trio_n4', score: Math.round(x.m * 1000) / 1000 };
+        });
+      }
+
     // ── computePicksFromEntries: shared helper for today-picks / picks-by-date / hit-rate ──
       async function computePicksFromEntries(
         db: D1Database,
@@ -2397,6 +2424,7 @@ analyzeRoutes.get('/factors', (c) => {
           const _txTotal = (enriched as any[]).length;
           return { raceId, lgbLookupRaceId, raceNumber: raceNum, title: raceTitle, class: raceClass, distance: raceDistance, going: raceGoing, track: raceTrack, course: raceCourse, picks, scoreSource: raceHasLgb ? `tx-oracle-v3 (lgb=${lgbHits}/${_txTotal}, α=${effectiveAlpha.toFixed(2)})` : 'elo+factor', lgbCoverage: { hits: lgbHits, total: _txTotal, applied: raceHasLgb }, lgbModelVersion: lgbModelVerForRace, ensembleAlpha: effectiveAlpha, expectedBoxCoverage: roundCoverage(_prob.coverage), probabilityModel: _prob.model };
         });
+        attachRaceQuality(racePredictions);
         const eloReady = racePredictions.some((r) => r.picks?.some((p: any) => p.eloComposite != null));
         return { date: targetDate, venue: meeting.venue, trackCondition: meeting.track_condition, eloEngine: engine, eloWeights: ELO_WEIGHTS, eloReady, races: racePredictions, lgbModelVersion: helperLgbModelVersion, lgbCoverage: { rows: lgbScoreByRaceHorse.size }, generatedAt: new Date().toISOString() };
       }
@@ -2602,6 +2630,7 @@ analyzeRoutes.get('/factors', (c) => {
           const _txTotal2 = (enriched as any[]).length;
           return { raceId, lgbLookupRaceId, raceNumber: raceNum, title: raceTitle, class: raceClass, distance: raceDistance, going: raceGoing, track: raceTrack, course: raceCourse, picks, scoreSource: raceHasLgb ? `tx-oracle-v3 (lgb=${lgbHits}/${_txTotal2}, α=${todayPicksAlpha.toFixed(2)})` : 'elo+factor', lgbCoverage: { hits: lgbHits, total: _txTotal2, applied: raceHasLgb }, lgbModelVersion: lgbModelVerForRace, ensembleAlpha: todayPicksAlpha, marketReady: _mb.marketReady, oddsSnapshotAt: _mbOdds?.snapshotAt ?? null, marketBeta: MARKET_BLEND_BETA, expectedBoxCoverage: roundCoverage(_prob.coverage), probabilityModel: _prob.model };
         });
+        attachRaceQuality(racePredictions);
         const eloReady = racePredictions.some((r) => r.picks?.some((p: any) => p.eloComposite != null));
         const computeMs = Date.now() - t0;
         const payload = {

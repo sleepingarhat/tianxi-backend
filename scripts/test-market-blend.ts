@@ -98,6 +98,13 @@
     assert(res.marketReady === true, 'marketReady true (padded odds matched unpadded picks)');
     const covered = picks.filter((p) => p.liveWinOdds != null);
     assert(covered.length === 12, 'all 12 picks got market fields (got ' + covered.length + ')');
+    // ADDITIVE overlay/值博 signal — every covered pick gets a numeric valueEdge
+    // (modelP - marketProb over the covered set) and a value flag of 'overlay'|null.
+    // The model snapshot asserted above must STILL be unchanged (purely additive).
+    assert(covered.every((p) => typeof p.valueEdge === 'number'), 'every covered pick has a numeric valueEdge (modelP - marketProb)');
+    assert(picks.every((p) => p.value === 'overlay' || p.value === null), 'value flag is "overlay" or null on every pick');
+    const _edgeSum = covered.reduce((a, p) => a + p.valueEdge, 0);
+    assert(Math.abs(_edgeSum) < 0.02, 'valueEdge ~sums to 0 across covered set (both sides renormalized; got ' + _edgeSum.toFixed(4) + ')');
     assert(picks.every((p) => p.marketRank != null && p.marketRank >= 1 && p.marketRank <= 12),
       'every pick has a marketRank in 1..12');
     const fav = picks.find((p) => p.horseNumber === 1);
