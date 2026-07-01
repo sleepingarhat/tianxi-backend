@@ -459,6 +459,127 @@ def qin_parlay_roi(records, legs, min_field=None) -> dict:
     return out
 
 
+# ───────── odds-bucket stratification (EVAL-ONLY) ─────────
+# Answers two product questions WITHOUT any train/param change:
+#   1) 捉冷馬邊個勁 — winner-capture rate split by the WINNER's SP-odds bucket.
+#   2) 全熱馬嗎     — how 熱門-leaning each source's picks are.
+# Leak-safe: model rankings are walk-forward (train past → score current); SP
+# win_odds only CLASSIFIES horses into 大熱/中/冷/大冷 buckets (known at race-off,
+# used as a post-hoc label, never fed to the no-odds model).
+_BUCKETS = ("fav", "mid", "long", "bomb")
+
+
+def odds_bucket(o):
+    """SP win-odds → 大熱(<4)/中(4-8)/冷(8-20)/大冷(>=20). None/invalid → 'unknown'."""
+    if o is None:
+        return "unknown"
+    try:
+        o = float(o)
+    except (TypeError, ValueError):
+        return "unknown"
+    if not (o > 0):
+        return "unknown"
+    if o < 4:
+        return "fav"
+    if o < 8:
+        return "mid"
+    if o < 20:
+        return "long"
+    return "bomb"
+
+
+def capture_by_odds_bucket(records) -> dict:
+    """Per source, winner-capture (top1/top3/top4) stratified by the WINNER's SP
+    bucket. A race counts iff every source has a top6 AND the winner's odds are
+    known → denominators identical across lgb/elo/market. '捉冷馬勁唔勁' = compare
+    the 'long'/'bomb' rows across sources (higher top1/top3/top4 = better at 冷)."""
+    srcs = ("lgb", "elo", "market")
+    acc = {s: {b: dict(n=0, t1=0, t3=0, t4=0) for b in _BUCKETS} for s in srcs}
+    for r in records:
+        ao = r.get("actual_order6") or []
+        if not ao:
+            continue
+        winner = ao[0]
+        b = odds_bucket((r.get("wodds_by_horse") or {}).get(winner))
+        if b == "unknown":
+            continue
+        tops = {s: r.get(s + "_top6") for s in srcs}
+        if any(not tops[s] for s in srcs):
+            continue
+        for s in srcs:
+            top = tops[s]
+            a = acc[s][b]
+            a["n"] += 1
+            if top[0] == winner:
+                a["t1"] += 1
+            if winner in set(top[:3]):
+                a["t3"] += 1
+            if winner in set(top[:4]):
+                a["t4"] += 1
+    out: dict = {}
+    for s in srcs:
+        out[s] = {}
+        for b in _BUCKETS:
+            a = acc[s][b]
+            n = a["n"]
+            out[s][b] = dict(
+                n=n,
+                top1=(round(a["t1"] / n, 4) if n else None),
+                top3=(round(a["t3"] / n, 4) if n else None),
+                top4=(round(a["t4"] / n, 4) if n else None))
+    out["_winner_bucket_n"] = {b: acc["lgb"][b]["n"] for b in _BUCKETS}
+    return out
+
+
+def pick_odds_profile(records) -> dict:
+    """Per source, how 熱門-leaning its picks are (the '全熱馬' gauge). Per race:
+    the top1-pick's SP bucket, whether the top1-pick IS the market favourite
+    (market_rank==1), and the mean market_rank of the 4 boxed picks (1=大熱,
+    higher=博冷). 'market' is the 全熱馬 reference (fav_rate≈1.0); if odds-LGB's
+    profile ≈ market it has collapsed to 全熱馬, if it resembles elo it keeps its
+    搏冷 character. Denominators identical (all-source races only)."""
+    srcs = ("lgb", "elo", "market")
+    acc = {s: dict(n=0, buckets={b: 0 for b in _BUCKETS + ("unknown",)},
+                   fav=0, odds_sum=0.0, odds_n=0, boxmrank_sum=0.0, boxmrank_n=0)
+           for s in srcs}
+    for r in records:
+        wob = r.get("wodds_by_horse") or {}
+        mrb = r.get("mrank_by_horse") or {}
+        tops = {s: r.get(s + "_top6") for s in srcs}
+        if any(not tops[s] for s in srcs):
+            continue
+        for s in srcs:
+            top = tops[s]
+            a = acc[s]
+            a["n"] += 1
+            p1 = top[0]
+            o1 = wob.get(p1)
+            a["buckets"][odds_bucket(o1)] += 1
+            if o1 is not None and float(o1) > 0:
+                a["odds_sum"] += float(o1)
+                a["odds_n"] += 1
+            if mrb.get(p1) == 1:
+                a["fav"] += 1
+            mrks = [mrb.get(h) for h in top[:4] if mrb.get(h) is not None]
+            if mrks:
+                a["boxmrank_sum"] += sum(mrks) / len(mrks)
+                a["boxmrank_n"] += 1
+    out: dict = {}
+    for s in srcs:
+        a = acc[s]
+        n = a["n"]
+        out[s] = dict(
+            n=n,
+            top1_bucket_frac={b: (round(a["buckets"][b] / n, 4) if n else None)
+                              for b in _BUCKETS + ("unknown",)},
+            fav_rate=(round(a["fav"] / n, 4) if n else None),
+            mean_top1_odds=(round(a["odds_sum"] / a["odds_n"], 2)
+                            if a["odds_n"] else None),
+            mean_box_market_rank=(round(a["boxmrank_sum"] / a["boxmrank_n"], 3)
+                                  if a["boxmrank_n"] else None))
+    return out
+
+
 def main() -> int:
     args = parse_args()
     df = load(args.features)
@@ -534,6 +655,16 @@ def main() -> int:
         else:
             market_ranked = None
 
+        # ----- per-horse SP odds + market rank (odds-bucket stratification) -----
+        # Stored raw so capture_by_odds_bucket / pick_odds_profile recompute OFFLINE.
+        _ohid = [str(h) for h in ta["horse_id"].tolist()]
+        _oval = odds.tolist()
+        wodds_by_horse = {h: (float(v) if pd.notna(v) else None)
+                          for h, v in zip(_ohid, _oval)}
+        _mr = odds.rank(method="min", ascending=True).tolist()
+        mrank_by_horse = {h: (int(v) if pd.notna(v) else None)
+                          for h, v in zip(_ohid, _mr)}
+
         rec = {
             "race_id": str(rid),
             "date": str(ta["race_date"].iloc[0]),
@@ -551,6 +682,9 @@ def main() -> int:
                          for c in _DIV_CODES
                          if str(rid) in box_divs_by_race
                          and c in box_divs_by_race[str(rid)]},
+            # per-horse SP odds + market rank -> odds-bucket stratification OFFLINE
+            "wodds_by_horse": wodds_by_horse,
+            "mrank_by_horse": mrank_by_horse,
         }
         for name, ranked in (("lgb", lgb_ranked),
                              ("elo", elo_ranked),
@@ -606,6 +740,13 @@ def main() -> int:
                                    "leg3": qin_parlay_roi(per_race, 3, 8)}
                                   if box_divs_by_race
                                   else {"_disabled": "no dividends loaded from --db"}),
+        # ── odds-bucket stratification (答: 捉冷馬勁唔勁 + 全熱馬嗎) ──
+        "capture_by_odds_bucket": capture_by_odds_bucket(per_race),
+        "capture_by_odds_bucket_field8": capture_by_odds_bucket(
+            [r for r in per_race if r["field_size"] >= 8]),
+        "pick_odds_profile": pick_odds_profile(per_race),
+        "pick_odds_profile_field8": pick_odds_profile(
+            [r for r in per_race if r["field_size"] >= 8]),
         "feature_importance_gain": (
             dict(zip(feat_cols,
                      booster.feature_importance(importance_type="gain").tolist()))
