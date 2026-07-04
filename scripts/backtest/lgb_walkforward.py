@@ -718,6 +718,11 @@ def main() -> int:
         mrank_by_horse = {h: (int(v) if pd.notna(v) else None)
                           for h, v in zip(_ohid, _mr)}
 
+        # per-horse engine scores (higher = stronger) -> blend-weight sweep OFFLINE.
+        # lgb = raw lambdarank score; regneg = -predicted margin (so higher=better).
+        lgb_by_horse = {h: float(v) for h, v in zip(_ohid, scores)}
+        regneg_by_horse = {h: float(-v) for h, v in zip(_ohid, reg_scores)}
+
         rec = {
             "race_id": str(rid),
             "date": str(ta["race_date"].iloc[0]),
@@ -739,6 +744,9 @@ def main() -> int:
             # per-horse SP odds + market rank -> odds-bucket stratification OFFLINE
             "wodds_by_horse": wodds_by_horse,
             "mrank_by_horse": mrank_by_horse,
+            # per-horse engine scores -> lgb×reg blend-weight sweep OFFLINE
+            "lgb_by_horse": lgb_by_horse,
+            "regneg_by_horse": regneg_by_horse,
         }
         for name, ranked in (("lgb", lgb_ranked),
                              ("elo", elo_ranked),
