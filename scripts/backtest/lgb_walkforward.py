@@ -92,10 +92,12 @@ FEATURE_COLS = [
       # dump-features.ts (leak-safe, free) — re-add the names here to re-test a
       # future interaction, but do NOT promote to predict_upcoming.py without a
       # walk-forward lift. (Same verdict as ①試閘 / ③場內相對.)
-      # ⑴ MARKET ODDS ("有賠率" parallel model ONLY — the no-odds model excludes
-      # these 4 via --exclude to stay byte-identical). Derived in load() from
-      # win_odds (SP, known at race-off → leak-safe pre-race feature).
-      "implied_prob", "implied_prob_norm", "log_win_odds", "market_rank",
+      # ⑴ MARKET ODDS features are DELETED here (NOT --exclude'd): this branch is a
+      # PURE-ENGINE experiment (④ margin-regression head) that must ignore odds so it
+      # stays non-favourite-leaning (搏冷). Deleting > --exclude because a forgotten
+      # flag would silently train an odds model. win_odds is still READ downstream for
+      # the market baseline + odds-bucket stratification (eval-only, leak-safe), never
+      # as a model feature.
       # going_code is appended below as a categorical feature.
   ]
 
@@ -150,6 +152,12 @@ def load(path: str) -> pd.DataFrame:
         if c not in df.columns:
             raise SystemExit(f"missing column in features CSV: {c}")
         df[c] = pd.to_numeric(df[c], errors="coerce")
+    # ④ margin-regression LABEL (leak-safe race outcome; used ONLY as the reg head's
+    # walk-forward training target, NEVER a feature). Missing/DNF -> NaN -> dropped
+    # from the reg training set only (lambdarank training stays byte-identical).
+    if "beaten_lengths" not in df.columns:
+        raise SystemExit("missing column in features CSV: beaten_lengths (④ reg label)")
+    df["beaten_lengths"] = pd.to_numeric(df["beaten_lengths"], errors="coerce")
     return df
 
 
@@ -196,6 +204,44 @@ def train_booster(train_df: pd.DataFrame, args: argparse.Namespace, feat_cols: l
             "is_unbalance": True,
             "verbose": -1,
         }
+    return lgb.train(params, ds, num_boost_round=args.n_estimators)
+
+
+# ④ margin-regression head (EVAL-ONLY, dormant). A SECOND booster regresses the
+# race-relative finishing margin (beaten_lengths, winner=0) on the SAME pure-engine
+# features as the lambdarank ranker. Predicted margin ASC = predicted finishing
+# order (smaller margin = stronger) -> a DIFFERENT ranking than pairwise lambdarank,
+# so its realized box coverage / ROI can differ (that divergence is the whole A/B).
+# Harville/τ NOT needed: box selection depends only on the ranking, and any monotone
+# score->worth map leaves the top-N SET unchanged (see pl_calibration.py). τ only
+# matters for a later probability-level BLEND stage. No prod mirror — this head lives
+# only in the backtest until double-confirmed at two cadences.
+REG_OBJECTIVE = "huber"   # margins are right-skewed + censored; huber is robust to
+REG_ALPHA = 2.0           # the noisy long-margin tail (delta on the log1p scale).
+REG_CLIP_LENGTHS = 25.0   # cap absurd margins before log1p (deep tail = pure noise).
+
+
+def train_reg_booster(train_df: pd.DataFrame, args: argparse.Namespace,
+                      feat_cols: list[str]) -> lgb.Booster:
+    """Regress log1p(clip(beaten_lengths, 0, CLIP)) with a robust (huber) loss.
+    Rows with a missing label (unparseable lbw / DNF) are dropped from THIS booster
+    only; the lambdarank booster's training data stays byte-identical for a fair
+    same-run A/B. Identical feat_cols / cadence / window as the ranker."""
+    tr = train_df[train_df["beaten_lengths"].notna()]
+    X = tr[feat_cols].astype(float).fillna(-1.0).to_numpy()
+    m = tr["beaten_lengths"].clip(lower=0.0, upper=REG_CLIP_LENGTHS)
+    y = np.log1p(m.to_numpy())
+    ds = lgb.Dataset(X, label=y,
+                     categorical_feature=[feat_cols.index("going_code")])
+    params = {
+        "objective": REG_OBJECTIVE,
+        "alpha": REG_ALPHA,
+        "metric": "huber",
+        "learning_rate": args.learning_rate,
+        "num_leaves": args.num_leaves,
+        "min_data_in_leaf": args.min_data_in_leaf,
+        "verbose": -1,
+    }
     return lgb.train(params, ds, num_boost_round=args.n_estimators)
 
 
@@ -294,7 +340,7 @@ def box_roi(records: list[dict]) -> dict:
     a missing dividend is dropped from BOTH stake and return for that pool (kept
     unbiased) and counted in wins_nodiv. '_ALL' = box all four pools every race."""
     res: dict = {}
-    for src in ("lgb", "elo", "market"):
+    for src in ("lgb", "elo", "market", "reg"):
         acc = {c: dict(bets=0, wins=0, wins_nodiv=0, stake=0.0, ret=0.0) for c in _BOX_CODES}
         for r in records:
             top6 = r.get("%s_top6" % src)
@@ -357,7 +403,7 @@ def box_roi(records: list[dict]) -> dict:
 # only quinella/place-family pool we can score honestly. Win-determination needs
 # NO 馬號 mapping: records carry actual_order6 and {src}_top6 as horse_ids, and a
 # held pair wins iff it equals the actual top-2 set.
-_QIN_SRCS = ("lgb", "elo", "market")
+_QIN_SRCS = ("lgb", "elo", "market", "reg")
 
 
 def _qin_eligible(rec: dict) -> bool:
@@ -493,7 +539,7 @@ def capture_by_odds_bucket(records) -> dict:
     bucket. A race counts iff every source has a top6 AND the winner's odds are
     known → denominators identical across lgb/elo/market. '捉冷馬勁唔勁' = compare
     the 'long'/'bomb' rows across sources (higher top1/top3/top4 = better at 冷)."""
-    srcs = ("lgb", "elo", "market")
+    srcs = ("lgb", "elo", "market", "reg")
     acc = {s: {b: dict(n=0, t1=0, t3=0, t4=0) for b in _BUCKETS} for s in srcs}
     for r in records:
         ao = r.get("actual_order6") or []
@@ -538,7 +584,7 @@ def pick_odds_profile(records) -> dict:
     higher=博冷). 'market' is the 全熱馬 reference (fav_rate≈1.0); if odds-LGB's
     profile ≈ market it has collapsed to 全熱馬, if it resembles elo it keeps its
     搏冷 character. Denominators identical (all-source races only)."""
-    srcs = ("lgb", "elo", "market")
+    srcs = ("lgb", "elo", "market", "reg")
     acc = {s: dict(n=0, buckets={b: 0 for b in _BUCKETS + ("unknown",)},
                    fav=0, odds_sum=0.0, odds_n=0, boxmrank_sum=0.0, boxmrank_n=0)
            for s in srcs}
@@ -599,6 +645,7 @@ def main() -> int:
     race_to_rows = {rid: g for rid, g in df.groupby("race_id", sort=False)}
 
     booster: lgb.Booster | None = None
+    reg_booster: lgb.Booster | None = None
     last_trained_at = -10**9
     per_race: list[dict] = []
 
@@ -615,6 +662,7 @@ def main() -> int:
             if len(train_df) < 200:
                 continue
             booster = train_booster(train_df, args, feat_cols)
+            reg_booster = train_reg_booster(train_df, args, feat_cols)
             last_trained_at = i
             if args.verbose:
                 print(f"  [retrain @ race {i}] {len(train_df):,} rows", file=sys.stderr)
@@ -655,6 +703,11 @@ def main() -> int:
         else:
             market_ranked = None
 
+        # ----- ④ margin-regression ranking (predicted margin ASC = best first) -----
+        reg_scores = reg_booster.predict(Xt)
+        reg_order = np.argsort(reg_scores)   # ASC: smaller predicted margin = stronger
+        reg_ranked = ta.iloc[reg_order]["horse_id"].tolist()
+
         # ----- per-horse SP odds + market rank (odds-bucket stratification) -----
         # Stored raw so capture_by_odds_bucket / pick_odds_profile recompute OFFLINE.
         _ohid = [str(h) for h in ta["horse_id"].tolist()]
@@ -674,6 +727,7 @@ def main() -> int:
             "lgb_top6": lgb_ranked[:6],
             "elo_top6": (elo_ranked[:6] if elo_ranked else None),
             "market_top6": (market_ranked[:6] if market_ranked else None),
+            "reg_top6": reg_ranked[:6],
             # per-race box dividends (table convention; see BOX_POOLS) -> ROI
             # fully recomputable OFFLINE alongside coverage.
             "race_no": (int(ta["race_no"].iloc[0])
@@ -688,7 +742,8 @@ def main() -> int:
         }
         for name, ranked in (("lgb", lgb_ranked),
                              ("elo", elo_ranked),
-                             ("market", market_ranked)):
+                             ("market", market_ranked),
+                             ("reg", reg_ranked)):
             for k, v in rank_metrics(ranked, actual_top1,
                                      actual_top3, actual_top4).items():
                 rec["%s_%s" % (name, k)] = v
@@ -711,7 +766,7 @@ def main() -> int:
 
     def metric_block(sub):
         return {"%s_%s" % (name, k): rate_on(sub, "%s_%s" % (name, k))
-                for name in ("lgb", "elo", "market") for k in _metric_keys}
+                for name in ("lgb", "elo", "market", "reg") for k in _metric_keys}
 
     rdf8 = rdf[rdf["field_size"] >= 8] if len(rdf) else rdf
 
