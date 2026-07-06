@@ -2966,7 +2966,11 @@ analyzeRoutes.get('/factors', (c) => {
                 // → Harville place probs stay exactly consistent with pWin.
                 const scores = newPicks.map((p: any) => Math.log(Math.max(Number(p.pWin) || 0, 1e-9)));
                 const prob = computeRaceProbabilities(scores);
-                newPicks.forEach((p: any, i: number) => { p.pTop4 = Math.round((prob.pTop4[i] ?? 0) * 1000) / 1000; });
+                // Rebuild pTop3 too (not just pTop4): legacy prediction_log rows
+                // predating pl-prob stored a CRUDE pTop3 = min(pWin*3,0.99) that
+                // can exceed the Harville pTop4 → rebuilding both from the frozen
+                // pWin keeps pWin ≤ pTop3 ≤ pTop4 internally consistent.
+                newPicks.forEach((p: any, i: number) => { p.pTop3 = Math.round((prob.pTop3[i] ?? 0) * 1000) / 1000; p.pTop4 = Math.round((prob.pTop4[i] ?? 0) * 1000) / 1000; });
                 r.picks = newPicks;
                 r.expectedBoxCoverage = roundCoverage(prob.coverage);
                 r.probabilityModel = prob.model;
