@@ -2882,24 +2882,6 @@ analyzeRoutes.get('/factors', (c) => {
           const engine: EloEngine = c.req.query('engine') === 'v11' ? 'v11' : 'v12';
           const meeting = await db.prepare(`SELECT m.* FROM race_meetings m WHERE m.date = ? AND m.venue IN ('ST','HV') ORDER BY (SELECT COUNT(*) FROM races r WHERE r.meeting_id = m.id) DESC, m.id LIMIT 1`).bind(date).first<any>().catch(() => null);
           if (!meeting) return c.json({ error: `${date} 賽馬日記錄不存在` }, 404);
-          // ── PREDICTION VS RESULT accountability (freeze) ──────────────────
-          // For a SETTLED HK date, serve the FROZEN pre-race report (what was
-          // actually bettable) instead of a live recompute. A recompute drifts:
-          // post-race ELO backfill inflates the horses that ran well, silently
-          // promoting the actual placegetters into the "prediction" (e.g.
-          // 2026-07-04 R1 recompute floated the 1.1 favourite #1 to rank 1,
-          // turning the frozen 2-3-9-8 into a result-peeking 1-2-9-3). The
-          // frozen race_day_report_cache is written from the SAME payload as the
-          // prediction_log that /hit-rate reads, so the two accountability
-          // surfaces stay identical. Missing cache (dates predating it) → fall
-          // through to recompute, matching /hit-rate's own fallback.
-          const cacheKey = `${engine}::${meeting.venue}`;
-          if (await dateHasSettledResults(db, date, meeting.venue)) {
-            const frozen = await readRaceDayReportCache(db, date, cacheKey).catch(() => null);
-            if (frozen && Array.isArray(frozen.races) && frozen.races.length) {
-              return c.json({ ...frozen, source: 'historical', frozen: true });
-            }
-          }
           // Try entries_upcoming first (works for upcoming dates)
           const { results: euRows } = await db.prepare(
             `SELECT e.race_number, e.horse_number, e.horse_id, e.horse_code,
@@ -2936,6 +2918,66 @@ analyzeRoutes.get('/factors', (c) => {
           }
           if (!entries.length) return c.json({ error: `${date} 排位/賽果無資料` }, 404);
           const result = await computePicksFromEntries(db, date, meeting, entries, engine);
+          // ── PREDICTION VS RESULT accountability (freeze) ──────────────────
+          // A live recompute of a SETTLED HK date DRIFTS: post-race ELO backfill
+          // inflates the horses that ran well, silently promoting the actual
+          // placegetters into the "prediction" (2026-07-04 R1: the frozen
+          // 2-3-9-8 became a result-peeking 1-2-9-3). So for a settled date we
+          // OVERLAY the frozen pre-race prediction_log (the exact bettable
+          // snapshot /hit-rate reads) onto the freshly-recomputed rich shape:
+          // scores/order/scoreSource come from the frozen log, while
+          // names/jockey/trainer/factorBreakdown come from the recompute. pTop4 +
+          // box coverage are rebuilt from the frozen pWin (log→softmax is the
+          // identity, so Harville place probs stay exactly consistent). We do NOT
+          // use race_day_report_cache — it is DELETEd per-date on refresh,
+          // whereas prediction_log is durable. Incomplete/missing frozen log →
+          // keep the recompute (honest fallback, matching /hit-rate).
+          if (await dateHasSettledResults(db, date, meeting.venue)) {
+            const synthEntries = (result.races ?? []).map((r: any) => ({ race_number: r.raceNumber, distance: r.distance, going: r.going }));
+            const frozen = await loadFrozenPicksForHitRate(db, date, engine, synthEntries).catch(() => null);
+            if (frozen && Array.isArray(frozen.races) && frozen.races.length) {
+              const frozenByNum = new Map<number, any>(frozen.races.map((fr: any) => [fr.raceNumber, fr]));
+              for (const r of (result.races ?? [])) {
+                const fr = frozenByNum.get(r.raceNumber);
+                if (!fr || !Array.isArray(fr.picks) || !fr.picks.length) continue;
+                const rcByNum = new Map<any, any>((r.picks ?? []).map((p: any) => [p.horseNumber, p]));
+                const newPicks = fr.picks.map((fp: any) => {
+                  const rc = rcByNum.get(fp.horseNumber) ?? {};
+                  return {
+                    ...rc,
+                    horseId: fp.horseId ?? rc.horseId ?? null,
+                    horseNumber: fp.horseNumber,
+                    draw: fp.draw ?? rc.draw ?? null,
+                    nameCh: rc.nameCh ?? fp.nameCh,
+                    horseElo: fp.horseElo,
+                    eloComposite: fp.eloComposite,
+                    factorBonus: fp.factorBonus,
+                    finalScore: fp.finalScore,
+                    pWin: fp.pWin,
+                    pTop3: fp.pTop3,
+                    rank: fp.rank,
+                    lgbScore: fp.lgbScore,
+                    lgbModelVersion: fp.lgbModelVersion,
+                    scoreSource: fp.scoreSource,
+                  };
+                });
+                // Rebuild pTop4 + box coverage from the FROZEN pWin so the box
+                // panel matches the frozen ranking. log(pWin) → softmax identity
+                // → Harville place probs stay exactly consistent with pWin.
+                const scores = newPicks.map((p: any) => Math.log(Math.max(Number(p.pWin) || 0, 1e-9)));
+                const prob = computeRaceProbabilities(scores);
+                newPicks.forEach((p: any, i: number) => { p.pTop4 = Math.round((prob.pTop4[i] ?? 0) * 1000) / 1000; });
+                r.picks = newPicks;
+                r.expectedBoxCoverage = roundCoverage(prob.coverage);
+                r.probabilityModel = prob.model;
+                r.scoreSource = fr.scoreSource ?? r.scoreSource;
+                r.lgbCoverage = fr.lgbCoverage ?? r.lgbCoverage;
+                r.lgbModelVersion = fr.lgbModelVersion ?? r.lgbModelVersion;
+              }
+              attachRaceQuality(result.races);
+              return c.json({ ...result, source: 'historical', frozen: true });
+            }
+          }
           return c.json({ ...result, source });
         } catch (err: any) {
           return c.json({ error: 'picks-by-date failed', detail: err?.message ?? String(err) }, 500);
