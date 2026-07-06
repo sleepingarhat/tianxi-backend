@@ -2882,6 +2882,24 @@ analyzeRoutes.get('/factors', (c) => {
           const engine: EloEngine = c.req.query('engine') === 'v11' ? 'v11' : 'v12';
           const meeting = await db.prepare(`SELECT m.* FROM race_meetings m WHERE m.date = ? AND m.venue IN ('ST','HV') ORDER BY (SELECT COUNT(*) FROM races r WHERE r.meeting_id = m.id) DESC, m.id LIMIT 1`).bind(date).first<any>().catch(() => null);
           if (!meeting) return c.json({ error: `${date} 賽馬日記錄不存在` }, 404);
+          // ── PREDICTION VS RESULT accountability (freeze) ──────────────────
+          // For a SETTLED HK date, serve the FROZEN pre-race report (what was
+          // actually bettable) instead of a live recompute. A recompute drifts:
+          // post-race ELO backfill inflates the horses that ran well, silently
+          // promoting the actual placegetters into the "prediction" (e.g.
+          // 2026-07-04 R1 recompute floated the 1.1 favourite #1 to rank 1,
+          // turning the frozen 2-3-9-8 into a result-peeking 1-2-9-3). The
+          // frozen race_day_report_cache is written from the SAME payload as the
+          // prediction_log that /hit-rate reads, so the two accountability
+          // surfaces stay identical. Missing cache (dates predating it) → fall
+          // through to recompute, matching /hit-rate's own fallback.
+          const cacheKey = `${engine}::${meeting.venue}`;
+          if (await dateHasSettledResults(db, date, meeting.venue)) {
+            const frozen = await readRaceDayReportCache(db, date, cacheKey).catch(() => null);
+            if (frozen && Array.isArray(frozen.races) && frozen.races.length) {
+              return c.json({ ...frozen, source: 'historical', frozen: true });
+            }
+          }
           // Try entries_upcoming first (works for upcoming dates)
           const { results: euRows } = await db.prepare(
             `SELECT e.race_number, e.horse_number, e.horse_id, e.horse_code,
