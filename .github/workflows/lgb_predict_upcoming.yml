@@ -25,7 +25,35 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  season_gate:
+    # 休季自動化 (2026-08-18): scheduled runs short-circuit during the HK
+    # off-season. Status comes from the backend /api/season (D1-derived:
+    # no future ST/HV meeting + >12-day gap = off_season; admin override
+    # via app_settings season_mode). Fail-open: any curl/parse failure is
+    # treated as in_season so we never skip a real race day. Manual
+    # dispatch / workflow_run triggers are NEVER gated.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      skip: ${{ steps.chk.outputs.skip }}
+    steps:
+      - id: chk
+        name: Season gate (off-season auto-pause)
+        run: |
+          SKIP=false
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            STATUS=$(curl -sf --max-time 20 "https://tianxi-backend.tianxi-entertainment.workers.dev/api/season" | grep -o '"status":"[a-z_]*"' | head -1 | cut -d'"' -f4 || true)
+            echo "season status: ${STATUS:-unknown (fail-open)}"
+            if [ "$STATUS" = "off_season" ]; then
+              SKIP=true
+              echo "::notice::休季中 off-season — skipping scheduled run (auto-resumes when the new season racecard appears)"
+            fi
+          fi
+          echo "skip=$SKIP" >> "$GITHUB_OUTPUT"
+
   predict:
+    needs: season_gate
+    if: needs.season_gate.outputs.skip != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 240
 
