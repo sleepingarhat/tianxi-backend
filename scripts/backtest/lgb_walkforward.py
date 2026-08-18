@@ -116,6 +116,10 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--verbose", action="store_true")
     ap.add_argument("--exclude", default="",
                     help="comma-separated FEATURE_COLS to drop (A/B ablation control)")
+    ap.add_argument("--time-decay-halflife", type=float, default=0.0,
+                    help="Half-life in DAYS for recency-weighted training rows "
+                         "(w = 0.5^(age/H), age relative to newest train race). "
+                         "0 = off (uniform weights). A/B: recency>history hypothesis.")
     return ap.parse_args()
 
 
@@ -138,6 +142,12 @@ def load(path: str) -> pd.DataFrame:
 
 def train_booster(train_df: pd.DataFrame, args: argparse.Namespace, feat_cols: list[str]) -> lgb.Booster:
     X = train_df[feat_cols].astype(float).fillna(-1.0).to_numpy()
+    # Time-decay recency weights (A/B 2026-08): recent races count more.
+    weight = None
+    if getattr(args, "time_decay_halflife", 0) and args.time_decay_halflife > 0:
+        dts = pd.to_datetime(train_df["race_date"], errors="coerce")
+        age_days = (dts.max() - dts).dt.days.fillna(0).clip(lower=0)
+        weight = np.power(0.5, age_days / args.time_decay_halflife).to_numpy()
     if args.objective == "lambdarank":
         # higher label = better. Clipped to top-5 grades (0..4) to align with
         # label_gain=[0,1,7,31,127] and lambdarank_truncation_level=4.
@@ -149,7 +159,7 @@ def train_booster(train_df: pd.DataFrame, args: argparse.Namespace, feat_cols: l
         pos = train_df["finishing_position"].astype(int).clip(lower=1, upper=5)
         label = (5 - pos).clip(lower=0).astype(int).to_numpy()
         groups = train_df.groupby("race_id", sort=False).size().to_numpy()
-        ds = lgb.Dataset(X, label=label, group=groups,
+        ds = lgb.Dataset(X, label=label, group=groups, weight=weight,
                          categorical_feature=[feat_cols.index("going_code")])
         params = {
             "objective": "lambdarank",
@@ -168,7 +178,7 @@ def train_booster(train_df: pd.DataFrame, args: argparse.Namespace, feat_cols: l
         }
     else:
         label = train_df["is_top1"].astype(int).to_numpy()
-        ds = lgb.Dataset(X, label=label,
+        ds = lgb.Dataset(X, label=label, weight=weight,
                          categorical_feature=[feat_cols.index("going_code")])
         params = {
             "objective": "binary",
@@ -192,6 +202,9 @@ def main() -> int:
             print(f"[lgb-wf] WARN: --exclude names not in FEATURE_COLS: {sorted(miss)}", file=sys.stderr)
         print(f"[lgb-wf] A/B ablation: excluding {sorted(exclude & set(FEATURE_COLS))}", file=sys.stderr)
     feat_cols = [c for c in FEATURE_COLS if c not in exclude] + ["going_code"]
+    if args.time_decay_halflife > 0:
+        print(f"[lgb-wf] A/B time-decay: halflife={args.time_decay_halflife}d "
+              f"(w = 0.5^(age/H))", file=sys.stderr)
 
     race_ids = list(dict.fromkeys(df["race_id"].tolist()))
     print(f"[lgb-wf] {len(df):,} runner-rows across {len(race_ids):,} races "
@@ -299,6 +312,7 @@ def main() -> int:
             "n_estimators": args.n_estimators,
             "learning_rate": args.learning_rate,
             "min_data_in_leaf": args.min_data_in_leaf,
+            "time_decay_halflife": args.time_decay_halflife,
         },
     }
 
