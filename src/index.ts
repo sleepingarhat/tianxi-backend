@@ -14,6 +14,7 @@ import { loungeRoutes } from './routes/lounge';
 import { silksRoutes } from './routes/silks';
 import { silksSvgRoutes } from './routes/silks_svg';
 import { adminRoutes } from './routes/admin';
+import { getSeasonStatus } from './lib/season';
   import { computeHitRateStats, ensureHitRateCacheTable, writeHitRateCache, readHitRateCache, ensureRaceDayReportCacheTable, joinPredictionResults, ensurePredictionLogTable } from './routes/analyze';
 
 const app = new Hono<{ Bindings: Env }>();
@@ -29,6 +30,46 @@ app.get('/', (c) => {
     version: '1.0.0',
     status: 'ok',
   });
+});
+
+// ── 休季自動化: GET /api/season ─────────────────────────────────────
+// Public season status — read by the tianxi-site banner and by the GH
+// Actions season_gate pre-flight in both repos. Cheap (3 tiny D1 lookups).
+app.get('/api/season', async (c) => {
+  const s = await getSeasonStatus(c.env.DB);
+  return c.json({
+    ...s,
+    label: s.status === 'off_season' ? '休季中' : '賽季進行中',
+    checkedAt: new Date().toISOString(),
+  });
+});
+
+// Admin override: POST /admin/api/set-season-mode?mode=auto|in|off
+// Bearer-gated (same posture as set-alpha). 'auto' restores detection.
+app.post('/admin/api/set-season-mode', async (c) => {
+  const expected = (c.env as any).ADMIN_TOKEN as string | undefined;
+  const header = c.req.header('authorization') || '';
+  const bearer = header.startsWith('Bearer ') ? header.slice(7) : '';
+  if (!expected || bearer !== expected) {
+    return c.json({ error: 'unauthorized (Bearer required)' }, 401);
+  }
+  const mode = c.req.query('mode');
+  if (mode !== 'auto' && mode !== 'in' && mode !== 'off') {
+    return c.json({ error: "mode must be 'auto' | 'in' | 'off'", got: mode ?? null }, 400);
+  }
+  await c.env.DB.prepare(
+    `CREATE TABLE IF NOT EXISTS app_settings (
+       key TEXT PRIMARY KEY,
+       value TEXT NOT NULL,
+       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+     )`
+  ).run().catch(() => {});
+  await c.env.DB.prepare(
+    `INSERT INTO app_settings (key, value, updated_at) VALUES ('season_mode', ?, datetime('now'))
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
+  ).bind(mode).run();
+  const s = await getSeasonStatus(c.env.DB);
+  return c.json({ ok: true, ...s, setAt: new Date().toISOString() });
 });
 
 // API Routes
