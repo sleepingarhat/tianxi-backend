@@ -45,6 +45,10 @@ on:
         description: 'Comma-sep FEATURE_COLS to drop (A/B ablation control)'
         required: false
         default: ''
+      time_decay_halflife:
+        description: 'Half-life days for recency training weights (0 = off)'
+        required: false
+        default: '0'
 
 jobs:
   walkforward:
@@ -190,6 +194,7 @@ jobs:
             --num-leaves ${{ inputs.num_leaves }} \
             --objective ${{ inputs.objective }} \
             --exclude '${{ inputs.exclude }}' \
+            --time-decay-halflife '${{ inputs.time_decay_halflife || 0 }}' \
             --verbose 2>&1 | tee lgb_stdout.txt
 
       - name: Print summary block
