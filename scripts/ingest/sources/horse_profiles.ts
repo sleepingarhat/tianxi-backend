@@ -1,4 +1,5 @@
 /**
+ * (cache-bust rev2: profiles ingest now wired into lgb_walkforward.yml DB build)
  * Ingest horses/profiles/horse_profiles.csv
  * Updates: horses (UPSERT) + horse_profile_extra (UPSERT)
  */
