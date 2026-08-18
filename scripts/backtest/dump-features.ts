@@ -238,6 +238,45 @@
        AND rm.date < ?
        AND rr.finishing_position > 0 AND rr.finishing_position < 99`);
 
+  // ── Stage 14 (NEW v3.3 ⑪ age/career): leak-safe age + career-stage ─────
+  // HKJC only shows 馬齡 for ACTIVE horses (1016/6063 profiles) → using it
+  // directly would leak survivorship ("age known" ⇔ "still racing today").
+  // Instead we estimate age from facts fixed at import time + the horse's OWN
+  // race history (both fully as-of / leak-free):
+  //   h_career_starts = prior HK starts strictly before race date (exact)
+  //   h_seasons_hk    = race season − HK-debut season (exact; season = Sep-Aug)
+  //   h_age_est       = debut-age base by 進口類別 + h_seasons_hk
+  // Debut-age bases are data-driven medians validated on 109 active horses
+  // with true 馬齡 (97-98% within ±1yr): PPG 自購新馬 4, PP 自購馬 4, ISG
+  // 國際拍賣會新馬 5, 訪港馬匹 5. Literature (Gramm & Marksteiner 2010: peak
+  // 4.45yo quadratic; Takahashi 2015 JRA: plateau from ~4.5) says ±1yr noise
+  // still leaves the coarse peak/decline shape learnable.
+  const qCareerAsOf = db.prepare(`
+    SELECT COUNT(*) AS starts, MIN(rm.date) AS debut
+      FROM race_results rr
+      JOIN races r ON r.id = rr.race_id
+      JOIN race_meetings rm ON rm.id = r.meeting_id
+     WHERE rr.horse_id = ?
+       AND rm.date < ?
+       AND rr.finishing_position > 0 AND rr.finishing_position < 99`);
+  const pedHasImportType = pedExists && !!db.prepare(
+    "SELECT 1 AS ok FROM pragma_table_info('horse_pedigree') WHERE name='import_type'").get();
+  if (pedExists && !pedHasImportType) console.error('[dump-features] WARN: horse_pedigree.import_type absent → h_age_est falls back to base 4 for all horses');
+  const qImportType = pedHasImportType ? db.prepare('SELECT import_type FROM horse_pedigree WHERE horse_id=?') : null;
+  const AGE_BASE: Record<string, number> = {
+    '自購新馬': 4,       // PPG (unraced private purchase)
+    '自購馬': 4,         // PP (previously raced private purchase)
+    '國際拍賣會新馬': 5, // ISG (international sale griffin)
+    '訪港馬匹': 5,       // visiting raiders (typically older G1 horses)
+  };
+  function seasonOf(dateIso: string): number {
+    // HK racing season runs Sep→Aug; Sep-Dec belong to the season starting that year.
+    const y = parseInt(dateIso.slice(0, 4), 10);
+    const m = parseInt(dateIso.slice(5, 7), 10);
+    return m >= 9 ? y : y - 1;
+  }
+  const importTypeMemo = new Map<string, string | null>();
+
     // ── Stage 4c: recency-weighted form + cross-features (no odds) ─────────
     // form_last5: last 5 starts of horse with field size for normalization.
     const qFormLast5 = db.prepare(`
@@ -785,6 +824,9 @@
       // last 8 starts; cmt_n = history depth (0 = no history); the three fraction
       // cols use the -1 sentinel for no history). A受阻 + B走大疊 + C出閘失準.
       'cmt_n','cmt_trouble','cmt_wide','cmt_badstart',
+      // Stage 14 (NEW v3.3 ⑪ age/career): leak-safe (no survivorship — built
+      // from import-time facts + own prior races only, never current 馬齡)
+      'h_career_starts','h_seasons_hk','h_age_est',
       'finishing_position','is_top1','is_top3',
     ];
   writeFileSync(OUT, HEADER.join(',') + '\n');
@@ -801,6 +843,7 @@
   let gearChangedN = 0, gearBlinkersN = 0;  // ⑤ coverage guard (silent-regression detector)
   let sectSpdN = 0;  // ⑥ coverage guard: rows with real (non-sentinel) sectional-speed z
   let cmtHistN = 0, cmtTroubleN = 0;  // ⑦ coverage guard: rows with comment history / trouble flag
+  let ageItN = 0;  // ⑪ coverage guard: rows whose horse has a known 進口類別 (import_type)
   function flush() { if (buf.length) { appendFileSync(OUT, buf.join('')); buf = []; } }
 
   for (let i = 0; i < races.length; i++) {
@@ -989,6 +1032,25 @@
       if (gearF.changed) gearChangedN++;
       if (gearF.blinkers) gearBlinkersN++;
 
+      // Stage 14 (NEW v3.3 ⑪ age/career): leak-safe age estimate + career stage
+      const car = qCareerAsOf.get(r.horse_id, meta.date) as { starts: number; debut: string | null } | undefined;
+      const careerStarts = car?.starts ?? 0;
+      const seasonsHk = (car?.debut && careerStarts > 0)
+        ? Math.max(0, seasonOf(meta.date) - seasonOf(car.debut))
+        : 0;
+      let importType: string | null = null;
+      if (qImportType) {
+        if (importTypeMemo.has(r.horse_id)) {
+          importType = importTypeMemo.get(r.horse_id)!;
+        } else {
+          const it = qImportType.get(r.horse_id) as { import_type: string | null } | undefined;
+          importType = it?.import_type ?? null;
+          importTypeMemo.set(r.horse_id, importType);
+        }
+      }
+      if (importType) ageItN++;
+      const ageEst = (importType != null && AGE_BASE[importType] !== undefined ? AGE_BASE[importType] : 4) + seasonsHk;
+
       const row = [
           meta.id, meta.date, meta.venue, meta.race_number, meta.distance, meta.going, fieldSize,
           r.horse_id, r.jockey_id, r.trainer_id, r.draw, r.actual_weight, r.win_odds,
@@ -1010,6 +1072,7 @@
           sireTop3, sireDistTop3, damsireTop3,
           gearF.firstN, gearF.offN, gearF.changed, gearF.blinkers,
           cmt.n, cmt.trouble, cmt.wide, cmt.badstart,
+          careerStarts, seasonsHk, ageEst,
           r.finishing_position,
           r.horse_id === top1Id ? 1 : 0,
           top3Set.has(r.horse_id) ? 1 : 0,
@@ -1037,6 +1100,8 @@
     const cmtHistPct = (100 * cmtHistN / written).toFixed(1);
     const cmtTrbPct = (100 * cmtTroubleN / written).toFixed(1);
     console.error(`[dump-features] ⑦ hard-luck coverage: comment history present=${cmtHistN} (${cmtHistPct}%) · trouble-flagged=${cmtTroubleN} (${cmtTrbPct}%)`);
+    const ageItPct = (100 * ageItN / written).toFixed(1);
+    console.error(`[dump-features] ⑪ age/career coverage: import_type known=${ageItN} (${ageItPct}%)`);
     if (!UPCOMING_MODE && cmtHistN === 0) {
       console.error('[dump-features] WARN: comment history ALL empty on historical dump → running_comments missing (sparse-checkout/import regression?)');
     }
