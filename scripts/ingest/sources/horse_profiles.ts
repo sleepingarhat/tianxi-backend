@@ -29,6 +29,32 @@ export function ingestHorseProfiles(
   const rows = parseCsv(csvPath);
   const stats: IngestStats = { inserted: 0, updated: 0, skipped: 0, failed: 0 };
 
+  // ⑨ age/career-stage: the horses UPSERT below has ALWAYS failed in the bulk
+  // CI build (import-csv pre-creates prefixed 'horse_<code>' rows holding the
+  // same code → UNIQUE(code) collision; ins≈2 fail≈6000). Same trap that made
+  // pedigree use its own table — so age gets its own collision-free table too.
+  // birth_season = seasonYear(profile_last_scraped) − current_age, where
+  // seasonYear uses a JULY-1 boundary (HK season-age convention approximation).
+  db.exec(`CREATE TABLE IF NOT EXISTS horse_birth_season (
+    code TEXT PRIMARY KEY,
+    birth_season INTEGER NOT NULL,
+    current_age INTEGER NOT NULL,
+    scraped TEXT
+  )`);
+  const upsertBirthSeason = db.prepare(
+    `INSERT INTO horse_birth_season (code, birth_season, current_age, scraped)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT(code) DO UPDATE SET
+       birth_season = excluded.birth_season,
+       current_age = excluded.current_age,
+       scraped = excluded.scraped`,
+  );
+  const seasonYearOf = (iso: string): number => {
+    const y = parseInt(iso.slice(0, 4), 10);
+    const m = parseInt(iso.slice(5, 7), 10);
+    return m >= 7 ? y : y - 1;
+  };
+
   const upsertHorse = db.prepare(
     `INSERT INTO horses (id, name_en, name_ch, code, country_of_origin, colour, sex, import_type, sire, dam, dam_sire, current_rating, status, age, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
@@ -101,6 +127,14 @@ export function ingestHorseProfiles(
         // the HKJC page). Stored raw; as-of conversion happens in dump-features.
         const ageMatch = (row['出生地___馬齡'] || '').match(/\/\s*(\d+)\s*$/);
         const currentAge = ageMatch ? parseInt(ageMatch[1], 10) : null;
+        // ⑨ collision-free age store (works even when the horses UPSERT below
+        // fails on the prefixed-row UNIQUE(code) collision in the bulk build).
+        if (currentAge != null) {
+          const scrapedIso = parseHKDate(row['profile_last_scraped']);
+          if (scrapedIso && /^\d{4}-\d{2}-\d{2}/.test(scrapedIso)) {
+            upsertBirthSeason.run(code, seasonYearOf(scrapedIso) - currentAge, currentAge, scrapedIso);
+          }
+        }
 
         const wasExisting = existingIds.has(id);
 
