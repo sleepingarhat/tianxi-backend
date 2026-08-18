@@ -36,6 +36,11 @@ FEATURE_COLS = [
       # Glicko-2 A/B (2026-08): rating + as-of RD (uncertainty = layoff/debut
       # signal; ties to "recency > history"). Baseline run = --exclude h_g2,h_g2_rd
       "h_g2", "h_g2_rd",
+      # ⑧ 對賽關係圖 who-beat-whom graph A/B (2026-08): HITS authority/hub +
+      # PageRank percentiles on the loser→winner beats graph (3y rolling window,
+      # leak-safe as-of, -1 sentinel = no in-window history) + backing-start
+      # count. Baseline run = --exclude h_g2,h_g2_rd,h_wb_auth_pct,h_wb_hub_pct,h_wb_pr_pct,h_wb_races
+      "h_wb_auth_pct", "h_wb_hub_pct", "h_wb_pr_pct", "h_wb_races",
       "distance", "draw", "actual_weight", "field_size",
       "dist_starts", "dist_top3", "going_starts", "going_top3",
       "draw_starts", "draw_top3", "combo_starts", "combo_top3",
