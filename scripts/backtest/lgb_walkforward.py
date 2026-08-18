@@ -91,6 +91,11 @@ FEATURE_COLS = [
       # dump-features.ts (leak-safe, free) — re-add the names here to re-test a
       # future interaction, but do NOT promote to predict_upcoming.py without a
       # walk-forward lift. (Same verdict as ①試閘 / ③場內相對.)
+      # Stage 15 (NEW ⑨ age/career-stage): as-of season age (profile current age
+      # → birth-season → race-date age; -1 = unknown, survivorship-biased
+      # missingness since retired horses lose the HKJC profile age field) +
+      # leak-safe career depth (prior starts / days since first recorded start).
+      "h_age", "h_career_starts", "h_days_since_debut",
       # going_code is appended below as a categorical feature.
   ]
 
