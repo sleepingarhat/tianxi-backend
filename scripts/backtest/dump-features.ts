@@ -132,6 +132,40 @@
         }
       }
 
+      // ── Glicko-2 reader (A/B: h_g2 / h_g2_rd) ──────────────────────────
+      // Debut prior IS the informative Glicko answer: 1500 ± 350 (= "unknown").
+      // RD is inflated for idle time since the last snapshot (leak-safe, as-of).
+      let g2StmtCached: Database.Statement | null | undefined;
+      function getG2Stmt(): Database.Statement | null {
+        if (g2StmtCached !== undefined) return g2StmtCached;
+        try {
+          g2StmtCached = db.prepare(
+            `SELECT rating, rd, vol, as_of_date FROM horse_glicko2_snapshots WHERE horse_id=? AND as_of_date<? ORDER BY as_of_date DESC LIMIT 1`,
+          );
+        } catch {
+          g2StmtCached = null; // table absent (stale cached DB) → prior for all
+        }
+        return g2StmtCached;
+      }
+      function readG2(id: string | null, asOf: string): { r: number; rd: number; found: boolean } {
+        const prior = { r: 1500, rd: 350, found: false };
+        if (!id) return prior;
+        const key = bridgeId('horse', id);
+        if (!key) return prior;
+        const stmt = getG2Stmt();
+        if (!stmt) return prior;
+        try {
+          const row = stmt.get(key, asOf) as { rating: number; rd: number; vol: number; as_of_date: string } | undefined;
+          if (!row) return prior;
+          const days = Math.max(0, (Date.parse(asOf) - Date.parse(row.as_of_date)) / 86400000);
+          const sigmaPts = (row.vol || 0.06) * 173.7178;
+          const rdInfl = Math.min(350, Math.sqrt(row.rd * row.rd + sigmaPts * sigmaPts * (days / 30)));
+          return { r: row.rating, rd: rdInfl, found: true };
+        } catch {
+          return prior;
+        }
+      }
+
     // ── Factor queries (verbatim from composite-backtest.ts) ────────────────
   const qDistFit = db.prepare(`
     SELECT COUNT(*) AS starts,
@@ -751,6 +785,8 @@
       'race_id','race_date','venue','race_no','distance','going','field_size',
       'horse_id','jockey_id','trainer_id','draw','actual_weight','win_odds',
       'h_elo','j_elo','t_elo','days_since_last',
+      // Glicko-2 A/B: rating + as-of-inflated RD (uncertainty; layoff/debut signal)
+      'h_g2','h_g2_rd',
       'dist_starts','dist_top3','going_starts','going_top3',
       'draw_starts','draw_top3','combo_starts','combo_top3','weight_avg5',
       'elo_composite','factor_bonus','baseline_score',
@@ -801,6 +837,7 @@
   let gearChangedN = 0, gearBlinkersN = 0;  // ⑤ coverage guard (silent-regression detector)
   let sectSpdN = 0;  // ⑥ coverage guard: rows with real (non-sentinel) sectional-speed z
   let cmtHistN = 0, cmtTroubleN = 0;  // ⑦ coverage guard: rows with comment history / trouble flag
+  let g2HistN = 0;  // Glicko-2 coverage guard: rows with a real (non-prior) snapshot
   function flush() { if (buf.length) { appendFileSync(OUT, buf.join('')); buf = []; } }
 
   for (let i = 0; i < races.length; i++) {
@@ -852,6 +889,8 @@
       const hElo = readElo('horse', r.horse_id, meta.date);
       const jElo = readElo('jockey', r.jockey_id, meta.date);
       const tElo = readElo('trainer', r.trainer_id, meta.date);
+      const hG2 = readG2(r.horse_id, meta.date);
+      if (hG2.found) g2HistN++;
       const eloParts = [hElo, jElo, tElo].map((e, ix) => e == null ? null : e * [W_HORSE, W_JOCKEY, W_TRAINER][ix]);
       const eloComposite = eloParts.some(p => p == null) ? null : (eloParts as number[]).reduce((a, b) => a + b, 0);
 
@@ -993,6 +1032,7 @@
           meta.id, meta.date, meta.venue, meta.race_number, meta.distance, meta.going, fieldSize,
           r.horse_id, r.jockey_id, r.trainer_id, r.draw, r.actual_weight, r.win_odds,
           hElo, jElo, tElo, daysSince,
+          hG2.r, hG2.rd,
           dF?.starts ?? 0, dF?.top3 ?? 0, gF?.starts ?? 0, gF?.top3 ?? 0,
           drawF?.starts ?? 0, drawF?.top3 ?? 0, cF?.starts ?? 0, cF?.top3 ?? 0, wF?.avg_w ?? null,
           eloComposite, factorBonus, baselineScore,
@@ -1033,6 +1073,11 @@
     console.error(`[dump-features] ⑥ sectional-speed coverage: sect z present=${sectSpdN} (${spdPct}%)`);
     if (!UPCOMING_MODE && sectSpdN === 0) {
       console.error('[dump-features] WARN: sectional-speed z ALL sentinel on historical dump → horse_sectional_times.section_time missing (sparse-checkout/import regression?)');
+    }
+    const g2Pct = (100 * g2HistN / written).toFixed(1);
+    console.error(`[dump-features] G2 coverage: real glicko2 snapshot present=${g2HistN} (${g2Pct}%)`);
+    if (!UPCOMING_MODE && g2HistN === 0) {
+      console.error('[dump-features] WARN: Glicko-2 ALL prior on historical dump → horse_glicko2_snapshots empty (compute step regression?)');
     }
     const cmtHistPct = (100 * cmtHistN / written).toFixed(1);
     const cmtTrbPct = (100 * cmtTroubleN / written).toFixed(1);
