@@ -660,6 +660,141 @@
     return null;
   }
 
+  // ── Stage 14 (NEW ⑧ 對賽關係圖): who-beat-whom graph features ──────────
+  // Directed "beats" graph over horses (Louisville-paper idea): for every
+  // settled PAST race, each loser points at every horse that finished strictly
+  // ahead of it (loser → winner). Leak-safe: the graph only ever contains
+  // races dated BEFORE the race being featurized. Adjacency is maintained
+  // INCREMENTALLY as the (chronological) race loop advances; HITS + PageRank
+  // are recomputed ONCE per race DAY, not per race (power iteration on the
+  // whole graph per race would be prohibitively slow).
+  // A rolling window keeps only the last WB_WINDOW_DAYS of races: HK careers
+  // are short and this bounds the per-day iteration cost.
+  // Features (percentile-normalized among in-window horses; -1 sentinel = no
+  // in-window history so the tree can isolate debut/returned horses):
+  //   h_wb_auth_pct — HITS authority pct (gets "pointed at" by strong hubs =
+  //                   has beaten quality opposition)
+  //   h_wb_hub_pct  — HITS hub pct (points at strong authorities = has raced
+  //                   in / lost to strong company)
+  //   h_wb_pr_pct   — PageRank pct on the beats graph (mass flows loser→winner)
+  //   h_wb_races    — # in-window settled starts backing the score (0 = none)
+  const WB_WINDOW_DAYS = 1095;
+  const WB_HITS_ITERS = 20;
+  const WB_PR_ITERS = 20;
+  const WB_PR_D = 0.85;
+  const wbRows = db.prepare(`
+    SELECT rr.race_id AS rid, rm.date AS dt, rr.horse_id AS hid
+      FROM race_results rr
+      JOIN races r ON r.id = rr.race_id
+      JOIN race_meetings rm ON rm.id = r.meeting_id
+     WHERE rr.finishing_position BETWEEN 1 AND 98
+     ORDER BY rm.date ASC, rr.race_id ASC, rr.finishing_position ASC`).all() as
+    { rid: string; dt: string; hid: string }[];
+  console.error(`[dump-features] ⑧ who-beat-whom graph: ${wbRows.length} settled result rows loaded`);
+  const wbNodeIx = new Map<string, number>();
+  const wbEdges: Map<number, number>[] = [];   // per-loser node: winner → weight
+  const wbRaceCnt: number[] = [];              // in-window settled starts per node
+  function wbNode(h: string): number {
+    let ix = wbNodeIx.get(h);
+    if (ix === undefined) { ix = wbNodeIx.size; wbNodeIx.set(h, ix); wbEdges.push(new Map()); wbRaceCnt.push(0); }
+    return ix;
+  }
+  type WbRace = { dt: string; horses: number[] };  // node ids in finish order
+  const wbActive: WbRace[] = [];
+  let wbHead = 0;   // first still-in-window index of wbActive
+  let wbPtr = 0;    // next unread row of wbRows
+  function wbApplyRace(horses: number[], sign: 1 | -1) {
+    for (let a = 0; a < horses.length; a++) {
+      wbRaceCnt[horses[a]] += sign;
+      for (let b = a + 1; b < horses.length; b++) {
+        const m = wbEdges[horses[b]];             // b finished behind a → edge b→a
+        const w = (m.get(horses[a]) || 0) + sign;
+        if (w <= 0) m.delete(horses[a]); else m.set(horses[a], w);
+      }
+    }
+  }
+  function wbIsoAddDays(iso: string, delta: number): string {
+    return new Date(Date.parse(iso + 'T00:00:00Z') + delta * 86400000).toISOString().slice(0, 10);
+  }
+  function wbIngestBefore(date: string): boolean {
+    let changed = false;
+    while (wbPtr < wbRows.length && wbRows[wbPtr].dt < date) {
+      const rid = wbRows[wbPtr].rid;
+      const dt = wbRows[wbPtr].dt;
+      const horses: number[] = [];
+      while (wbPtr < wbRows.length && wbRows[wbPtr].rid === rid) { horses.push(wbNode(wbRows[wbPtr].hid)); wbPtr++; }
+      if (horses.length >= 2) { wbApplyRace(horses, 1); wbActive.push({ dt, horses }); changed = true; }
+    }
+    const cutoff = wbIsoAddDays(date, -WB_WINDOW_DAYS);
+    while (wbHead < wbActive.length && wbActive[wbHead].dt < cutoff) {
+      wbApplyRace(wbActive[wbHead].horses, -1);
+      wbActive[wbHead] = null as unknown as WbRace;  // release memory
+      wbHead++;
+      changed = true;
+    }
+    return changed;
+  }
+  let wbScoresDate = '';
+  let wbAuthPct = new Float64Array(0);
+  let wbHubPct = new Float64Array(0);
+  let wbPrPct = new Float64Array(0);
+  function wbPctize(score: Float64Array, active: number[], out: Float64Array) {
+    const order = active.slice().sort((x, y) => score[x] - score[y]);
+    const n = order.length;
+    for (let k = 0; k < n; k++) out[order[k]] = n > 1 ? Math.round((k / (n - 1)) * 10000) / 10000 : 0.5;
+  }
+  function wbRecompute(date: string) {
+    const changed = wbIngestBefore(date);
+    wbScoresDate = date;
+    if (!changed && wbAuthPct.length > 0) return;  // same graph → keep scores
+    const N = wbNodeIx.size;
+    // Flatten adjacency once per recompute for fast typed-array iteration.
+    let E = 0;
+    for (let u = 0; u < N; u++) E += wbEdges[u].size;
+    const src = new Int32Array(E), dst = new Int32Array(E), w = new Float64Array(E);
+    const outW = new Float64Array(N);
+    let e = 0;
+    for (let u = 0; u < N; u++) {
+      for (const [v, wt] of wbEdges[u]) { src[e] = u; dst[e] = v; w[e] = wt; outW[u] += wt; e++; }
+    }
+    const active: number[] = [];
+    for (let u = 0; u < N; u++) if (wbRaceCnt[u] > 0) active.push(u);
+    // HITS: auth[v] = Σ_{u→v} w·hub[u]; hub[u] = Σ_{u→v} w·auth[v]; L2-normalized.
+    const auth = new Float64Array(N).fill(1), hub = new Float64Array(N).fill(1);
+    const authN = new Float64Array(N), hubN = new Float64Array(N);
+    for (let it = 0; it < WB_HITS_ITERS; it++) {
+      authN.fill(0);
+      for (let k = 0; k < E; k++) authN[dst[k]] += w[k] * hub[src[k]];
+      hubN.fill(0);
+      for (let k = 0; k < E; k++) hubN[src[k]] += w[k] * authN[dst[k]];
+      let na = 0, nh = 0;
+      for (let u = 0; u < N; u++) { na += authN[u] * authN[u]; nh += hubN[u] * hubN[u]; }
+      na = Math.sqrt(na) || 1; nh = Math.sqrt(nh) || 1;
+      for (let u = 0; u < N; u++) { auth[u] = authN[u] / na; hub[u] = hubN[u] / nh; }
+    }
+    // PageRank along loser→winner (mass flows toward horses that beat you).
+    let pr = new Float64Array(N).fill(N ? 1 / N : 0);
+    let prNext = new Float64Array(N);
+    for (let it = 0; it < WB_PR_ITERS; it++) {
+      let dangling = 0;
+      for (let u = 0; u < N; u++) if (outW[u] === 0) dangling += pr[u];
+      const base = N ? (1 - WB_PR_D) / N + WB_PR_D * dangling / N : 0;
+      prNext.fill(base);
+      for (let k = 0; k < E; k++) prNext[dst[k]] += WB_PR_D * pr[src[k]] * (w[k] / outW[src[k]]);
+      const swap = pr; pr = prNext; prNext = swap;
+    }
+    if (wbAuthPct.length !== N) { wbAuthPct = new Float64Array(N); wbHubPct = new Float64Array(N); wbPrPct = new Float64Array(N); }
+    wbAuthPct.fill(-1); wbHubPct.fill(-1); wbPrPct.fill(-1);
+    wbPctize(auth, active, wbAuthPct);
+    wbPctize(hub, active, wbHubPct);
+    wbPctize(pr, active, wbPrPct);
+  }
+  function readWb(h: string): { auth: number; hub: number; pr: number; races: number } {
+    const ix = wbNodeIx.get(h);
+    if (ix === undefined || ix >= wbAuthPct.length || wbRaceCnt[ix] <= 0) return { auth: -1, hub: -1, pr: -1, races: 0 };
+    return { auth: wbAuthPct[ix], hub: wbHubPct[ix], pr: wbPrPct[ix], races: wbRaceCnt[ix] };
+  }
+
   // ── Race iteration ──────────────────────────────────────────────────────
   type RaceMeta = { id: string; date: string; venue: string; race_number: number; distance: number; going: string; class: string | null };
   type RunnerRow = {
@@ -787,6 +922,8 @@
       'h_elo','j_elo','t_elo','days_since_last',
       // Glicko-2 A/B: rating + as-of-inflated RD (uncertainty; layoff/debut signal)
       'h_g2','h_g2_rd',
+      // Stage 14 (⑧ 對賽關係圖): who-beat-whom graph (HITS/PageRank pct, -1=no history)
+      'h_wb_auth_pct','h_wb_hub_pct','h_wb_pr_pct','h_wb_races',
       'dist_starts','dist_top3','going_starts','going_top3',
       'draw_starts','draw_top3','combo_starts','combo_top3','weight_avg5',
       'elo_composite','factor_bonus','baseline_score',
@@ -838,10 +975,13 @@
   let sectSpdN = 0;  // ⑥ coverage guard: rows with real (non-sentinel) sectional-speed z
   let cmtHistN = 0, cmtTroubleN = 0;  // ⑦ coverage guard: rows with comment history / trouble flag
   let g2HistN = 0;  // Glicko-2 coverage guard: rows with a real (non-prior) snapshot
+  let wbHistN = 0;  // ⑧ coverage guard: rows with in-window who-beat-whom history
   function flush() { if (buf.length) { appendFileSync(OUT, buf.join('')); buf = []; } }
 
   for (let i = 0; i < races.length; i++) {
     const meta = races[i];
+    // ⑧ who-beat-whom: refresh graph scores once per race day (leak-safe as-of)
+    if (meta.date !== wbScoresDate) wbRecompute(meta.date);
     const runners: RunnerRow[] = UPCOMING_MODE
       ? (runnersByRace.get(meta.id) || [])
       : (qRunners.all(meta.id) as RunnerRow[]);
@@ -891,6 +1031,8 @@
       const tElo = readElo('trainer', r.trainer_id, meta.date);
       const hG2 = readG2(r.horse_id, meta.date);
       if (hG2.found) g2HistN++;
+      const wb = readWb(r.horse_id);
+      if (wb.races > 0) wbHistN++;
       const eloParts = [hElo, jElo, tElo].map((e, ix) => e == null ? null : e * [W_HORSE, W_JOCKEY, W_TRAINER][ix]);
       const eloComposite = eloParts.some(p => p == null) ? null : (eloParts as number[]).reduce((a, b) => a + b, 0);
 
@@ -1033,6 +1175,7 @@
           r.horse_id, r.jockey_id, r.trainer_id, r.draw, r.actual_weight, r.win_odds,
           hElo, jElo, tElo, daysSince,
           hG2.r, hG2.rd,
+          wb.auth, wb.hub, wb.pr, wb.races,
           dF?.starts ?? 0, dF?.top3 ?? 0, gF?.starts ?? 0, gF?.top3 ?? 0,
           drawF?.starts ?? 0, drawF?.top3 ?? 0, cF?.starts ?? 0, cF?.top3 ?? 0, wF?.avg_w ?? null,
           eloComposite, factorBonus, baselineScore,
@@ -1078,6 +1221,11 @@
     console.error(`[dump-features] G2 coverage: real glicko2 snapshot present=${g2HistN} (${g2Pct}%)`);
     if (!UPCOMING_MODE && g2HistN === 0) {
       console.error('[dump-features] WARN: Glicko-2 ALL prior on historical dump → horse_glicko2_snapshots empty (compute step regression?)');
+    }
+    const wbPct = (100 * wbHistN / written).toFixed(1);
+    console.error(`[dump-features] ⑧ who-beat-whom coverage: in-window graph history present=${wbHistN} (${wbPct}%)`);
+    if (!UPCOMING_MODE && wbHistN === 0) {
+      console.error('[dump-features] WARN: who-beat-whom ALL sentinel on historical dump → graph ingest regression?');
     }
     const cmtHistPct = (100 * cmtHistN / written).toFixed(1);
     const cmtTrbPct = (100 * cmtTroubleN / written).toFixed(1);
