@@ -19,6 +19,7 @@
 import { resolve } from 'node:path';
 import { openDb, ensureSchema } from '../ingest/lib/db.js';
 import { computeRaceDeltas, DEFAULT_CONFIG, type Runner } from './engine.js';
+import { computeRaceG2, G2_DEFAULT, type G2Runner, type G2State } from './glicko2.js';
 
 interface Args {
   db: string;
@@ -128,7 +129,24 @@ async function main(): Promise<void> {
   log('elo', `backfill jockey_name: ${beforeJ} -> ${afterJ} NULL  (recovered ${beforeJ - afterJ})`);
   log('elo', `backfill trainer_name: ${beforeT} -> ${afterT} NULL  (recovered ${beforeT - afterT})`);
 
+  // Glicko-2 horse snapshots (A/B: rating + uncertainty; schema-local so the
+  // shared schema.sql stays untouched while the experiment lives on a branch).
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS horse_glicko2_snapshots (
+      id TEXT PRIMARY KEY,
+      horse_id TEXT NOT NULL,
+      as_of_date TEXT NOT NULL,
+      rating REAL NOT NULL,
+      rd REAL NOT NULL,
+      vol REAL NOT NULL,
+      games_played INTEGER NOT NULL,
+      computed_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_g2_horse_date ON horse_glicko2_snapshots(horse_id, as_of_date);
+  `);
+
   if (args.reset) {
+    db.prepare('DELETE FROM horse_glicko2_snapshots').run();
     db.prepare('DELETE FROM horse_elo_snapshots').run();
     db.prepare('DELETE FROM jockey_elo_snapshots').run();
     db.prepare('DELETE FROM trainer_elo_snapshots').run();
@@ -179,6 +197,9 @@ async function main(): Promise<void> {
   const jockeyR = new Map<string, number>();
   const trainerR = new Map<string, number>();
   const horseGames = new Map<string, number>();
+  const horseG2 = new Map<string, G2State>();
+  const horseG2Last = new Map<string, string>();
+  const horseG2Games = new Map<string, number>();
   const jockeyGames = new Map<string, number>();
   const trainerGames = new Map<string, number>();
 
@@ -201,6 +222,11 @@ async function main(): Promise<void> {
      VALUES (?, ?, NULL, ?, ?, ?, datetime('now'))`,
   );
 
+  const insertG2Snap = db.prepare(
+    `INSERT OR REPLACE INTO horse_glicko2_snapshots (id, horse_id, as_of_date, rating, rd, vol, games_played, computed_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
+  );
+
   const cfg = { ...DEFAULT_CONFIG, k: args.k };
 
   let processedRaces = 0;
@@ -220,6 +246,22 @@ async function main(): Promise<void> {
       horseGames.set(id, (horseGames.get(id) ?? 0) + 1);
       const snapId = `${id}|overall|${raceKey.date}|${raceKey.venue}|${raceKey.raceNo}`;
       insertHorseSnap.run(snapId, id, raceKey.date, newR, horseGames.get(id));
+    }
+
+    // Glicko-2 horse layer (rating + RD uncertainty; idle-time RD inflation)
+    const g2Runners: G2Runner[] = raceRunners.map((r) => {
+      const st = horseG2.get(r.horse_id) ?? { r: G2_DEFAULT.initialRating, rd: G2_DEFAULT.initialRd, vol: G2_DEFAULT.initialVol };
+      const last = horseG2Last.get(r.horse_id);
+      const days = last ? Math.max(0, (Date.parse(raceKey.date) - Date.parse(last)) / 86400000) : 0;
+      const periods = last ? Math.max(1, days / 30) : 1;
+      return { entityId: r.horse_id, finish: r.finishing_position_num, state: st, periodsIdle: periods };
+    });
+    const g2Out = computeRaceG2(g2Runners);
+    for (const [id, st] of g2Out) {
+      horseG2.set(id, st);
+      horseG2Last.set(id, raceKey.date);
+      horseG2Games.set(id, (horseG2Games.get(id) ?? 0) + 1);
+      insertG2Snap.run(`${id}|g2|${raceKey.date}|${raceKey.venue}|${raceKey.raceNo}`, id, raceKey.date, st.r, st.rd, st.vol, horseG2Games.get(id));
     }
 
     // Jockey layer (only runners with known jockey)
