@@ -58,6 +58,12 @@ FEATURE_COLS = [
       # See predict_upcoming.py FEAT_COLS comment for rationale. beaten_lengths
       # excluded — it's a future regression-head label, not a feature.
       "sect_n", "sect_early_avg", "sect_late_kick",
+      # Stage 14 (NEW v3.3 ⑪ age/career): leak-safe age estimate + career stage.
+      # h_age_est = 進口類別 debut-age base (PPG/PP 4, ISG/visiting 5) + seasons
+      # in HK; h_career_starts / h_seasons_hk exact from own prior races. NO
+      # survivorship leak (never reads the active-only HKJC 馬齡 field).
+      # A/B: baseline = --exclude h_career_starts,h_seasons_hk,h_age_est
+      "h_career_starts", "h_seasons_hk", "h_age_est",
       # ⑥ sectional-SPEED z (sect_early_z / sect_fin_z — first/final section TIME
       # z-scored within each PAST race's field, leak-safe; -9 sentinel=no data) is
       # DORMANT: two walk-forward A/B pairs (1299 races, 2024-11→2026-04) gave a
