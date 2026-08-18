@@ -33,6 +33,9 @@ import lightgbm as lgb
 
 FEATURE_COLS = [
       "h_elo", "j_elo", "t_elo", "days_since_last",
+      # Glicko-2 A/B (2026-08): rating + as-of RD (uncertainty = layoff/debut
+      # signal; ties to "recency > history"). Baseline run = --exclude h_g2,h_g2_rd
+      "h_g2", "h_g2_rd",
       "distance", "draw", "actual_weight", "field_size",
       "dist_starts", "dist_top3", "going_starts", "going_top3",
       "draw_starts", "draw_top3", "combo_starts", "combo_top3",
