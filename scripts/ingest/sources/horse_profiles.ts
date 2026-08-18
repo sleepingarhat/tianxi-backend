@@ -29,8 +29,8 @@ export function ingestHorseProfiles(
   const stats: IngestStats = { inserted: 0, updated: 0, skipped: 0, failed: 0 };
 
   const upsertHorse = db.prepare(
-    `INSERT INTO horses (id, name_en, name_ch, code, country_of_origin, colour, sex, import_type, sire, dam, dam_sire, current_rating, status, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+    `INSERT INTO horses (id, name_en, name_ch, code, country_of_origin, colour, sex, import_type, sire, dam, dam_sire, current_rating, status, age, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
      ON CONFLICT(id) DO UPDATE SET
        name_ch = COALESCE(excluded.name_ch, horses.name_ch),
        country_of_origin = COALESCE(excluded.country_of_origin, horses.country_of_origin),
@@ -42,6 +42,7 @@ export function ingestHorseProfiles(
        dam_sire = COALESCE(excluded.dam_sire, horses.dam_sire),
        current_rating = COALESCE(excluded.current_rating, horses.current_rating),
        status = COALESCE(excluded.status, horses.status),
+       age = COALESCE(excluded.age, horses.age),
        updated_at = datetime('now')`,
   );
 
@@ -94,6 +95,11 @@ export function ingestHorseProfiles(
         const recBreak = parseRecordBreakdown(row['冠-亞-季-總出賽次數']);
         const status = normalizeStatus(row['status']);
         const lastRating = parseFloat10(row['最後評分']);
+        // 出生地___馬齡 e.g. "澳洲 / 4" — CURRENT age at scrape time; only
+        // populated for horses still in training (retired horses lose it on
+        // the HKJC page). Stored raw; as-of conversion happens in dump-features.
+        const ageMatch = (row['出生地___馬齡'] || '').match(/\/\s*(\d+)\s*$/);
+        const currentAge = ageMatch ? parseInt(ageMatch[1], 10) : null;
 
         const wasExisting = existingIds.has(id);
 
@@ -111,6 +117,7 @@ export function ingestHorseProfiles(
           row['外祖父'] || null,
           lastRating != null ? Math.round(lastRating) : null,
           status,
+          currentAge,
         );
 
         upsertExtra.run(
