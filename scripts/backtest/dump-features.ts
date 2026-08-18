@@ -187,6 +187,50 @@
       JOIN race_meetings rm ON rm.id = r.meeting_id
      WHERE rr.horse_id = ? AND rm.date < ?`);
 
+  // ── Stage 15 (NEW ⑨ age/career-stage): as-of age + career depth ─────────
+  // h_career_starts / first start date: strictly BEFORE race date → leak-safe.
+  const qCareer = db.prepare(`
+    SELECT COUNT(*) AS starts, MIN(rm.date) AS first_date
+      FROM race_results rr
+      JOIN races r ON r.id = rr.race_id
+      JOIN race_meetings rm ON rm.id = r.meeting_id
+     WHERE rr.horse_id = ? AND rm.date < ?
+       AND rr.finishing_position > 0 AND rr.finishing_position < 99`);
+  // h_age: HKJC profile carries CURRENT age ("出生地 / 馬齡") only for horses
+  // still in training (survivorship-biased missingness — retired horses lose
+  // the field). Profiles ingest stores it raw on the RAW-code horses row
+  // (profiles ingest uses id=code, results use 'horse_'+code). We convert to
+  // as-of age via season-year arithmetic: assume all HK horses age +1 at the
+  // JULY-1 season boundary (SH-bred majority; ±1 error possible near the
+  // boundary, constant per horse, identical in both A/B arms).
+  // birth_season = seasonYear(scrape_date) - current_age;
+  // as-of age    = seasonYear(race_date)  - birth_season.  Unknown → -1.
+  function seasonYear(iso: string): number {
+    const y = parseInt(iso.slice(0, 4), 10);
+    const m = parseInt(iso.slice(5, 7), 10);
+    return m >= 7 ? y : y - 1;
+  }
+  const birthSeasonByCode = new Map<string, number>();
+  {
+    const hasExtra = !!db.prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='horse_profile_extra'").get();
+    if (hasExtra) {
+      const rows = db.prepare(`
+        SELECT h.id AS code, h.age AS age, e.profile_last_scraped AS scraped
+          FROM horses h
+          LEFT JOIN horse_profile_extra e ON e.horse_id = h.id
+         WHERE h.age IS NOT NULL`).all() as { code: string; age: number; scraped: string | null }[];
+      for (const r of rows) {
+        if (!r.scraped || !/^\d{4}-\d{2}-\d{2}/.test(r.scraped)) continue;
+        birthSeasonByCode.set(r.code, seasonYear(r.scraped) - r.age);
+      }
+    }
+    console.error(`[dump-features] ⑨ age map: ${birthSeasonByCode.size} horses with known birth season`);
+    if (birthSeasonByCode.size === 0) {
+      console.error('[dump-features] WARN: age map EMPTY → horses.age not ingested (profiles CSV missing 出生地___馬齡 or sparse-checkout regression?)');
+    }
+  }
+
   // ── Stage 10 (NEW v3.2 ④): pedigree target-encoded progeny performance ──
   // Leak-safe: progeny races strictly BEFORE the current race date. Keyed by
   // race_results.horse_id (prefixed 'horse_'+code) via the horse_pedigree table
@@ -785,6 +829,8 @@
       // last 8 starts; cmt_n = history depth (0 = no history); the three fraction
       // cols use the -1 sentinel for no history). A受阻 + B走大疊 + C出閘失準.
       'cmt_n','cmt_trouble','cmt_wide','cmt_badstart',
+      // Stage 15 (NEW ⑨): age / career stage (as-of, leak-safe; -1 = unknown)
+      'h_age','h_career_starts','h_days_since_debut',
       'finishing_position','is_top1','is_top3',
     ];
   writeFileSync(OUT, HEADER.join(',') + '\n');
@@ -801,6 +847,7 @@
   let gearChangedN = 0, gearBlinkersN = 0;  // ⑤ coverage guard (silent-regression detector)
   let sectSpdN = 0;  // ⑥ coverage guard: rows with real (non-sentinel) sectional-speed z
   let cmtHistN = 0, cmtTroubleN = 0;  // ⑦ coverage guard: rows with comment history / trouble flag
+  let ageKnownN = 0;  // ⑨ coverage guard: rows with real (non-sentinel) as-of age
   function flush() { if (buf.length) { appendFileSync(OUT, buf.join('')); buf = []; } }
 
   for (let i = 0; i < races.length; i++) {
@@ -989,6 +1036,14 @@
       if (gearF.changed) gearChangedN++;
       if (gearF.blinkers) gearBlinkersN++;
 
+      // Stage 15 (NEW ⑨): age / career stage (as-of, leak-safe; -1 = unknown)
+      const career = qCareer.get(r.horse_id, meta.date) as { starts: number; first_date: string | null } | undefined;
+      const hCareerStarts = career?.starts ?? 0;
+      const hDaysSinceDebut = career?.first_date ? daysBetween(career.first_date, meta.date) : -1;
+      const bSeason = horseCode ? birthSeasonByCode.get(horseCode) : undefined;
+      const hAge = bSeason !== undefined ? (seasonYear(meta.date) - bSeason) : -1;
+      if (hAge >= 0) ageKnownN++;
+
       const row = [
           meta.id, meta.date, meta.venue, meta.race_number, meta.distance, meta.going, fieldSize,
           r.horse_id, r.jockey_id, r.trainer_id, r.draw, r.actual_weight, r.win_odds,
@@ -1010,6 +1065,7 @@
           sireTop3, sireDistTop3, damsireTop3,
           gearF.firstN, gearF.offN, gearF.changed, gearF.blinkers,
           cmt.n, cmt.trouble, cmt.wide, cmt.badstart,
+          hAge, hCareerStarts, hDaysSinceDebut,
           r.finishing_position,
           r.horse_id === top1Id ? 1 : 0,
           top3Set.has(r.horse_id) ? 1 : 0,
@@ -1039,6 +1095,11 @@
     console.error(`[dump-features] ⑦ hard-luck coverage: comment history present=${cmtHistN} (${cmtHistPct}%) · trouble-flagged=${cmtTroubleN} (${cmtTrbPct}%)`);
     if (!UPCOMING_MODE && cmtHistN === 0) {
       console.error('[dump-features] WARN: comment history ALL empty on historical dump → running_comments missing (sparse-checkout/import regression?)');
+    }
+    const agePct = (100 * ageKnownN / written).toFixed(1);
+    console.error(`[dump-features] ⑨ age coverage: h_age known=${ageKnownN} (${agePct}%) — survivorship-biased (retired horses lack profile age)`);
+    if (ageKnownN === 0) {
+      console.error('[dump-features] WARN: h_age ALL sentinel → horses.age not ingested (profiles ingest regression?)');
     }
   }
   db.close();
