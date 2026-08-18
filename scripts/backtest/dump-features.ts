@@ -212,18 +212,14 @@
   }
   const birthSeasonByCode = new Map<string, number>();
   {
-    const hasExtra = !!db.prepare(
-      "SELECT name FROM sqlite_master WHERE type='table' AND name='horse_profile_extra'").get();
-    if (hasExtra) {
-      const rows = db.prepare(`
-        SELECT h.id AS code, h.age AS age, e.profile_last_scraped AS scraped
-          FROM horses h
-          LEFT JOIN horse_profile_extra e ON e.horse_id = h.id
-         WHERE h.age IS NOT NULL`).all() as { code: string; age: number; scraped: string | null }[];
-      for (const r of rows) {
-        if (!r.scraped || !/^\d{4}-\d{2}-\d{2}/.test(r.scraped)) continue;
-        birthSeasonByCode.set(r.code, seasonYear(r.scraped) - r.age);
-      }
+    // horse_birth_season is written by the profiles ingest (own table — the
+    // horses UPSERT collides with import-csv's prefixed rows and always fails).
+    const hasBs = !!db.prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='horse_birth_season'").get();
+    if (hasBs) {
+      const rows = db.prepare(
+        'SELECT code, birth_season FROM horse_birth_season').all() as { code: string; birth_season: number }[];
+      for (const r of rows) birthSeasonByCode.set(r.code, r.birth_season);
     }
     console.error(`[dump-features] ⑨ age map: ${birthSeasonByCode.size} horses with known birth season`);
     if (birthSeasonByCode.size === 0) {
