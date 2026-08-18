@@ -17,6 +17,7 @@ import {
   verifySession,
 } from '../lib/admin-auth';
 import { parseHkjcDividends, BOX_POOL_MAP } from '../lib/parse-dividends';
+import { getSeasonStatus } from '../lib/season';
 
 interface AdminEnv {
   DB: D1Database;
@@ -1856,8 +1857,12 @@ async function fetchAdminPageData(env: AdminEnv): Promise<Record<string, any>> {
     .catch(() => null);
   const ensembleAlpha = _alphaRow && _alphaRow.value != null && _alphaRow.value !== '' ? Number(_alphaRow.value) : null;
 
+  // 休季自動化: season status for the masthead badge (non-fatal on error).
+  const season = await getSeasonStatus(db).catch(() => null);
+
   return {
     ensembleAlpha,
+    season,
     coverage: { datasets, factors },
     status: {
       counts: { meetings: mc, races: rc, results: rsc, horses: hc, jockeys: jc, trainers: tc,
@@ -1882,6 +1887,19 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
     : (_alpha as number) <= 0 ? '純 ELO fallback'
     : (_alpha as number) >= 0.85 ? 'LGB 主導'
     : 'LGB lean';
+  // 休季自動化: masthead banner. Built as a plain concatenated string (NO
+  // backticks/backslashes — this HTML is injected into the giant template
+  // literal below).
+  const _season = preloaded && preloaded.season ? preloaded.season : null;
+  const _offSeason = _season && _season.status === 'off_season';
+  const seasonBanner = _offSeason
+    ? '<div style="margin:0 0 14px;padding:10px 16px;border-radius:8px;background:#bf8a0a;color:#fff;font-weight:600;font-size:13px;display:flex;gap:10px;align-items:center">'
+      + '<span style="font-size:16px">&#127958;</span>'
+      + '<span>休季中 — 系統已自動暫停（排程工作流 + 引擎預測）。新季馬季開鑼、HKJC 公佈排位表後會自動恢復。'
+      + (_season.lastMeeting ? '上次賽事：' + _season.lastMeeting + '。' : '')
+      + (_season.mode !== 'auto' ? '（人手覆寫：' + _season.mode + '）' : '')
+      + '</span></div>'
+    : '';
   return `<!doctype html>
 <html lang="zh-Hant"><head><meta charset="utf-8"><title>天喜 · 內部控制台</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap">
@@ -2029,6 +2047,7 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
       </div>
     </div>
   </header>
+  ${seasonBanner}
   <div class="bar">伺服器端渲染 · 閒置時自動刷新<span class="refresh" id="refreshClock"></span></div>
 
   <div id="alertbar"></div>
