@@ -660,7 +660,7 @@ horsesRoutes.get('/:id/research', async (c) => {
     }
   }
   const formRows: any[] = (useHfr ? mergedHfrRows : rrRows).slice(0, formLimit);
-  const formSource         = useHfr ? 'horse_form_records' : 'race_results';
+  const formSource         = useHfr ? '完整馬匹歷史賽績' : '標準化賽果紀錄';
   const commentsRows: any[] = commentsResult.status === 'fulfilled'          ? (commentsResult.value?.results ?? []) : [];
   const eloLatest: any     = eloLatestResult.status === 'fulfilled'          ? eloLatestResult.value                 : null;
   const eloHistoryRows: any[] = eloHistoryResult.status === 'fulfilled'      ? (eloHistoryResult.value?.results ?? []) : [];
@@ -770,7 +770,7 @@ horsesRoutes.get('/:id/research', async (c) => {
   let recordSource: string | null = null;
   let record: { wins: number | null; seconds: number | null; thirds: number | null; totalStarts: number | null };
   if (profileStarts != null && profileStarts > 0) {
-    recordSource = 'horse_profile_extra';
+    recordSource = '補充馬匹檔案';
     record = {
       wins: numericOrNull(profileExtra.record_wins),
       seconds: numericOrNull(profileExtra.record_seconds),
@@ -778,10 +778,10 @@ horsesRoutes.get('/:id/research', async (c) => {
       totalStarts: profileStarts,
     };
   } else if (hfrRecord) {
-    recordSource = 'horse_form_records';
+    recordSource = '完整馬匹歷史賽績';
     record = hfrRecord;
   } else if (baseStarts != null && baseStarts > 0) {
-    recordSource = 'horses';
+    recordSource = '馬匹基本資料';
     record = {
       wins: numericOrNull(horse.total_wins),
       seconds: null,
@@ -789,7 +789,7 @@ horsesRoutes.get('/:id/research', async (c) => {
       totalStarts: baseStarts,
     };
   } else if (rrRecord) {
-    recordSource = 'race_results';
+    recordSource = '標準化賽果紀錄';
     record = rrRecord;
   } else {
     record = { wins: null, seconds: null, thirds: null, totalStarts: null };
@@ -924,7 +924,7 @@ horsesRoutes.get('/:id/research', async (c) => {
   });
   const hasCareerData = perfRows.length > 0;
   const perfSource = hasCareerData
-    ? (useHfrCareerPerf ? 'horse_form_records (全職業生涯)' : 'race_results (全職業生涯)')
+    ? (useHfrCareerPerf ? '完整馬匹歷史賽績（全生涯）' : '標準化賽果紀錄（全生涯）')
     : null;
   const perfPos = (r: any): number => r.pos;
   const perfTotal = perfRows.length;
@@ -1216,28 +1216,27 @@ horsesRoutes.get('/:id/research', async (c) => {
   if (profileExtra?.last_race_date) allDates.push(profileExtra.last_race_date as string);
   const dataAsOf = allDates.length > 0 ? allDates.sort().reverse()[0] : null;
 
-  const sources: string[] = ['horses'];
-  if (profileExtra)                   sources.push('horse_profile_extra');
-  if (eloLatest)                      sources.push('horse_elo_snapshots');
-  if (useHfr && formRows.length > 0)  sources.push('horse_form_records');
-  if (!useHfr && formRows.length > 0) sources.push('race_results');
-  if (useHfrCareerPerf)               sources.push('horse_form_records');
-  if (!useHfrCareerPerf && rrCareerPerfRows.length > 0) sources.push('race_results');
-  if (commentsRows.length > 0)        sources.push('running_comments');
-  if (trackworkRows.length > 0)       sources.push('horse_trackwork');
-  if (trialRows.length > 0)           sources.push('trial_runners, trial_sessions');
-  if (injuryRows.length > 0)          sources.push('horse_injury');
-  if (sectionalsRows.length > 0)      sources.push('horse_sectional_times');
-  if (raceContextSection && raceId)   sources.push(`entries_upcoming / race_results (raceId=${raceId})`);
-  if (currentTrainer)                 sources.push('trainers');
+  const sources: string[] = ['馬匹基本資料'];
+  if (profileExtra)                   sources.push('補充馬匹檔案');
+  if (eloLatest)                      sources.push('天喜 Elo 歷史評分');
+  if (formRows.length > 0)            sources.push(formSource);
+  if (useHfrCareerPerf)               sources.push('完整馬匹歷史賽績');
+  if (!useHfrCareerPerf && rrCareerPerfRows.length > 0) sources.push('標準化賽果紀錄');
+  if (commentsRows.length > 0)        sources.push('賽後評語');
+  if (trackworkRows.length > 0)       sources.push('晨操紀錄');
+  if (trialRows.length > 0)           sources.push('試閘紀錄');
+  if (injuryRows.length > 0)          sources.push('公開傷患紀錄');
+  if (sectionalsRows.length > 0)      sources.push('賽後分段時間');
+  if (raceContextSection && raceId)   sources.push('指定場次排位／賽果');
+  if (currentTrainer)                 sources.push('練馬師資料');
 
   const coverageNotes: string[] = [
     `recentForm 顯示最多 ${formLimit} 場（查詢參數 limit，上限 50）。`,
-    `近績來源：${formSource}${useHfr ? '' : '（horse_form_records 無可用資料，已回退至 race_results）'}。`,
+    `近績來源：${formSource}${useHfr ? '' : '（完整歷史檔案未有可用資料，已使用標準化賽果）'}。`,
     '每場個別騎師／練馬師／馬鞍位／磅重僅在資料存在時顯示。',
-    '馬匹分段時間僅在 horse_sectional_times 有對應記錄時納入。',
+    '馬匹分段時間僅在公開賽後分段資料有對應記錄時納入。',
     '傷病記錄可能不完整，不涵蓋所有歷史或未公開傷患。',
-    '試閘騎師資料來自 trial_runners.jockey_name（純文字，不保證與 jockeys 表對應）。',
+    '試閘騎師資料為公開文字記錄，不保證與人物資料完全對應。',
     ...(perfSource ? [
       `performance 統計來源：${perfSource}。`,
       `performance 邊界：recentForm 顯示視窗最多 ${formLimit} 場；表現統計使用獨立、日期不設限的全生涯查詢。`,
