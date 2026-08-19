@@ -141,8 +141,10 @@ export interface HorseFormResponse {
     age: number | null;
     sex: string | null;
     currentRating: number | null;
-    totalWins: number;
-    totalStarts: number;
+    totalWins: number | null;
+    totalSeconds: number | null;
+    totalThirds: number | null;
+    totalStarts: number | null;
   };
   recentForm: {
     date: string;

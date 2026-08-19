@@ -306,9 +306,13 @@ export function buildHorseFormContext(formData: any): string {
 
   const horse = formData.horse ?? {};
   let context = `\n\n## 🟢 ${horse.nameCh || horse.nameEn || horse.code} 馬匹資料\n`;
-  context += `評分：${horse.currentRating ?? 'N/A'} | 總出賽：${horse.totalStarts ?? 0}場 | 勝出：${horse.totalWins ?? 0}場`;
-  if (horse.totalStarts && horse.totalStarts > 0) {
-    const winRate = ((horse.totalWins ?? 0) / horse.totalStarts * 100).toFixed(1);
+  const recordParts: string[] = [];
+  if (horse.currentRating != null) recordParts.push(`評分：${horse.currentRating}`);
+  if (typeof horse.totalStarts === 'number') recordParts.push(`總出賽：${horse.totalStarts}場`);
+  if (typeof horse.totalWins === 'number') recordParts.push(`勝出：${horse.totalWins}場`);
+  context += recordParts.join(' | ');
+  if (typeof horse.totalStarts === 'number' && horse.totalStarts > 0 && typeof horse.totalWins === 'number') {
+    const winRate = (horse.totalWins / horse.totalStarts * 100).toFixed(1);
     context += ` (勝率 ${winRate}%)`;
   }
   context += '\n';

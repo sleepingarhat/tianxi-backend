@@ -1,5 +1,10 @@
 import { Hono } from 'hono';
 import type { Env } from '../types';
+import {
+  HORSE_CAREER_STATS_CTE,
+  getHorseCareerStats,
+  type HorseCareerStats,
+} from '../lib/horse-career-stats';
 
 export const horsesRoutes = new Hono<{ Bindings: Env }>();
 
@@ -12,25 +17,34 @@ horsesRoutes.get('/leaderboard', async (c) => {
 
   let sql: string;
   if (by === 'wins') {
-    sql = `SELECT h.id, h.name_ch, h.name_en, h.code, h.age, h.sex, h.current_rating,
-                  h.total_wins, h.total_starts, h.status, NULL AS elo
+    sql = `${HORSE_CAREER_STATS_CTE}
+           SELECT h.id, h.name_ch, h.name_en, h.code, h.age, h.sex, h.current_rating,
+                  cs.total_wins, cs.total_seconds, cs.total_thirds, cs.total_starts,
+                  h.status, NULL AS elo
            FROM horses h
-           WHERE h.total_starts > 0 ${statusClause}
-           ORDER BY h.total_wins DESC, h.total_starts ASC
+           JOIN career_stats cs ON cs.horse_id = h.id
+           WHERE cs.total_starts > 0 ${statusClause}
+           ORDER BY cs.total_wins DESC, cs.total_starts ASC
            LIMIT ?`;
   } else if (by === 'rating') {
-    sql = `SELECT h.id, h.name_ch, h.name_en, h.code, h.age, h.sex, h.current_rating,
-                  h.total_wins, h.total_starts, h.status, NULL AS elo
+    sql = `${HORSE_CAREER_STATS_CTE}
+           SELECT h.id, h.name_ch, h.name_en, h.code, h.age, h.sex, h.current_rating,
+                  cs.total_wins, cs.total_seconds, cs.total_thirds, cs.total_starts,
+                  h.status, NULL AS elo
            FROM horses h
+           LEFT JOIN career_stats cs ON cs.horse_id = h.id
            WHERE h.current_rating IS NOT NULL ${statusClause}
            ORDER BY h.current_rating DESC
            LIMIT ?`;
   } else {
     // by=elo (default) — join latest overall snapshot
-    sql = `SELECT h.id, h.name_ch, h.name_en, h.code, h.age, h.sex, h.current_rating,
-                  h.total_wins, h.total_starts, h.status, vle.overall_elo AS elo, vle.overall_as_of AS elo_date
+    sql = `${HORSE_CAREER_STATS_CTE}
+           SELECT h.id, h.name_ch, h.name_en, h.code, h.age, h.sex, h.current_rating,
+                  cs.total_wins, cs.total_seconds, cs.total_thirds, cs.total_starts,
+                  h.status, vle.overall_elo AS elo, vle.overall_as_of AS elo_date
            FROM horses h
            LEFT JOIN v_horse_latest_elo vle ON vle.horse_id = h.id
+           LEFT JOIN career_stats cs ON cs.horse_id = h.id
            WHERE vle.overall_elo IS NOT NULL ${statusClause}
            ORDER BY vle.overall_elo DESC
            LIMIT ?`;
@@ -43,7 +57,8 @@ horsesRoutes.get('/leaderboard', async (c) => {
       horses: (results ?? []).map((h: any) => ({
         id: h.id, nameEn: h.name_en, nameCh: h.name_ch, code: h.code,
         age: h.age, sex: h.sex, currentRating: h.current_rating,
-        totalWins: h.total_wins, totalStarts: h.total_starts,
+        totalWins: h.total_wins, totalSeconds: h.total_seconds,
+        totalThirds: h.total_thirds, totalStarts: h.total_starts,
         status: h.status, elo: h.elo, eloDate: h.elo_date ?? null,
       })),
     });
@@ -61,17 +76,20 @@ horsesRoutes.get('/', async (c) => {
   const offset = Math.max(parseInt(c.req.query('offset') || '0', 10), 0);
   const statusClause = status === 'all' ? '' : "WHERE h.status = 'active'";
 
-  let orderBy = 'h.total_starts DESC';
-  if (sort === 'wins') orderBy = 'h.total_wins DESC, h.total_starts ASC';
+  let orderBy = 'cs.total_starts IS NULL, cs.total_starts DESC';
+  if (sort === 'wins') orderBy = 'cs.total_wins IS NULL, cs.total_wins DESC, cs.total_starts ASC';
   else if (sort === 'rating') orderBy = 'h.current_rating DESC';
   else if (sort === 'elo') orderBy = 'vle.overall_elo IS NULL, vle.overall_elo DESC';
 
   try {
     const { results } = await c.env.DB.prepare(
-      `SELECT h.id, h.name_ch, h.name_en, h.code, h.age, h.sex, h.current_rating,
-              h.total_wins, h.total_starts, h.status, vle.overall_elo AS elo
+      `${HORSE_CAREER_STATS_CTE}
+       SELECT h.id, h.name_ch, h.name_en, h.code, h.age, h.sex, h.current_rating,
+              cs.total_wins, cs.total_seconds, cs.total_thirds, cs.total_starts,
+              h.status, vle.overall_elo AS elo
        FROM horses h
        LEFT JOIN v_horse_latest_elo vle ON vle.horse_id = h.id
+       LEFT JOIN career_stats cs ON cs.horse_id = h.id
        ${statusClause}
        ORDER BY ${orderBy}
        LIMIT ? OFFSET ?`,
@@ -80,7 +98,8 @@ horsesRoutes.get('/', async (c) => {
       horses: (results ?? []).map((h: any) => ({
         id: h.id, nameEn: h.name_en, nameCh: h.name_ch, code: h.code,
         age: h.age, sex: h.sex, currentRating: h.current_rating,
-        totalWins: h.total_wins, totalStarts: h.total_starts,
+        totalWins: h.total_wins, totalSeconds: h.total_seconds,
+        totalThirds: h.total_thirds, totalStarts: h.total_starts,
         status: h.status, elo: h.elo ?? null,
       })),
       limit, offset, sort, status,
@@ -94,9 +113,16 @@ horsesRoutes.get('/', async (c) => {
 horsesRoutes.get('/:id', async (c) => {
   const id = c.req.param('id');
 
-  const horse = await c.env.DB.prepare(
-    'SELECT * FROM horses WHERE id = ? OR code = ?'
-  ).bind(id, id).first<any>();
+  const horse = await c.env.DB.prepare(`
+    ${HORSE_CAREER_STATS_CTE}
+    SELECT h.*, cs.total_wins AS verified_wins,
+           cs.total_seconds AS verified_seconds,
+           cs.total_thirds AS verified_thirds,
+           cs.total_starts AS verified_starts
+    FROM horses h
+    LEFT JOIN career_stats cs ON cs.horse_id = h.id
+    WHERE h.id = ? OR h.code = ?
+  `).bind(id, id).first<any>();
 
   if (!horse) {
     return c.json({ error: '找不到該馬匹' }, 404);
@@ -126,8 +152,10 @@ horsesRoutes.get('/:id', async (c) => {
     importType: horse.import_type,
     currentRating: horse.current_rating,
     seasonStakes: horse.season_stakes,
-    totalWins: Number(horse.total_starts) > 0 ? horse.total_wins : null,
-    totalStarts: Number(horse.total_starts) > 0 ? horse.total_starts : null,
+    totalWins: horse.verified_wins ?? null,
+    totalSeconds: horse.verified_seconds ?? null,
+    totalThirds: horse.verified_thirds ?? null,
+    totalStarts: horse.verified_starts ?? null,
     status: horse.status,
     elo,
     eloDate,
@@ -140,9 +168,16 @@ horsesRoutes.get('/:id/detail', async (c) => {
   const id = c.req.param('id');
   const raceId = c.req.query('raceId'); // optional: bias best-time to this race's distance
 
-  const horse = await c.env.DB.prepare(
-    'SELECT * FROM horses WHERE id = ? OR code = ?'
-  ).bind(id, id).first<any>();
+  const horse = await c.env.DB.prepare(`
+    ${HORSE_CAREER_STATS_CTE}
+    SELECT h.*, cs.total_wins AS verified_wins,
+           cs.total_seconds AS verified_seconds,
+           cs.total_thirds AS verified_thirds,
+           cs.total_starts AS verified_starts
+    FROM horses h
+    LEFT JOIN career_stats cs ON cs.horse_id = h.id
+    WHERE h.id = ? OR h.code = ?
+  `).bind(id, id).first<any>();
   if (!horse) return c.json({ error: '找不到該馬匹' }, 404);
 
   // Race-specific result context. Never use the latest race as fixed profile data.
@@ -211,8 +246,10 @@ horsesRoutes.get('/:id/detail', async (c) => {
     currentRating: horse.current_rating,
     rating: horse.current_rating,
     elo,
-    totalWins: Number(horse.total_starts) > 0 ? horse.total_wins : null,
-    totalStarts: Number(horse.total_starts) > 0 ? horse.total_starts : null,
+    totalWins: horse.verified_wins ?? null,
+    totalSeconds: horse.verified_seconds ?? null,
+    totalThirds: horse.verified_thirds ?? null,
+    totalStarts: horse.verified_starts ?? null,
     status: horse.status,
     // Latest-entry fields (populate Level-3 KV)
     horseNumber: latest?.horse_number,
@@ -244,7 +281,9 @@ horsesRoutes.get('/:id/form', async (c) => {
     return c.json({ error: '找不到該馬匹' }, 404);
   }
 
-  const { results: form } = await c.env.DB.prepare(`
+  const [statsMap, formResult] = await Promise.all([
+    getHorseCareerStats(c.env.DB, [horse.id]),
+    c.env.DB.prepare(`
     SELECT
       rm.date, rm.venue,
       r.race_number, r.distance, r.class, r.going, r.track, r.course,
@@ -259,7 +298,10 @@ horsesRoutes.get('/:id/form', async (c) => {
     WHERE rr.horse_id = ?
     ORDER BY rm.date DESC
     LIMIT ?
-  `).bind(horse.id, limit).all();
+    `).bind(horse.id, limit).all(),
+  ]);
+  const form = formResult.results;
+  const careerStats = statsMap.get(horse.id);
 
   // 試閘記錄 (v2: trial_runners + trial_sessions)
   const { results: trials } = await c.env.DB.prepare(`
@@ -294,8 +336,10 @@ horsesRoutes.get('/:id/form', async (c) => {
       age: horse.age,
       sex: horse.sex,
       currentRating: horse.current_rating,
-      totalWins: horse.total_wins,
-      totalStarts: horse.total_starts,
+      totalWins: careerStats?.totalWins ?? null,
+      totalSeconds: careerStats?.totalSeconds ?? null,
+      totalThirds: careerStats?.totalThirds ?? null,
+      totalStarts: careerStats?.totalStarts ?? null,
     },
     recentForm: (form ?? []).map((f: any) => ({
       date: f.date,
@@ -367,6 +411,7 @@ horsesRoutes.get('/:id/research', async (c) => {
   const [
     profileExtraResult,
     pedigreeResult,
+    careerStatsResult,
     trainerNameResult,
     hfrFormResult,      // preferred: horse_form_records (horse-centric, has total_runners, raw pos, finish_time_sec)
     rrFormResult,       // fallback:  race_results join
@@ -405,7 +450,10 @@ horsesRoutes.get('/:id/research', async (c) => {
        LIMIT 1`
     ).bind(horseId, horse.code, horseId).first<any>(),
 
-    // 2c. current trainer name (via current_trainer_id on horses table)
+    // 2c. Canonical career snapshot shared by list/search/leaderboards/details.
+    getHorseCareerStats(c.env.DB, [horseId]),
+
+    // 2d. current trainer name (via current_trainer_id on horses table)
     horse.current_trainer_id
       ? c.env.DB.prepare(
           `SELECT name_ch, name_en FROM trainers WHERE id = ?`
@@ -604,6 +652,9 @@ horsesRoutes.get('/:id/research', async (c) => {
   // ── 3. Unpack settled results ─────────────────────────────────────────────
   const profileExtra: any  = profileExtraResult.status === 'fulfilled'      ? profileExtraResult.value              : null;
   const pedigree: any      = pedigreeResult.status === 'fulfilled'           ? pedigreeResult.value                  : null;
+  const careerStats: HorseCareerStats | null = careerStatsResult.status === 'fulfilled'
+    ? (careerStatsResult.value.get(horseId) ?? null)
+    : null;
   const trainerRow: any    = trainerNameResult.status === 'fulfilled'        ? trainerNameResult.value               : null;
   // Prefer horse_form_records; fall back to race_results join if empty/failed
   const hfrRows: any[]     = hfrFormResult.status === 'fulfilled'            ? (hfrFormResult.value?.results ?? [])  : [];
@@ -757,64 +808,24 @@ horsesRoutes.get('/:id/research', async (c) => {
   const currentTrainer = profileExtra?.current_trainer
     ?? (trainerRow ? (trainerRow.name_ch || trainerRow.name_en || null) : null);
 
-  // Build all career-record fields from one authoritative snapshot. HFR can
-  // distinguish withdrawals (not a start) from PU/DNF/F/UR outcomes (starts
-  // without a placing), so it is preferred over the potentially stale base row.
-  const numericOrNull = (value: any): number | null => {
-    if (value == null || value === '') return null;
-    const n = Number(value);
-    return Number.isFinite(n) ? n : null;
+  const recordSource = careerStats?.source === 'profile'
+    ? '補充馬匹檔案'
+    : careerStats?.source === 'horse_form_records'
+      ? '完整馬匹歷史賽績'
+      : careerStats?.source === 'race_results'
+        ? '標準化賽果紀錄'
+        : null;
+  const record = careerStats ? {
+    wins: careerStats.totalWins,
+    seconds: careerStats.totalSeconds,
+    thirds: careerStats.totalThirds,
+    totalStarts: careerStats.totalStarts,
+  } : {
+    wins: null,
+    seconds: null,
+    thirds: null,
+    totalStarts: null,
   };
-  const isWithdrawn = (row: any): boolean => {
-    const raw = String(row.finishing_position ?? '').trim().toUpperCase();
-    return /^(WV|WD|SCR|WITHDRAW)/.test(raw);
-  };
-  const deriveRecord = (rows: any[]): { wins: number; seconds: number; thirds: number; totalStarts: number } | null => {
-    const starts = rows.filter((row) => {
-      if (isWithdrawn(row)) return false;
-      const raw = String(row.finishing_position ?? '').trim();
-      const position = Number(row.pos);
-      return raw !== '' || (Number.isFinite(position) && position > 0);
-    });
-    if (starts.length === 0) return null;
-    return {
-      wins: starts.filter((row) => Number(row.pos) === 1).length,
-      seconds: starts.filter((row) => Number(row.pos) === 2).length,
-      thirds: starts.filter((row) => Number(row.pos) === 3).length,
-      totalStarts: starts.length,
-    };
-  };
-  const profileStarts = numericOrNull(profileExtra?.record_total_starts);
-  const hfrRecord = deriveRecord(hfrCareerPerfRows);
-  const baseStarts = numericOrNull(horse.total_starts);
-  const rrRecord = deriveRecord(rrCareerPerfRows);
-  let recordSource: string | null = null;
-  let record: { wins: number | null; seconds: number | null; thirds: number | null; totalStarts: number | null };
-  if (profileStarts != null && profileStarts > 0) {
-    recordSource = '補充馬匹檔案';
-    record = {
-      wins: numericOrNull(profileExtra.record_wins),
-      seconds: numericOrNull(profileExtra.record_seconds),
-      thirds: numericOrNull(profileExtra.record_thirds),
-      totalStarts: profileStarts,
-    };
-  } else if (hfrRecord) {
-    recordSource = '完整馬匹歷史賽績';
-    record = hfrRecord;
-  } else if (baseStarts != null && baseStarts > 0) {
-    recordSource = '馬匹基本資料';
-    record = {
-      wins: numericOrNull(horse.total_wins),
-      seconds: null,
-      thirds: null,
-      totalStarts: baseStarts,
-    };
-  } else if (rrRecord) {
-    recordSource = '標準化賽果紀錄';
-    record = rrRecord;
-  } else {
-    record = { wins: null, seconds: null, thirds: null, totalStarts: null };
-  }
 
   const halfSiblingsRaw = profileExtra?.half_siblings ?? null;
   let halfSiblings: unknown = halfSiblingsRaw;
@@ -1330,9 +1341,15 @@ horsesRoutes.get('/search/query', async (c) => {
   }
 
   const { results } = await c.env.DB.prepare(`
-    SELECT * FROM horses
-    WHERE name_ch LIKE ? OR name_en LIKE ? OR code LIKE ?
-    ORDER BY total_starts DESC
+    ${HORSE_CAREER_STATS_CTE}
+    SELECT h.*, cs.total_wins AS verified_wins,
+           cs.total_seconds AS verified_seconds,
+           cs.total_thirds AS verified_thirds,
+           cs.total_starts AS verified_starts
+    FROM horses h
+    LEFT JOIN career_stats cs ON cs.horse_id = h.id
+    WHERE h.name_ch LIKE ? OR h.name_en LIKE ? OR h.code LIKE ?
+    ORDER BY cs.total_starts IS NULL, cs.total_starts DESC
     LIMIT 20
   `).bind(`%${q}%`, `%${q}%`, `%${q}%`).all();
 
@@ -1343,8 +1360,10 @@ horsesRoutes.get('/search/query', async (c) => {
       nameCh: h.name_ch,
       code: h.code,
       currentRating: h.current_rating,
-      totalWins: h.total_wins,
-      totalStarts: h.total_starts,
+      totalWins: h.verified_wins ?? null,
+      totalSeconds: h.verified_seconds ?? null,
+      totalThirds: h.verified_thirds ?? null,
+      totalStarts: h.verified_starts ?? null,
       status: h.status,
     })),
   });

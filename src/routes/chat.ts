@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import type { Env, ChatRequest } from '../types';
 import { racingChat, parseUserIntent } from '../services/ai';
+import { getHorseCareerStats } from '../lib/horse-career-stats';
 
 export const chatRoutes = new Hono<{ Bindings: Env }>();
 
@@ -124,7 +125,7 @@ chatRoutes.post('/', async (c) => {
           const { results: entries } = await c.env.DB.prepare(`
             SELECT
               rr.*, h.name_en, h.name_ch, h.code, h.sire, h.dam, h.current_rating,
-              h.total_starts, h.total_wins, h.country_of_origin AS country, h.sex,
+              h.country_of_origin AS country, h.sex,
               j.name_en AS jockey_en, j.name_ch AS jockey_ch,
               t.name_en AS trainer_en, t.name_ch AS trainer_ch
             FROM race_results rr
@@ -134,6 +135,10 @@ chatRoutes.post('/', async (c) => {
             WHERE rr.race_id = ?
             ORDER BY rr.horse_number
           `).bind(race.id).all();
+          const entryCareerStats = await getHorseCareerStats(
+            c.env.DB,
+            ((entries ?? []) as any[]).map((e: any) => e.horse_id),
+          );
 
           availability.horsesFound += entries?.length ?? 0;
 
@@ -267,8 +272,8 @@ chatRoutes.post('/', async (c) => {
                 rating: e.current_rating,
                 sire: e.sire,
                 dam: e.dam,
-                totalStarts: e.total_starts,
-                totalWins: e.total_wins,
+                totalStarts: entryCareerStats.get(e.horse_id)?.totalStarts ?? null,
+                totalWins: entryCareerStats.get(e.horse_id)?.totalWins ?? null,
                 country: e.country,
                 sex: e.sex,
                 // 🆕 因子可用性（FTS 等）
@@ -303,6 +308,7 @@ chatRoutes.post('/', async (c) => {
         ).bind(`%${intent.horseName}%`, `%${intent.horseName}%`).first<any>();
 
         if (horse) {
+          const horseCareerStats = (await getHorseCareerStats(c.env.DB, [horse.id])).get(horse.id) ?? null;
           // 盲測模式下，近績必須嚴格 < targetDate，杜絕「未來數據」洩漏
           const formCutoff = mode === 'blind_prediction' ? targetDate : '9999-12-31';
 
@@ -343,8 +349,8 @@ chatRoutes.post('/', async (c) => {
               nameCh: horse.name_ch,
               nameEn: horse.name_en,
               currentRating: horse.current_rating,
-              totalStarts: horse.total_starts,
-              totalWins: horse.total_wins,
+              totalStarts: horseCareerStats?.totalStarts ?? null,
+              totalWins: horseCareerStats?.totalWins ?? null,
               sire: horse.sire,
               dam: horse.dam,
               damSire: horse.dam_sire,

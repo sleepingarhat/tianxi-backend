@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import type { Env } from '../types';
 import { hhmmFromPostTime, fetchPostTimeMap } from '../lib/race-time';
+import { getHorseCareerStats } from '../lib/horse-career-stats';
 
 export const racesRoutes = new Hono<{ Bindings: Env }>();
 
@@ -26,7 +27,7 @@ racesRoutes.get('/:id', async (c) => {
     SELECT
       rr.*,
       h.name_en, h.name_ch, h.code, h.sire, h.dam, h.dam_sire,
-      h.current_rating, h.age, h.sex, h.total_wins, h.total_starts,
+      h.current_rating, h.age, h.sex,
       j.name_en AS jockey_en, j.name_ch AS jockey_ch,
       t.name_en AS trainer_en, t.name_ch AS trainer_ch
     FROM race_results rr
@@ -36,6 +37,10 @@ racesRoutes.get('/:id', async (c) => {
     WHERE rr.race_id = ?
     ORDER BY COALESCE(rr.finishing_position, 999) ASC
   `).bind(id).all();
+  const careerStats = await getHorseCareerStats(
+    c.env.DB,
+    (entries ?? []).map((entry: any) => entry.horse_id),
+  );
 
   // 分段時間
   const { results: sectionals } = await c.env.DB.prepare(
@@ -92,8 +97,10 @@ racesRoutes.get('/:id', async (c) => {
       damSire: e.dam_sire,
       age: e.age,
       sex: e.sex,
-      totalWins: e.total_wins,
-      totalStarts: e.total_starts,
+      totalWins: careerStats.get(e.horse_id)?.totalWins ?? null,
+      totalSeconds: careerStats.get(e.horse_id)?.totalSeconds ?? null,
+      totalThirds: careerStats.get(e.horse_id)?.totalThirds ?? null,
+      totalStarts: careerStats.get(e.horse_id)?.totalStarts ?? null,
     })),
     sectionalTimes: (sectionals ?? []).map((s: any) => ({
       section: s.section_number,
@@ -151,6 +158,10 @@ racesRoutes.get('/:id/entries', async (c) => {
     WHERE rr.race_id = ?
     ORDER BY rr.horse_number ASC
   `).bind(id).all<any>();
+  const entryCareerStats = await getHorseCareerStats(
+    c.env.DB,
+    (entries ?? []).map((entry: any) => entry.horse_id),
+  );
 
   return c.json({
     race: {
@@ -188,6 +199,10 @@ racesRoutes.get('/:id/entries', async (c) => {
       age: e.age,
       sex: e.sex,
       gear: e.gear,
+      totalWins: entryCareerStats.get(e.horse_id)?.totalWins ?? null,
+      totalSeconds: entryCareerStats.get(e.horse_id)?.totalSeconds ?? null,
+      totalThirds: entryCareerStats.get(e.horse_id)?.totalThirds ?? null,
+      totalStarts: entryCareerStats.get(e.horse_id)?.totalStarts ?? null,
     })),
   });
 });
