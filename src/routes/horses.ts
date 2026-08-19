@@ -372,7 +372,7 @@ horsesRoutes.get('/:id/research', async (c) => {
     commentsResult,     // running_comments for the form window race_ids
     eloLatestResult,
     eloHistoryResult,
-    careerPerfResult,   // full career aggregates from horse_form_records
+    careerPerfResult,   // full career starts from horse_form_records
     rrCareerPerfResult, // full career fallback from race_results
     trackworkResult,
     trialsResult,
@@ -469,38 +469,33 @@ horsesRoutes.get('/:id/research', async (c) => {
        ORDER BY as_of_date ASC`
     ).bind(horseId).all<any>(),
 
-    // 2h. Full-career performance aggregates from horse_form_records (preferred)
-    //     Returns pre-grouped rows for distance/going/track/draw — one query, no N+1.
-    //     We pull all valid starts (finishing_position_num 1..998) for this horse.
+    // 2h. Date-unbounded career starts from horse_form_records (preferred).
+    //     Includes non-finishers so record and performance can apply separate
+    //     truthful boundaries from one authoritative snapshot.
     c.env.DB.prepare(`
       SELECT
         race_date AS date, venue, race_id, race_number, horse_number,
         distance, going, track, draw,
         jockey_name,
+        finishing_position,
         finishing_position_num AS pos
       FROM horse_form_records
       WHERE horse_id = ?
-        AND finishing_position_num IS NOT NULL
-        AND finishing_position_num > 0
-        AND finishing_position_num < 999
     `).bind(horseId).all<any>().catch(() => ({ results: [] as any[] })),
 
-    // 2i. Full-career fallback from race_results. This query is intentionally
-    //     date-unbounded so performance never silently degrades to recentForm.
+    // 2i. Date-unbounded full-career fallback from race_results.
     c.env.DB.prepare(`
       SELECT
         rm.date, rm.venue, rr.race_id, r.race_number, rr.horse_number,
         r.distance, r.going, r.track, rr.draw,
         COALESCE(j.name_ch, j.name_en) AS jockey_name,
+        CAST(rr.finishing_position AS TEXT) AS finishing_position,
         rr.finishing_position AS pos
       FROM race_results rr
       JOIN races r ON r.id = rr.race_id
       JOIN race_meetings rm ON rm.id = r.meeting_id
       LEFT JOIN jockeys j ON j.id = rr.jockey_id
       WHERE rr.horse_id = ?
-        AND rr.finishing_position IS NOT NULL
-        AND rr.finishing_position > 0
-        AND rr.finishing_position < 999
     `).bind(horseId).all<any>().catch(() => ({ results: [] as any[] })),
 
     // 2j. trackwork (v2: horse_trackwork, most recent 15)
@@ -609,6 +604,10 @@ horsesRoutes.get('/:id/research', async (c) => {
     const n = Number(value);
     return Number.isInteger(n) && n >= 1 && n <= 20;
   };
+  const carryingWeight = (value: any): number | null => {
+    const n = Number(value);
+    return Number.isFinite(n) && n >= 80 && n <= 180 ? n : null;
+  };
   const rrByDateVenue = new Map<string, any>();
   for (const row of rrRows) rrByDateVenue.set(rowKey(row), row);
 
@@ -666,9 +665,10 @@ horsesRoutes.get('/:id/research', async (c) => {
   const eloLatest: any     = eloLatestResult.status === 'fulfilled'          ? eloLatestResult.value                 : null;
   const eloHistoryRows: any[] = eloHistoryResult.status === 'fulfilled'      ? (eloHistoryResult.value?.results ?? []) : [];
   const hfrCareerPerfRawRows: any[] = careerPerfResult.status === 'fulfilled' ? (careerPerfResult.value?.results ?? []) : [];
-  const rrCareerPerfRows: any[] = rrCareerPerfResult.status === 'fulfilled'  ? (rrCareerPerfResult.value?.results ?? []) : [];
+  const rrCareerPerfRawRows: any[] = rrCareerPerfResult.status === 'fulfilled' ? (rrCareerPerfResult.value?.results ?? []) : [];
   const rrCareerByDateVenue = new Map<string, any>();
-  for (const row of rrCareerPerfRows) rrCareerByDateVenue.set(rowKey(row), row);
+  for (const row of rrCareerPerfRawRows) rrCareerByDateVenue.set(rowKey(row), row);
+  const rrCareerPerfRows: any[] = Array.from(rrCareerByDateVenue.values());
   const hfrCareerPerfRows: any[] = [];
   if (hfrCareerPerfRawRows.length > 0) {
     const grouped = new Map<string, any[]>();
@@ -688,6 +688,7 @@ horsesRoutes.get('/:id/research', async (c) => {
         track: firstPresent(group, 'track') ?? rr?.track ?? null,
         draw: rr?.draw ?? firstPresent(group, 'draw'),
         jockey_name: rr?.jockey_name ?? firstPresent(group, 'jockey_name'),
+        finishing_position: firstPresent(group, 'finishing_position') ?? rr?.finishing_position ?? null,
         pos: firstPresent(group, 'pos') ?? rr?.pos ?? null,
       });
     }
@@ -735,16 +736,64 @@ horsesRoutes.get('/:id/research', async (c) => {
   // current trainer: from trainers table via current_trainer_id (do NOT infer from last ride)
   const currentTrainer = trainerRow ? (trainerRow.name_ch || trainerRow.name_en || null) : null;
 
-  // Base totals default to zero in schema.sql, so zero is only considered
-  // trustworthy when the enriched profile explicitly supplied the record.
-  const baseTotalStarts = Number(horse.total_starts) > 0 ? horse.total_starts : null;
-  const record = {
-    wins: profileExtra?.record_wins
-      ?? (baseTotalStarts != null ? (horse.total_wins ?? 0) : null),
-    seconds: profileExtra?.record_seconds ?? null,
-    thirds: profileExtra?.record_thirds ?? null,
-    totalStarts: profileExtra?.record_total_starts ?? baseTotalStarts,
+  // Build all career-record fields from one authoritative snapshot. HFR can
+  // distinguish withdrawals (not a start) from PU/DNF/F/UR outcomes (starts
+  // without a placing), so it is preferred over the potentially stale base row.
+  const numericOrNull = (value: any): number | null => {
+    if (value == null || value === '') return null;
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
   };
+  const isWithdrawn = (row: any): boolean => {
+    const raw = String(row.finishing_position ?? '').trim().toUpperCase();
+    return /^(WV|WD|SCR|WITHDRAW)/.test(raw);
+  };
+  const deriveRecord = (rows: any[]): { wins: number; seconds: number; thirds: number; totalStarts: number } | null => {
+    const starts = rows.filter((row) => {
+      if (isWithdrawn(row)) return false;
+      const raw = String(row.finishing_position ?? '').trim();
+      const position = Number(row.pos);
+      return raw !== '' || (Number.isFinite(position) && position > 0);
+    });
+    if (starts.length === 0) return null;
+    return {
+      wins: starts.filter((row) => Number(row.pos) === 1).length,
+      seconds: starts.filter((row) => Number(row.pos) === 2).length,
+      thirds: starts.filter((row) => Number(row.pos) === 3).length,
+      totalStarts: starts.length,
+    };
+  };
+  const profileStarts = numericOrNull(profileExtra?.record_total_starts);
+  const hfrRecord = deriveRecord(hfrCareerPerfRows);
+  const baseStarts = numericOrNull(horse.total_starts);
+  const rrRecord = deriveRecord(rrCareerPerfRows);
+  let recordSource: string | null = null;
+  let record: { wins: number | null; seconds: number | null; thirds: number | null; totalStarts: number | null };
+  if (profileStarts != null && profileStarts > 0) {
+    recordSource = 'horse_profile_extra';
+    record = {
+      wins: numericOrNull(profileExtra.record_wins),
+      seconds: numericOrNull(profileExtra.record_seconds),
+      thirds: numericOrNull(profileExtra.record_thirds),
+      totalStarts: profileStarts,
+    };
+  } else if (hfrRecord) {
+    recordSource = 'horse_form_records';
+    record = hfrRecord;
+  } else if (baseStarts != null && baseStarts > 0) {
+    recordSource = 'horses';
+    record = {
+      wins: numericOrNull(horse.total_wins),
+      seconds: null,
+      thirds: null,
+      totalStarts: baseStarts,
+    };
+  } else if (rrRecord) {
+    recordSource = 'race_results';
+    record = rrRecord;
+  } else {
+    record = { wins: null, seconds: null, thirds: null, totalStarts: null };
+  }
 
   const halfSiblingsRaw = profileExtra?.half_siblings ?? null;
   let halfSiblings: unknown = halfSiblingsRaw;
@@ -808,7 +857,7 @@ horsesRoutes.get('/:id/research', async (c) => {
       totalRunners:    f.total_runners   ?? null,
       horseNumber:     f.horse_number    ?? null,
       draw:            f.draw            ?? null,
-      actualWeight:    f.actual_weight   ?? null,
+      actualWeight:    carryingWeight(f.actual_weight),
       jockey:          f.jockey_name     ?? null,
       trainer:         f.trainer_name    ?? null,
       lbw:             f.lbw             ?? null,
@@ -869,11 +918,14 @@ horsesRoutes.get('/:id/research', async (c) => {
   interface PerfRow { starts: number; wins: number; top3: number }
 
   // careerPerfRows column names: distance, going, track, draw, jockey_name, pos
-  const hasCareerData = careerPerfRows.length > 0;
-  const perfSource = useHfrCareerPerf
-    ? 'horse_form_records (全職業生涯)'
-    : (rrCareerPerfRows.length > 0 ? 'race_results (全職業生涯)' : null);
-  const perfRows: any[] = hasCareerData ? careerPerfRows : [];
+  const perfRows: any[] = careerPerfRows.filter((row: any) => {
+    const position = Number(row.pos);
+    return Number.isFinite(position) && position > 0 && position < 999;
+  });
+  const hasCareerData = perfRows.length > 0;
+  const perfSource = hasCareerData
+    ? (useHfrCareerPerf ? 'horse_form_records (全職業生涯)' : 'race_results (全職業生涯)')
+    : null;
   const perfPos = (r: any): number => r.pos;
   const perfTotal = perfRows.length;
 
@@ -1142,7 +1194,12 @@ horsesRoutes.get('/:id/research', async (c) => {
       draw:          e.draw         ?? null,
       jockey:        e.jockey_name  ?? null,
       trainer:       e.trainer_name ?? null,
-      actualWeight:  e.actual_weight  ?? null,
+      // entries_upcoming stores carrying weight in declared_weight, while
+      // race_results stores it in actual_weight. Normalize both to one public
+      // carrying-weight field and reject body-weight-scale values.
+      actualWeight:  raceCtxRaw.source === 'upcoming'
+        ? carryingWeight(e.declared_weight)
+        : carryingWeight(e.actual_weight),
       gear:          e.gear         ?? null,
       rating:        e.rating       ?? null,
     };
@@ -1185,6 +1242,7 @@ horsesRoutes.get('/:id/research', async (c) => {
       `performance 統計來源：${perfSource}。`,
       `performance 邊界：recentForm 顯示視窗最多 ${formLimit} 場；表現統計使用獨立、日期不設限的全生涯查詢。`,
     ] : []),
+    `生涯冠亞季／出賽來源：${recordSource ?? '無可核實資料'}；所有欄位採用同一資料快照。`,
   ];
 
   const metaSection = {
@@ -1196,7 +1254,7 @@ horsesRoutes.get('/:id/research', async (c) => {
       formStarts:       formRows.length,
       commentsRows:     commentsRows.length,
       eloHistoryPoints: eloHistoryRows.length,
-      careerPerfStarts: careerPerfRows.length,
+      careerPerfStarts: perfRows.length,
       trackworkSessions: trackworkRows.length,
       barrierTrials:    trialRows.length,
       injuryRecords:    injuryRows.length,
