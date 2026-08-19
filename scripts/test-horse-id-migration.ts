@@ -54,10 +54,12 @@ const finalize = readFileSync(
 
 db.exec(prepare);
 const tables = db.prepare(
-  `SELECT DISTINCT schema.name
-   FROM sqlite_master AS schema
-   JOIN pragma_table_info(schema.name) AS column
-   WHERE schema.type = 'table' AND column.name = 'horse_id'`,
+  `SELECT name
+   FROM sqlite_master
+   WHERE type = 'table'
+     AND name <> '_horse_id_migration'
+     AND sql LIKE '%horse_id%'
+   ORDER BY name`,
 ).all() as Array<{ name: string }>;
 for (const { name } of tables) {
   const table = `"${name.replace(/"/g, '""')}"`;
