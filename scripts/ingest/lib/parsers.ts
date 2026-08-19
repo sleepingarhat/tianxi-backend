@@ -90,13 +90,20 @@ export function normalizeVenue(s: string | undefined | null): string | null {
   return s;
 }
 
-// '已退役' → 'retired', '已離港' → 'departed', else 'active'
+// Public fixed-profile lifecycle labels.
 export function normalizeStatus(s: string | undefined | null): string {
   if (!s) return 'unknown';
   if (s.includes('退役')) return 'retired';
   if (s.includes('離港')) return 'departed';
   if (s.includes('死亡')) return 'deceased';
-  if (s === 'active' || s === 'retired' || s === 'departed' || s === 'deceased') return s;
+  if (s.includes('取消登記')) return 'inactive';
+  if (
+    s === 'active'
+    || s === 'inactive'
+    || s === 'retired'
+    || s === 'departed'
+    || s === 'deceased'
+  ) return s;
   return 'active';
 }
 

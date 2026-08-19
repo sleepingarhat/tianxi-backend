@@ -27,6 +27,10 @@ function main() {
   const dbPath = resolve(arg('db', 'bulk-local.db'));
   const outDir = resolve(arg('out', '/tmp/d1-delta'));
   const since = arg('since', '2026-04-16');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(since)) {
+    console.error(`invalid --since date: ${since}`);
+    process.exit(2);
+  }
 
   rmSync(outDir, { recursive: true, force: true });
   mkdirSync(outDir, { recursive: true });
@@ -87,6 +91,10 @@ function main() {
     horseRefs.push(`SELECT DISTINCT horse_id FROM horse_trackwork WHERE trackwork_date >= '${since}'`);
     horseRefs.push(`SELECT DISTINCT horse_id FROM horse_injury WHERE injury_date >= '${since}'`);
     horseRefs.push(`SELECT DISTINCT horse_id FROM horse_form_records WHERE race_date >= '${since}'`);
+    horseRefs.push(
+      `SELECT DISTINCT horse_id FROM horse_profile_extra
+       WHERE substr(COALESCE(profile_checked_at, profile_last_scraped, ''), 1, 10) >= '${since}'`,
+    );
   }
   if (wantElo) {
     // ELO snapshots store bare codes (K059). Prefix to 'horse_K059' to match horses.id.
@@ -134,6 +142,10 @@ function main() {
   }
 
   if (wantPoolA) {
+    plan.push({
+      table: 'horse_profile_extra',
+      where: `substr(COALESCE(profile_checked_at, profile_last_scraped, ''), 1, 10) >= '${since}'`,
+    });
     plan.push({ table: 'horse_trackwork',    where: `trackwork_date >= '${since}'` });
     plan.push({ table: 'horse_injury',       where: `injury_date    >= '${since}'` });
     plan.push({ table: 'horse_form_records', where: `race_date      >= '${since}'` });
@@ -169,6 +181,9 @@ function main() {
     horse_trackwork: { horse_id: 'horse_' },
     horse_injury: { horse_id: 'horse_' },
     horse_form_records: { horse_id: 'horse_' },
+    // Profiles are canonical after ingest; keep this as a final guard for
+    // legacy scratch databases that still contain a bare HKJC code.
+    horse_profile_extra: { horse_id: 'horse_' },
     // Entries ingest writes bare code (E436) into horse_id; prefix for FK.
     entries_upcoming: { horse_id: 'horse_' },
   };
@@ -250,7 +265,8 @@ function main() {
           const vals = cols.map(c => {
             const v = r[c];
             if (prefixMap[c] && v !== null && v !== undefined) {
-              return esc(`${prefixMap[c]}${v}`);
+              const text = String(v);
+              return esc(text.startsWith(prefixMap[c]) ? text : `${prefixMap[c]}${text}`);
             }
             return esc(v);
           });

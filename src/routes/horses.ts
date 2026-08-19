@@ -366,6 +366,7 @@ horsesRoutes.get('/:id/research', async (c) => {
 
   const [
     profileExtraResult,
+    pedigreeResult,
     trainerNameResult,
     hfrFormResult,      // preferred: horse_form_records (horse-centric, has total_runners, raw pos, finish_time_sec)
     rrFormResult,       // fallback:  race_results join
@@ -382,17 +383,29 @@ horsesRoutes.get('/:id/research', async (c) => {
   ] = await Promise.allSettled([
     // 2a. horse_profile_extra (v2 enrichment) — also pulls country_of_origin, import_type, last_rating
     c.env.DB.prepare(
-      `SELECT last_race_date, owner, half_siblings, total_stakes_int,
+      `SELECT last_race_date, current_trainer, owner, half_siblings, colour_sex_raw,
+              season_stakes_int, total_stakes_int,
               record_wins, record_seconds, record_thirds, record_total_starts,
               sire, dam, dam_sire,
-              country_of_origin, import_type, last_rating, status AS profile_status
+              country_of_origin, import_type, last_rating, status AS profile_status,
+              profile_last_scraped, profile_checked_at, source_commit
        FROM horse_profile_extra
        WHERE horse_id = ? OR horse_id = ?
        ORDER BY CASE WHEN horse_id = ? THEN 0 ELSE 1 END
        LIMIT 1`
     ).bind(horseId, horse.code, horseId).first<any>(),
 
-    // 2b. current trainer name (via current_trainer_id on horses table)
+    // 2b. Canonical pedigree table is a compatibility fallback when an older
+    // profile ingestion missed horse_profile_extra because of id-prefix drift.
+    c.env.DB.prepare(
+      `SELECT sire, dam, dam_sire
+       FROM horse_pedigree
+       WHERE horse_id = ? OR code = ?
+       ORDER BY CASE WHEN horse_id = ? THEN 0 ELSE 1 END
+       LIMIT 1`
+    ).bind(horseId, horse.code, horseId).first<any>(),
+
+    // 2c. current trainer name (via current_trainer_id on horses table)
     horse.current_trainer_id
       ? c.env.DB.prepare(
           `SELECT name_ch, name_en FROM trainers WHERE id = ?`
@@ -590,6 +603,7 @@ horsesRoutes.get('/:id/research', async (c) => {
 
   // ── 3. Unpack settled results ─────────────────────────────────────────────
   const profileExtra: any  = profileExtraResult.status === 'fulfilled'      ? profileExtraResult.value              : null;
+  const pedigree: any      = pedigreeResult.status === 'fulfilled'           ? pedigreeResult.value                  : null;
   const trainerRow: any    = trainerNameResult.status === 'fulfilled'        ? trainerNameResult.value               : null;
   // Prefer horse_form_records; fall back to race_results join if empty/failed
   const hfrRows: any[]     = hfrFormResult.status === 'fulfilled'            ? (hfrFormResult.value?.results ?? [])  : [];
@@ -724,17 +738,24 @@ horsesRoutes.get('/:id/research', async (c) => {
 
   // ── 5. horse section ──────────────────────────────────────────────────────
   // Merge base horses row + profile_extra. profile_extra wins on enriched fields.
-  const sire    = profileExtra?.sire    ?? horse.sire    ?? null;
-  const dam     = profileExtra?.dam     ?? horse.dam     ?? null;
-  const damSire = profileExtra?.dam_sire ?? horse.dam_sire ?? null;
+  const sire    = profileExtra?.sire     ?? pedigree?.sire     ?? horse.sire     ?? null;
+  const dam     = profileExtra?.dam      ?? pedigree?.dam      ?? horse.dam      ?? null;
+  const damSire = profileExtra?.dam_sire ?? pedigree?.dam_sire ?? horse.dam_sire ?? null;
   // country_of_origin: profile_extra has explicit column, horses table also has it; coalesce truthfully
   const countryOfOrigin = profileExtra?.country_of_origin ?? horse.country_of_origin ?? null;
   // import_type: profile_extra may have human-readable version
   const importType = profileExtra?.import_type ?? horse.import_type ?? null;
+  const [profileColour, profileSex] = String(profileExtra?.colour_sex_raw ?? '')
+    .split('/')
+    .map((value) => value.trim());
+  const colour = horse.colour ?? (profileColour || null);
+  const sex = horse.sex ?? (profileSex || null);
   // last_race_date: prefer profile_extra explicit date
   const lastRaceDate = profileExtra?.last_race_date ?? (formRows.length > 0 ? formRows[0].date : null);
-  // current trainer: from trainers table via current_trainer_id (do NOT infer from last ride)
-  const currentTrainer = trainerRow ? (trainerRow.name_ch || trainerRow.name_en || null) : null;
+  // HKJC fixed profile is authoritative; trainer relation is a display fallback.
+  // Never infer current trainer from the latest ride.
+  const currentTrainer = profileExtra?.current_trainer
+    ?? (trainerRow ? (trainerRow.name_ch || trainerRow.name_en || null) : null);
 
   // Build all career-record fields from one authoritative snapshot. HFR can
   // distinguish withdrawals (not a start) from PU/DNF/F/UR outcomes (starts
@@ -814,8 +835,8 @@ horsesRoutes.get('/:id/research', async (c) => {
     nameCh:          horse.name_ch    ?? null,
     status:          profileExtra?.profile_status ?? horse.status,
     countryOfOrigin,
-    colour:          horse.colour     ?? null,
-    sex:             horse.sex        ?? null,
+    colour,
+    sex,
     importType,
     currentTrainer,
     owner:           profileExtra?.owner ?? null,
@@ -827,7 +848,8 @@ horsesRoutes.get('/:id/research', async (c) => {
     halfSiblings,
     currentRating:   horse.current_rating ?? profileExtra?.last_rating ?? null,
     lastRating:      profileExtra?.last_rating   ?? null,
-    seasonStakes:    Number(horse.season_stakes) > 0 ? horse.season_stakes : null,
+    seasonStakes:    profileExtra?.season_stakes_int
+      ?? (Number(horse.season_stakes) > 0 ? horse.season_stakes : null),
     totalStakes:     profileExtra?.total_stakes_int ?? null,
     record,
     lastRaceDate,
@@ -1214,10 +1236,12 @@ horsesRoutes.get('/:id/research', async (c) => {
   if (injuryRows.length > 0 && injuryRows[0].injury_date) allDates.push(injuryRows[0].injury_date as string);
   if (eloLatest?.as_of_date) allDates.push(eloLatest.as_of_date as string);
   if (profileExtra?.last_race_date) allDates.push(profileExtra.last_race_date as string);
+  if (profileExtra?.profile_last_scraped) allDates.push(profileExtra.profile_last_scraped as string);
   const dataAsOf = allDates.length > 0 ? allDates.sort().reverse()[0] : null;
 
   const sources: string[] = ['馬匹基本資料'];
-  if (profileExtra)                   sources.push('補充馬匹檔案');
+  if (profileExtra)                   sources.push('香港賽馬會公開馬匹資料');
+  if (!profileExtra && pedigree)      sources.push('香港賽馬會公開血統資料');
   if (eloLatest)                      sources.push('天喜 Elo 歷史評分');
   if (formRows.length > 0)            sources.push(formSource);
   if (useHfrCareerPerf)               sources.push('完整馬匹歷史賽績');
@@ -1248,6 +1272,26 @@ horsesRoutes.get('/:id/research', async (c) => {
     generatedAt: new Date().toISOString(),
     dataAsOf,
     sources: Array.from(new Set(sources)),
+    profile: profileExtra ? {
+      source: '香港賽馬會公開馬匹資料',
+      sourceUrl: `https://racing.hkjc.com/racing/information/Chinese/Horse/Horse.aspx?HorseNo=${encodeURIComponent(horse.code ?? id)}`,
+      dataAsOf: profileExtra.profile_last_scraped ?? null,
+      checkedAt: profileExtra.profile_checked_at ?? null,
+      sourceCommit: profileExtra.source_commit ?? null,
+      availableFields: [
+        countryOfOrigin ? 'countryOfOrigin' : null,
+        colour ? 'colour' : null,
+        sex ? 'sex' : null,
+        importType ? 'importType' : null,
+        currentTrainer ? 'currentTrainer' : null,
+        profileExtra.owner ? 'owner' : null,
+        sire ? 'sire' : null,
+        dam ? 'dam' : null,
+        damSire ? 'damSire' : null,
+        profileExtra.season_stakes_int != null || Number(horse.season_stakes) > 0 ? 'seasonStakes' : null,
+        profileExtra.total_stakes_int != null ? 'totalStakes' : null,
+      ].filter(Boolean),
+    } : null,
     coverageNotes,
     counts: {
       formStarts:       formRows.length,

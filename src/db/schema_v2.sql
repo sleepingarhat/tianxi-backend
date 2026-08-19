@@ -20,12 +20,15 @@ CREATE TABLE IF NOT EXISTS horse_profile_extra (
   country_of_origin TEXT,              -- 出生地 (AUS/IRE/NZ 等)
   colour_sex_raw TEXT,                 -- 毛色___性別 原文
   import_type TEXT,                    -- 進口類別 (自購馬/私人購買馬/國際拍賣馬)
+  season_stakes_raw TEXT,              -- 今季獎金原文；NULL 與公開 $0 必須分開
+  season_stakes_int INTEGER,           -- 今季獎金 normalized
   total_stakes_raw TEXT,               -- 總獎金 原文含 '$' + 逗號
   total_stakes_int INTEGER,            -- normalized
   record_wins INTEGER,                 -- 冠
   record_seconds INTEGER,              -- 亞
   record_thirds INTEGER,               -- 季
   record_total_starts INTEGER,         -- 總出賽次數
+  current_trainer TEXT,                -- HKJC profile 明示現任練馬師
   owner TEXT,                          -- 馬主
   last_rating REAL,                    -- 最後評分
   sire TEXT,                           -- 父系
@@ -33,6 +36,7 @@ CREATE TABLE IF NOT EXISTS horse_profile_extra (
   dam_sire TEXT,                       -- 外祖父
   half_siblings TEXT,                  -- 同父系馬
   profile_last_scraped TEXT,           -- Replit 抓取日
+  profile_checked_at TEXT,             -- 最近一次官方頁檢查時間（即使部分刷新）
   source_commit TEXT,
   ingested_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))
