@@ -386,8 +386,11 @@ horsesRoutes.get('/:id/research', async (c) => {
               record_wins, record_seconds, record_thirds, record_total_starts,
               sire, dam, dam_sire,
               country_of_origin, import_type, last_rating, status AS profile_status
-       FROM horse_profile_extra WHERE horse_id = ?`
-    ).bind(horseId).first<any>(),
+       FROM horse_profile_extra
+       WHERE horse_id = ? OR horse_id = ?
+       ORDER BY CASE WHEN horse_id = ? THEN 0 ELSE 1 END
+       LIMIT 1`
+    ).bind(horseId, horse.code, horseId).first<any>(),
 
     // 2b. current trainer name (via current_trainer_id on horses table)
     horse.current_trainer_id
@@ -417,7 +420,7 @@ horsesRoutes.get('/:id/research', async (c) => {
       WHERE hfr.horse_id = ?
       ORDER BY hfr.race_date DESC, hfr.race_number DESC
       LIMIT ?
-    `).bind(horseId, formLimit).all<any>(),
+    `).bind(horseId, formLimit * 3).all<any>(),
 
     // 2d. Fallback: race_results join (used if horse_form_records unavailable/empty)
     c.env.DB.prepare(`
@@ -471,6 +474,7 @@ horsesRoutes.get('/:id/research', async (c) => {
     //     We pull all valid starts (finishing_position_num 1..998) for this horse.
     c.env.DB.prepare(`
       SELECT
+        race_date AS date, venue, race_id, race_number, horse_number,
         distance, going, track, draw,
         jockey_name,
         finishing_position_num AS pos
@@ -485,11 +489,13 @@ horsesRoutes.get('/:id/research', async (c) => {
     //     date-unbounded so performance never silently degrades to recentForm.
     c.env.DB.prepare(`
       SELECT
+        rm.date, rm.venue, rr.race_id, r.race_number, rr.horse_number,
         r.distance, r.going, r.track, rr.draw,
         COALESCE(j.name_ch, j.name_en) AS jockey_name,
         rr.finishing_position AS pos
       FROM race_results rr
       JOIN races r ON r.id = rr.race_id
+      JOIN race_meetings rm ON rm.id = r.meeting_id
       LEFT JOIN jockeys j ON j.id = rr.jockey_id
       WHERE rr.horse_id = ?
         AND rr.finishing_position IS NOT NULL
@@ -594,13 +600,98 @@ horsesRoutes.get('/:id/research', async (c) => {
   const hfrRows: any[]     = hfrFormResult.status === 'fulfilled'            ? (hfrFormResult.value?.results ?? [])  : [];
   const rrRows: any[]      = rrFormResult.status === 'fulfilled'             ? (rrFormResult.value?.results ?? [])   : [];
   const useHfr             = hfrRows.length > 0;
-  const formRows: any[]    = useHfr ? hfrRows : rrRows;
+  const rowKey = (row: any): string => `${row.date ?? ''}|${row.venue ?? ''}`;
+  const firstPresent = (rows: any[], key: string): any => {
+    const row = rows.find((candidate) => candidate?.[key] != null && candidate[key] !== '');
+    return row ? row[key] : null;
+  };
+  const validMeetingNumber = (value: any): boolean => {
+    const n = Number(value);
+    return Number.isInteger(n) && n >= 1 && n <= 20;
+  };
+  const rrByDateVenue = new Map<string, any>();
+  for (const row of rrRows) rrByDateVenue.set(rowKey(row), row);
+
+  // horse_form_records may contain both a raw race-index row (e.g. race 791,
+  // horse 368) and a normalized matched row for the same horse/date. Collapse
+  // each date+venue to one start, taking race linkage/horse number/carry weight
+  // from normalized race_results and richer class/distance/time from HFR.
+  const mergedHfrRows: any[] = [];
+  if (useHfr) {
+    const grouped = new Map<string, any[]>();
+    for (const row of hfrRows) {
+      const key = rowKey(row);
+      const group = grouped.get(key) ?? [];
+      group.push(row);
+      grouped.set(key, group);
+    }
+    for (const [key, group] of grouped) {
+      const rr = rrByDateVenue.get(key);
+      const linked = group.find((row) => row.race_id)
+        ?? group.find((row) => validMeetingNumber(row.race_number) && validMeetingNumber(row.horse_number))
+        ?? null;
+      mergedHfrRows.push({
+        date: firstPresent(group, 'date'),
+        venue: firstPresent(group, 'venue'),
+        race_id: rr?.race_id ?? linked?.race_id ?? null,
+        race_number: rr?.race_number
+          ?? (validMeetingNumber(linked?.race_number) ? linked.race_number : null),
+        horse_number: rr?.horse_number
+          ?? (validMeetingNumber(linked?.horse_number) ? linked.horse_number : null),
+        race_class: firstPresent(group, 'race_class') ?? rr?.race_class ?? null,
+        distance: firstPresent(group, 'distance') ?? rr?.distance ?? null,
+        going: firstPresent(group, 'going') ?? rr?.going ?? null,
+        track: firstPresent(group, 'track') ?? rr?.track ?? null,
+        course: firstPresent(group, 'course') ?? rr?.course ?? null,
+        draw: rr?.draw ?? firstPresent(group, 'draw'),
+        position_num: firstPresent(group, 'position_num'),
+        finishing_position: firstPresent(group, 'finishing_position'),
+        total_runners: firstPresent(group, 'total_runners'),
+        actual_weight: rr?.actual_weight ?? firstPresent(group, 'actual_weight'),
+        jockey_name: rr?.jockey_name ?? firstPresent(group, 'jockey_name'),
+        trainer_name: rr?.trainer_name ?? firstPresent(group, 'trainer_name'),
+        lbw: firstPresent(group, 'lbw') ?? rr?.lbw ?? null,
+        running_position: firstPresent(group, 'running_position') ?? rr?.running_position ?? null,
+        finish_time_text: firstPresent(group, 'finish_time_text'),
+        finish_time_sec: firstPresent(group, 'finish_time_sec') ?? rr?.finish_time_sec ?? null,
+        win_odds: firstPresent(group, 'win_odds') ?? rr?.win_odds ?? null,
+        gear: firstPresent(group, 'gear') ?? rr?.gear ?? null,
+        rating: firstPresent(group, 'rating') ?? rr?.rating ?? null,
+      });
+    }
+  }
+  const formRows: any[] = (useHfr ? mergedHfrRows : rrRows).slice(0, formLimit);
   const formSource         = useHfr ? 'horse_form_records' : 'race_results';
   const commentsRows: any[] = commentsResult.status === 'fulfilled'          ? (commentsResult.value?.results ?? []) : [];
   const eloLatest: any     = eloLatestResult.status === 'fulfilled'          ? eloLatestResult.value                 : null;
   const eloHistoryRows: any[] = eloHistoryResult.status === 'fulfilled'      ? (eloHistoryResult.value?.results ?? []) : [];
-  const hfrCareerPerfRows: any[] = careerPerfResult.status === 'fulfilled'   ? (careerPerfResult.value?.results ?? []) : [];
+  const hfrCareerPerfRawRows: any[] = careerPerfResult.status === 'fulfilled' ? (careerPerfResult.value?.results ?? []) : [];
   const rrCareerPerfRows: any[] = rrCareerPerfResult.status === 'fulfilled'  ? (rrCareerPerfResult.value?.results ?? []) : [];
+  const rrCareerByDateVenue = new Map<string, any>();
+  for (const row of rrCareerPerfRows) rrCareerByDateVenue.set(rowKey(row), row);
+  const hfrCareerPerfRows: any[] = [];
+  if (hfrCareerPerfRawRows.length > 0) {
+    const grouped = new Map<string, any[]>();
+    for (const row of hfrCareerPerfRawRows) {
+      const key = rowKey(row);
+      const group = grouped.get(key) ?? [];
+      group.push(row);
+      grouped.set(key, group);
+    }
+    for (const [key, group] of grouped) {
+      const rr = rrCareerByDateVenue.get(key);
+      hfrCareerPerfRows.push({
+        date: firstPresent(group, 'date'),
+        venue: firstPresent(group, 'venue'),
+        distance: firstPresent(group, 'distance') ?? rr?.distance ?? null,
+        going: firstPresent(group, 'going') ?? rr?.going ?? null,
+        track: firstPresent(group, 'track') ?? rr?.track ?? null,
+        draw: rr?.draw ?? firstPresent(group, 'draw'),
+        jockey_name: rr?.jockey_name ?? firstPresent(group, 'jockey_name'),
+        pos: firstPresent(group, 'pos') ?? rr?.pos ?? null,
+      });
+    }
+  }
   const useHfrCareerPerf = hfrCareerPerfRows.length > 0;
   const careerPerfRows: any[] = useHfrCareerPerf ? hfrCareerPerfRows : rrCareerPerfRows;
   const trackworkRows: any[] = trackworkResult.status === 'fulfilled'        ? (trackworkResult.value?.results ?? [])  : [];
@@ -718,7 +809,6 @@ horsesRoutes.get('/:id/research', async (c) => {
       horseNumber:     f.horse_number    ?? null,
       draw:            f.draw            ?? null,
       actualWeight:    f.actual_weight   ?? null,
-      declaredWeight:  f.declared_weight ?? null,
       jockey:          f.jockey_name     ?? null,
       trainer:         f.trainer_name    ?? null,
       lbw:             f.lbw             ?? null,
@@ -1035,7 +1125,6 @@ horsesRoutes.get('/:id/research', async (c) => {
     jockey: string | null;
     trainer: string | null;
     actualWeight: number | null;
-    declaredWeight: number | null;
     gear: string | null;
     rating: number | null;
   } | null = null;
@@ -1054,7 +1143,6 @@ horsesRoutes.get('/:id/research', async (c) => {
       jockey:        e.jockey_name  ?? null,
       trainer:       e.trainer_name ?? null,
       actualWeight:  e.actual_weight  ?? null,
-      declaredWeight: e.declared_weight ?? null,
       gear:          e.gear         ?? null,
       rating:        e.rating       ?? null,
     };
