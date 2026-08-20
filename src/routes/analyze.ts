@@ -13,29 +13,11 @@ import {
   projectTopPicksForPublic,
 } from '../lib/public-today-picks';
 import {
-  SESSION_COOKIE,
-  readCookie,
-  verifySession,
+  ADMIN_AUTH_POLICY,
+  hasAdminAccess,
 } from '../lib/admin-auth';
 
 export const analyzeRoutes = new Hono<{ Bindings: Env }>();
-
-export async function hasAdminAccess(c: any): Promise<boolean> {
-  const env = c.env as any;
-  const cookie = readCookie(c.req.header('cookie'), SESSION_COOKIE);
-  if (cookie && env.SESSION_HMAC_SECRET) {
-    const payload = await verifySession(cookie, env.SESSION_HMAC_SECRET);
-    const allowlist = String(env.ADMIN_GITHUB_USER || '')
-      .split(',')
-      .map((login: string) => login.trim())
-      .filter(Boolean);
-    if (payload && allowlist.includes(payload.user)) return true;
-  }
-  const expected = env.ADMIN_TOKEN as string | undefined;
-  const header = c.req.header('authorization') || '';
-  const bearer = header.startsWith('Bearer ') ? header.slice(7) : '';
-  return Boolean(expected && bearer === expected);
-}
 
 function privateRouteUnavailable(c: any) {
   return c.json({ error: 'Not found' }, 404);
@@ -1115,7 +1097,7 @@ export async function computeHitRateStats(db: D1Database, date: string, engine: 
 
 // POST /api/analyze — 因子分析（TimesFM + AI 綜合建議）
 analyzeRoutes.post('/', async (c) => {
-  if (!(await hasAdminAccess(c))) return privateRouteUnavailable(c);
+  if (!(await hasAdminAccess(c, ADMIN_AUTH_POLICY.SESSION_OR_BEARER))) return privateRouteUnavailable(c);
   const body = await c.req.json<AnalyzeRequest>();
   const { raceId, factors } = body;
 
@@ -1773,7 +1755,7 @@ async function computeComposite(
 analyzeRoutes.get('/top-picks', async (c) => {
   const raceId = c.req.query('raceId');
   if (!raceId) return c.json({ error: '請提供 raceId' }, 400);
-  const admin = await hasAdminAccess(c);
+  const admin = await hasAdminAccess(c, ADMIN_AUTH_POLICY.SESSION_OR_BEARER);
   const engine: EloEngine = admin && c.req.query('engine') === 'v11' ? 'v11' : 'v12';
 
   const race = await c.env.DB.prepare(`
@@ -1862,7 +1844,7 @@ analyzeRoutes.get('/explain', async (c) => {
   `).bind(raceId).first<any>();
   if (!race) return c.json({ error: '找不到該場賽事' }, 404);
 
-  const admin = await hasAdminAccess(c);
+  const admin = await hasAdminAccess(c, ADMIN_AUTH_POLICY.SESSION_OR_BEARER);
   const engine: EloEngine = admin && c.req.query('engine') === 'v11' ? 'v11' : 'v12';
   let picks: any[] = [];
   try {
@@ -2635,7 +2617,7 @@ analyzeRoutes.get('/factors', (c) => {
 
       analyzeRoutes.get('/today-picks', async (c) => {
         try {
-          const admin = await hasAdminAccess(c);
+          const admin = await hasAdminAccess(c, ADMIN_AUTH_POLICY.SESSION_OR_BEARER);
           const engine: EloEngine = admin && c.req.query('engine') === 'v11' ? 'v11' : 'v12';
           const fresh = admin && c.req.query('fresh') === '1';
           const venue = admin ? (c.req.query('venue') || undefined) : undefined;
@@ -2657,7 +2639,7 @@ analyzeRoutes.get('/factors', (c) => {
       // POST /admin/api/refresh-race-day-report — manual rebuild trigger (admin only via token gate upstream)
       analyzeRoutes.post('/refresh-race-day-report', async (c) => {
         try {
-          if (!(await hasAdminAccess(c))) return privateRouteUnavailable(c);
+          if (!(await hasAdminAccess(c, ADMIN_AUTH_POLICY.SESSION_OR_BEARER))) return privateRouteUnavailable(c);
           const engine: EloEngine = c.req.query('engine') === 'v11' ? 'v11' : 'v12';
           const result = await runRaceDayReportCompute(c.env.DB, engine, { fresh: true });
           if (result?.error) return c.json({ error: result.error }, (result.status ?? 500) as any);
@@ -2677,7 +2659,7 @@ analyzeRoutes.get('/factors', (c) => {
           // Returns per-variant × per-strategy: bets, hits, hitRate, avgPayout, totalPnL, roiPct
           analyzeRoutes.get('/roi', async (c) => {
             try {
-              if (!(await hasAdminAccess(c))) return privateRouteUnavailable(c);
+              if (!(await hasAdminAccess(c, ADMIN_AUTH_POLICY.SESSION_OR_BEARER))) return privateRouteUnavailable(c);
               const days = Math.max(1, Math.min(365, Number(c.req.query('days') ?? '60')));
               const sinceDate = new Date(Date.now() - days * 86400000).toISOString().substring(0, 10);
               const { results } = await c.env.DB.prepare(
@@ -2767,7 +2749,7 @@ analyzeRoutes.get('/factors', (c) => {
         // Default [3, 8] follows SP_3_8 strategy proven +19% ROI on baseline 60d backtest.
         analyzeRoutes.get('/value-picks', async (c) => {
           try {
-            if (!(await hasAdminAccess(c))) return privateRouteUnavailable(c);
+            if (!(await hasAdminAccess(c, ADMIN_AUTH_POLICY.SESSION_OR_BEARER))) return privateRouteUnavailable(c);
             const dateParam = c.req.query('date') ?? null;
             const minOdds = Math.max(1.01, Number(c.req.query('min') ?? '3'));
             const maxOdds = Math.max(minOdds, Number(c.req.query('max') ?? '8'));
@@ -2835,7 +2817,7 @@ analyzeRoutes.get('/factors', (c) => {
       // GET /api/analyze/backtest-dates?days=90 — list dates with race_results in window
       analyzeRoutes.get('/backtest-dates', async (c) => {
         try {
-          if (!(await hasAdminAccess(c))) return privateRouteUnavailable(c);
+          if (!(await hasAdminAccess(c, ADMIN_AUTH_POLICY.SESSION_OR_BEARER))) return privateRouteUnavailable(c);
           const days = Math.max(1, Math.min(365, Number(c.req.query('days') ?? '90')));
           const since = new Date(Date.now() - days * 86400000).toISOString().substring(0, 10);
           // No upper-date bound: EXISTS(race_results.finishing_position>0) already limits to
@@ -2859,7 +2841,7 @@ analyzeRoutes.get('/factors', (c) => {
       // POST /api/analyze/join-prediction-results?date=YYYY-MM-DD — backfill actuals into prediction_log
       analyzeRoutes.post('/join-prediction-results', async (c) => {
         try {
-          if (!(await hasAdminAccess(c))) return privateRouteUnavailable(c);
+          if (!(await hasAdminAccess(c, ADMIN_AUTH_POLICY.SESSION_OR_BEARER))) return privateRouteUnavailable(c);
           const date = c.req.query('date');
           if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return c.json({ error: 'date=YYYY-MM-DD required' }, 400);
           const r = await joinPredictionResults(c.env.DB, date);
@@ -2873,7 +2855,7 @@ analyzeRoutes.get('/factors', (c) => {
       // GET /api/analyze/picks-by-date?date=YYYY-MM-DD — 指定賽事日全因子預測（支援未來/過去日期）
       analyzeRoutes.get('/picks-by-date', async (c) => {
         try {
-          if (!(await hasAdminAccess(c))) return privateRouteUnavailable(c);
+          if (!(await hasAdminAccess(c, ADMIN_AUTH_POLICY.SESSION_OR_BEARER))) return privateRouteUnavailable(c);
           const db = c.env.DB;
           const date = c.req.query('date');
           if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return c.json({ error: '請提供 YYYY-MM-DD 格式日期' }, 400);
@@ -2995,7 +2977,7 @@ analyzeRoutes.get('/factors', (c) => {
           try {
             const date = c.req.query('date');
             if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return c.json({ error: '請提供 YYYY-MM-DD 格式日期' }, 400);
-            const admin = await hasAdminAccess(c);
+            const admin = await hasAdminAccess(c, ADMIN_AUTH_POLICY.SESSION_OR_BEARER);
             const engine: EloEngine = admin && c.req.query('engine') === 'v11' ? 'v11' : 'v12';
             const refresh = admin && c.req.query('refresh') === '1';
             // P3-C: ?alpha=0.62 lets offline tuner sweep candidates without
@@ -3074,7 +3056,7 @@ analyzeRoutes.get('/factors', (c) => {
         // from the heavy compute path.
         analyzeRoutes.post('/ensemble-alpha', async (c) => {
           try {
-            if (!(await hasAdminAccess(c))) return c.json({ error: 'unauthorized' }, 401);
+            if (!(await hasAdminAccess(c, ADMIN_AUTH_POLICY.BEARER_ONLY))) return c.json({ error: 'unauthorized' }, 401);
 
             const body = await c.req.json().catch(() => ({} as any));
             const alpha = Number((body as any)?.alpha);
@@ -3098,7 +3080,7 @@ analyzeRoutes.get('/factors', (c) => {
         // Whitelisted tables only; no arbitrary SQL.
         analyzeRoutes.get('/d1-inspect', async (c) => {
           try {
-            if (!(await hasAdminAccess(c))) return c.json({ error: 'unauthorized' }, 401);
+            if (!(await hasAdminAccess(c, ADMIN_AUTH_POLICY.BEARER_ONLY))) return c.json({ error: 'unauthorized' }, 401);
 
             const ALLOWED: Record<string, { entityCol?: string; dateCol?: string }> = {
               horse_elo_snapshots:   { entityCol: 'horse_id',   dateCol: 'as_of_date' },
@@ -3175,7 +3157,7 @@ analyzeRoutes.get('/factors', (c) => {
           const db = c.env.DB;
           const daysParam = c.req.query('days');
           const days = Math.max(1, Math.min(180, parseInt(daysParam || '30', 10) || 30));
-          const admin = await hasAdminAccess(c);
+          const admin = await hasAdminAccess(c, ADMIN_AUTH_POLICY.SESSION_OR_BEARER);
           const engine: EloEngine = admin && c.req.query('engine') === 'v11' ? 'v11' : 'v12';
           const today = new Date().toISOString().substring(0, 10);
           const cutoff = new Date(Date.now() - days * 86400000).toISOString().substring(0, 10);
@@ -3287,7 +3269,7 @@ analyzeRoutes.get('/factors', (c) => {
       analyzeRoutes.get('/strategy-pnl', async (c) => {
         try {
           const db = c.env.DB;
-          const admin = await hasAdminAccess(c);
+          const admin = await hasAdminAccess(c, ADMIN_AUTH_POLICY.SESSION_OR_BEARER);
           const engine: EloEngine = admin && c.req.query('engine') === 'v11' ? 'v11' : 'v12';
           const today = new Date().toISOString().substring(0, 10);
           const refresh = admin && c.req.query('refresh') === '1';
@@ -3353,7 +3335,7 @@ analyzeRoutes.get('/factors', (c) => {
       // ?apply=1 writes winner α into app_settings (key='ensemble_alpha').
       analyzeRoutes.get('/ensemble-tune', async (c) => {
         try {
-          if (!(await hasAdminAccess(c))) return privateRouteUnavailable(c);
+          if (!(await hasAdminAccess(c, ADMIN_AUTH_POLICY.SESSION_OR_BEARER))) return privateRouteUnavailable(c);
           const db = c.env.DB;
           const days = Math.max(7, Math.min(180, parseInt(c.req.query('days') || '30', 10) || 30));
           const apply = c.req.query('apply') === '1';
@@ -3406,9 +3388,9 @@ analyzeRoutes.get('/factors', (c) => {
           let applied = false;
           let applyDenied = false;
           if (apply && winner) {
-            // Route is mounted under public /api/analyze, so the apply path
-            // must require the same session-or-Bearer admin credentials.
-            const ok = await hasAdminAccess(c);
+            // Reading/tuning supports browser sessions, but mutating production
+            // configuration is Bearer-only so a cross-site GET cannot apply it.
+            const ok = await hasAdminAccess(c, ADMIN_AUTH_POLICY.BEARER_ONLY);
             if (!ok) {
               applyDenied = true;
             } else {

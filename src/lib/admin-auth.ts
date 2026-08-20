@@ -17,6 +17,23 @@ export interface SessionPayload {
   exp: number;         // expiry unix seconds
 }
 
+export const ADMIN_AUTH_POLICY = {
+  SESSION_OR_BEARER: 'session-or-bearer',
+  BEARER_ONLY: 'bearer-only',
+} as const;
+
+export type AdminAuthPolicy = typeof ADMIN_AUTH_POLICY[keyof typeof ADMIN_AUTH_POLICY];
+
+export interface AdminAuthEnv {
+  ADMIN_TOKEN?: string;
+  SESSION_HMAC_SECRET?: string;
+  ADMIN_GITHUB_USER?: string;
+}
+
+interface AdminAuthRequest {
+  header(name: string): string | undefined;
+}
+
 const SESSION_TTL_SECONDS = 7 * 24 * 60 * 60; // 7 days
 export const SESSION_COOKIE = 'admin_session';
 
@@ -86,6 +103,45 @@ export function readCookie(cookieHeader: string | undefined, name: string): stri
     if (p.slice(0, eq) === name) return decodeURIComponent(p.slice(eq + 1));
   }
   return null;
+}
+
+export function isAdminAllowlisted(env: AdminAuthEnv, login: string): boolean {
+  const allowlist = String(env.ADMIN_GITHUB_USER || '')
+    .split(',')
+    .map((candidate) => candidate.trim())
+    .filter(Boolean);
+  return allowlist.includes(login);
+}
+
+/**
+ * The single credential guard for every admin surface.
+ *
+ * URL query parameters are deliberately not part of AdminAuthRequest, so neither
+ * policy can ever treat a URL value as a credential.
+ */
+export async function hasAdminAccess(
+  c: { env: AdminAuthEnv; req: AdminAuthRequest },
+  policy: AdminAuthPolicy,
+): Promise<boolean> {
+  if (policy === ADMIN_AUTH_POLICY.SESSION_OR_BEARER) {
+    const cookie = readCookie(c.req.header('cookie'), SESSION_COOKIE);
+    if (cookie && c.env.SESSION_HMAC_SECRET) {
+      const payload = await verifySession(cookie, c.env.SESSION_HMAC_SECRET);
+      if (payload && isAdminAllowlisted(c.env, payload.user)) return true;
+    }
+  }
+
+  const expected = c.env.ADMIN_TOKEN;
+  if (!expected) return false;
+  const header = c.req.header('authorization') || '';
+  const bearer = header.startsWith('Bearer ') ? header.slice(7) : '';
+  return bearer === expected;
+}
+
+export function buildAdminBearerHeaders(env: AdminAuthEnv): { authorization: string } | undefined {
+  return env.ADMIN_TOKEN
+    ? { authorization: `Bearer ${env.ADMIN_TOKEN}` }
+    : undefined;
 }
 
 export function newSessionPayload(user: string): SessionPayload {

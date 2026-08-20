@@ -23,6 +23,9 @@ jobs:
       - name: Replay test — market-blend odds-key contract
         run: npx tsx scripts/test-market-blend.ts
 
+      - name: Regression test — admin credentials never come from URLs
+        run: npx tsx scripts/test-admin-auth.ts
+
       - name: Deploy to Cloudflare Workers
         run: npx wrangler deploy
         env:

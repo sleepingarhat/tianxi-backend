@@ -15,7 +15,8 @@ import { silksRoutes } from './routes/silks';
 import { silksSvgRoutes } from './routes/silks_svg';
 import { adminRoutes } from './routes/admin';
 import { getSeasonStatus } from './lib/season';
-  import { computeHitRateStats, ensureHitRateCacheTable, writeHitRateCache, readHitRateCache, ensureRaceDayReportCacheTable, joinPredictionResults, ensurePredictionLogTable, hasAdminAccess, hitRateEngineKey } from './routes/analyze';
+import { ADMIN_AUTH_POLICY, buildAdminBearerHeaders, hasAdminAccess } from './lib/admin-auth';
+  import { computeHitRateStats, ensureHitRateCacheTable, writeHitRateCache, readHitRateCache, ensureRaceDayReportCacheTable, joinPredictionResults, ensurePredictionLogTable, hitRateEngineKey } from './routes/analyze';
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -56,10 +57,7 @@ app.get('/api/season', async (c) => {
 // Admin override: POST /admin/api/set-season-mode?mode=auto|in|off
 // Bearer-gated (same posture as set-alpha). 'auto' restores detection.
 app.post('/admin/api/set-season-mode', async (c) => {
-  const expected = (c.env as any).ADMIN_TOKEN as string | undefined;
-  const header = c.req.header('authorization') || '';
-  const bearer = header.startsWith('Bearer ') ? header.slice(7) : '';
-  if (!expected || bearer !== expected) {
+  if (!(await hasAdminAccess(c, ADMIN_AUTH_POLICY.BEARER_ONLY))) {
     return c.json({ error: 'unauthorized (Bearer required)' }, 401);
   }
   const mode = c.req.query('mode');
@@ -135,7 +133,7 @@ app.onError((err, c) => {
 
   // Manual trigger endpoint for admin: POST /admin/api/refresh-hit-cache
   app.post('/admin/api/refresh-hit-cache', async (c) => {
-    if (!(await hasAdminAccess(c))) return c.json({ error: 'Not found' }, 404);
+    if (!(await hasAdminAccess(c, ADMIN_AUTH_POLICY.SESSION_OR_BEARER))) return c.json({ error: 'Not found' }, 404);
     const out = await refreshHitRateCache(c.env);
     return c.json({ ok: true, ...out, ranAt: new Date().toISOString() });
   });
@@ -164,7 +162,7 @@ app.onError((err, c) => {
 
     // Manual trigger: POST /admin/api/backfill-prediction-results
     app.post('/admin/api/backfill-prediction-results', async (c) => {
-      if (!(await hasAdminAccess(c))) return c.json({ error: 'Not found' }, 404);
+      if (!(await hasAdminAccess(c, ADMIN_AUTH_POLICY.SESSION_OR_BEARER))) return c.json({ error: 'Not found' }, 404);
       const out = await backfillPredictionResults(c.env);
       return c.json({ ok: true, ...out, ranAt: new Date().toISOString() });
     });
@@ -176,9 +174,7 @@ app.onError((err, c) => {
       const url = new URL('https://internal/api/analyze/today-picks?fresh=1');
       const req = new Request(url.toString(), {
         method: 'GET',
-        headers: env.ADMIN_TOKEN
-          ? { authorization: `Bearer ${env.ADMIN_TOKEN}` }
-          : undefined,
+        headers: buildAdminBearerHeaders(env),
       });
       const res = await app.fetch(req, env, { waitUntil: () => {}, passThroughOnException: () => {} } as any);
       const data: any = await res.json().catch(() => ({}));
@@ -188,7 +184,7 @@ app.onError((err, c) => {
   }
 
   app.post('/admin/api/refresh-race-day-report', async (c) => {
-    if (!(await hasAdminAccess(c))) return c.json({ error: 'Not found' }, 404);
+    if (!(await hasAdminAccess(c, ADMIN_AUTH_POLICY.SESSION_OR_BEARER))) return c.json({ error: 'Not found' }, 404);
     const out = await refreshRaceDayReport(c.env);
     return c.json({ ...out, ranAt: new Date().toISOString() });
   });
@@ -300,14 +296,14 @@ app.onError((err, c) => {
 
   // Manual trigger for admin verification.
   app.post('/admin/api/prune-odds', async (c) => {
-    if (!(await hasAdminAccess(c))) return c.json({ error: 'Not found' }, 404);
+    if (!(await hasAdminAccess(c, ADMIN_AUTH_POLICY.SESSION_OR_BEARER))) return c.json({ error: 'Not found' }, 404);
     const out = await pruneOddsToLatestDay(c.env);
     return c.json({ ...out, ranAt: new Date().toISOString() });
   });
 
   // Manual trigger for the downsampled odds archive (idempotent; safe anytime).
   app.post('/admin/api/archive-odds', async (c) => {
-    if (!(await hasAdminAccess(c))) return c.json({ error: 'Not found' }, 404);
+    if (!(await hasAdminAccess(c, ADMIN_AUTH_POLICY.SESSION_OR_BEARER))) return c.json({ error: 'Not found' }, 404);
     const out = await archiveOddsBeforePrune(c.env);
     return c.json({ ...out, ranAt: new Date().toISOString() });
   });
@@ -333,9 +329,7 @@ app.onError((err, c) => {
     try {
       const req = new Request('https://internal/api/analyze/strategy-pnl?refresh=1', {
         method: 'GET',
-        headers: env.ADMIN_TOKEN
-          ? { authorization: `Bearer ${env.ADMIN_TOKEN}` }
-          : undefined,
+        headers: buildAdminBearerHeaders(env),
       });
       const res = await app.fetch(req, env, { waitUntil: () => {}, passThroughOnException: () => {} } as any);
       const data: any = await res.json().catch(() => ({}));
@@ -346,7 +340,7 @@ app.onError((err, c) => {
 
   // Manual trigger for the strategy-pnl warmup (idempotent; safe anytime).
   app.post('/admin/api/warm-strategy-pnl', async (c) => {
-    if (!(await hasAdminAccess(c))) return c.json({ error: 'Not found' }, 404);
+    if (!(await hasAdminAccess(c, ADMIN_AUTH_POLICY.SESSION_OR_BEARER))) return c.json({ error: 'Not found' }, 404);
     const out = await warmStrategyPnl(c.env);
     return c.json({ ...out, ranAt: new Date().toISOString() });
   });

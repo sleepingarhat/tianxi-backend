@@ -5,16 +5,17 @@
  */
 import { Hono } from 'hono';
 import {
-  SESSION_COOKIE,
+  ADMIN_AUTH_POLICY,
   buildAuthorizeUrl,
   buildSessionCookie,
   clearSessionCookie,
   exchangeCodeForToken,
   fetchGithubLogin,
+  hasAdminAccess,
+  isAdminAllowlisted,
   newSessionPayload,
   readCookie,
   signSession,
-  verifySession,
 } from '../lib/admin-auth';
 import { parseHkjcDividends, BOX_POOL_MAP } from '../lib/parse-dividends';
 import { getSeasonStatus } from '../lib/season';
@@ -35,11 +36,6 @@ export const adminRoutes = new Hono<{
   Bindings: AdminEnv;
   Variables: { adminUser: string };
 }>();
-
-function isAdminAllowlisted(env: AdminEnv, login: string): boolean {
-  const list = (env.ADMIN_GITHUB_USER || '').split(',').map((s) => s.trim()).filter(Boolean);
-  return list.includes(login);
-}
 
 function loginRedirectHtml(loginPath: string, reason: string): string {
   return `<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><title>天喜 · 需要登入</title>
@@ -121,27 +117,11 @@ adminRoutes.use('*', async (c, next) => {
     await next();
     return;
   }
-  // 1. Session cookie (preferred for browser users)
-  const cookie = readCookie(c.req.header('cookie'), SESSION_COOKIE);
-  if (cookie && c.env.SESSION_HMAC_SECRET) {
-    const payload = await verifySession(cookie, c.env.SESSION_HMAC_SECRET);
-    if (payload && isAdminAllowlisted(c.env, payload.user)) {
-      c.set('adminUser', payload.user);
-      await next();
-      return;
-    }
+  if (await hasAdminAccess(c, ADMIN_AUTH_POLICY.SESSION_OR_BEARER)) {
+    await next();
+    return;
   }
-  // 2. Bearer token (automation and emergency access)
-  const expected = c.env.ADMIN_TOKEN;
-  if (expected) {
-    const header = c.req.header('authorization') || '';
-    const bearer = header.startsWith('Bearer ') ? header.slice(7) : '';
-    if (bearer === expected) {
-      await next();
-      return;
-    }
-  }
-  // 3. Not authenticated — render login page for browser, JSON for API
+  // Not authenticated — render login page for browser, JSON for API
   const accept = c.req.header('accept') || '';
   if (accept.includes('text/html')) {
     return c.html(loginRedirectHtml('/admin/login', '請用 GitHub 登入後再使用內部控制台。'), 401);
@@ -804,12 +784,7 @@ adminRoutes.post('/api/d1-maintenance', async (c) => {
 // Usage: curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
 //   "https://tianxi.racing/admin/api/set-alpha?value=0"
 adminRoutes.post('/api/set-alpha', async (c) => {
-  // 2026-05-29: Bearer-only (dropped ?token= query acceptance) — α is a
-  // safety-critical write; query tokens leak via logs/history/referrers.
-  const expected = c.env.ADMIN_TOKEN;
-  const header = c.req.header('authorization') || '';
-  const bearer = header.startsWith('Bearer ') ? header.slice(7) : '';
-  if (!expected || bearer !== expected) {
+  if (!(await hasAdminAccess(c, ADMIN_AUTH_POLICY.BEARER_ONLY))) {
     return c.json({ error: 'unauthorized (Bearer required)' }, 401);
   }
   const raw = c.req.query('value');
@@ -888,10 +863,7 @@ adminRoutes.post('/api/set-alpha', async (c) => {
 // Usage: curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
 //   "https://tianxi.racing/admin/api/fix-dividend-pool-swap"
 adminRoutes.post('/api/fix-dividend-pool-swap', async (c) => {
-  const expected = c.env.ADMIN_TOKEN;
-  const header = c.req.header('authorization') || '';
-  const bearer = header.startsWith('Bearer ') ? header.slice(7) : '';
-  if (!expected || bearer !== expected) {
+  if (!(await hasAdminAccess(c, ADMIN_AUTH_POLICY.BEARER_ONLY))) {
     return c.json({ error: 'unauthorized (Bearer required)' }, 401);
   }
   const FLAG = 'dividend_tce_tri_swap_v1_done';
@@ -940,10 +912,7 @@ adminRoutes.post('/api/fix-dividend-pool-swap', async (c) => {
 // Usage: curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
 //   "https://tianxi.racing/admin/api/refresh-race-dividends?raceId=race_2026-06-24_HV_8"
 adminRoutes.post('/api/refresh-race-dividends', async (c) => {
-  const expected = c.env.ADMIN_TOKEN;
-  const header = c.req.header('authorization') || '';
-  const bearer = header.startsWith('Bearer ') ? header.slice(7) : '';
-  if (!expected || bearer !== expected) {
+  if (!(await hasAdminAccess(c, ADMIN_AUTH_POLICY.BEARER_ONLY))) {
     return c.json({ error: 'unauthorized (Bearer required)' }, 401);
   }
   const raceId = (c.req.query('raceId') || '').trim();
@@ -1070,8 +1039,8 @@ adminRoutes.get('/api/alerts', async (c) => {
 
 // ── /api/dispatch + /api/runs ──
 adminRoutes.post('/api/dispatch', async (c) => {
-  const token = c.env.GITHUB_TOKEN; const repo = c.env.GITHUB_REPO;
-  if (!token || !repo) return c.json({ error: 'GITHUB_TOKEN / GITHUB_REPO 未設定' }, 503);
+  const githubToken = c.env.GITHUB_TOKEN; const repo = c.env.GITHUB_REPO;
+  if (!githubToken || !repo) return c.json({ error: 'GITHUB_TOKEN / GITHUB_REPO 未設定' }, 503);
   const body = await c.req.json<{ workflow: string; ref?: string; inputs?: Record<string, string> }>();
   if (!body.workflow) return c.json({ error: 'workflow required' }, 400);
   const ALLOWED = new Set([
@@ -1084,7 +1053,7 @@ adminRoutes.post('/api/dispatch', async (c) => {
   const res = await fetch(
     `https://api.github.com/repos/${repo}/actions/workflows/${body.workflow}/dispatches`,
     { method: 'POST',
-      headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'User-Agent': 'tianxi-admin' },
+      headers: { Authorization: `Bearer ${githubToken}`, Accept: 'application/vnd.github+json', 'User-Agent': 'tianxi-admin' },
       body: JSON.stringify({ ref: body.ref || 'main', inputs: body.inputs || {} }) }
   );
   if (res.status !== 204) {
