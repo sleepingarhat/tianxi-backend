@@ -29,13 +29,6 @@ jobs:
       - name: Regression test — membership entitlements and free tier
         run: npx tsx scripts/test-membership.ts
 
-      - name: Configure membership session secret
-        env:
-          MEMBERSHIP_SESSION_SECRET: ${{ secrets.MEMBERSHIP_SESSION_SECRET }}
-        run: |
-          test -n "$MEMBERSHIP_SESSION_SECRET"
-          printf '%s' "$MEMBERSHIP_SESSION_SECRET" | npx wrangler secret put MEMBERSHIP_SESSION_SECRET
-
       - name: Deploy to Cloudflare Workers
         run: npx wrangler deploy
         env:
