@@ -2,6 +2,9 @@
 
 export interface Env {
   DB: D1Database;
+  ADMIN_TOKEN?: string;
+  SESSION_HMAC_SECRET?: string;
+  ADMIN_GITHUB_USER?: string;
   AI_API_KEY: string;
   AI_API_URL: string;
   AI_MODEL: string;

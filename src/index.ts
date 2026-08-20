@@ -15,7 +15,7 @@ import { silksRoutes } from './routes/silks';
 import { silksSvgRoutes } from './routes/silks_svg';
 import { adminRoutes } from './routes/admin';
 import { getSeasonStatus } from './lib/season';
-  import { computeHitRateStats, ensureHitRateCacheTable, writeHitRateCache, readHitRateCache, ensureRaceDayReportCacheTable, joinPredictionResults, ensurePredictionLogTable } from './routes/analyze';
+  import { computeHitRateStats, ensureHitRateCacheTable, writeHitRateCache, readHitRateCache, ensureRaceDayReportCacheTable, joinPredictionResults, ensurePredictionLogTable, hasAdminAccess, hitRateEngineKey } from './routes/analyze';
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -105,13 +105,13 @@ app.onError((err, c) => {
     const today = new Date().toISOString().substring(0, 10);
     const { results } = await env.DB.prepare(
       `SELECT m.date FROM race_meetings m
-         LEFT JOIN meeting_hit_rate_cache c ON c.date = m.date AND c.engine = 'v12'
+         LEFT JOIN meeting_hit_rate_cache c ON c.date = m.date AND c.engine = ?
         WHERE m.date < ?
           AND EXISTS (SELECT 1 FROM races r JOIN race_results rr ON rr.race_id = r.id
                        WHERE r.meeting_id = m.id AND rr.finishing_position > 0)
           AND (c.date IS NULL OR c.payload_json NOT LIKE '%quinellaHits%')
         ORDER BY m.date DESC LIMIT 12`
-    ).bind(today).all<{ date: string }>();
+    ).bind(hitRateEngineKey('v12'), today).all<{ date: string }>();
     let refreshed = 0, errors = 0;
     for (const row of (results ?? [])) {
       try {
@@ -126,6 +126,7 @@ app.onError((err, c) => {
 
   // Manual trigger endpoint for admin: POST /admin/api/refresh-hit-cache
   app.post('/admin/api/refresh-hit-cache', async (c) => {
+    if (!(await hasAdminAccess(c))) return c.json({ error: 'Not found' }, 404);
     const out = await refreshHitRateCache(c.env);
     return c.json({ ok: true, ...out, ranAt: new Date().toISOString() });
   });
@@ -154,6 +155,7 @@ app.onError((err, c) => {
 
     // Manual trigger: POST /admin/api/backfill-prediction-results
     app.post('/admin/api/backfill-prediction-results', async (c) => {
+      if (!(await hasAdminAccess(c))) return c.json({ error: 'Not found' }, 404);
       const out = await backfillPredictionResults(c.env);
       return c.json({ ok: true, ...out, ranAt: new Date().toISOString() });
     });
@@ -163,7 +165,12 @@ app.onError((err, c) => {
     try {
       await ensureRaceDayReportCacheTable(env.DB);
       const url = new URL('https://internal/api/analyze/today-picks?fresh=1');
-      const req = new Request(url.toString(), { method: 'GET' });
+      const req = new Request(url.toString(), {
+        method: 'GET',
+        headers: env.ADMIN_TOKEN
+          ? { authorization: `Bearer ${env.ADMIN_TOKEN}` }
+          : undefined,
+      });
       const res = await app.fetch(req, env, { waitUntil: () => {}, passThroughOnException: () => {} } as any);
       const data: any = await res.json().catch(() => ({}));
       if (data?.error) return { ok: false, error: data.error };
@@ -172,6 +179,7 @@ app.onError((err, c) => {
   }
 
   app.post('/admin/api/refresh-race-day-report', async (c) => {
+    if (!(await hasAdminAccess(c))) return c.json({ error: 'Not found' }, 404);
     const out = await refreshRaceDayReport(c.env);
     return c.json({ ...out, ranAt: new Date().toISOString() });
   });
@@ -283,12 +291,14 @@ app.onError((err, c) => {
 
   // Manual trigger for admin verification.
   app.post('/admin/api/prune-odds', async (c) => {
+    if (!(await hasAdminAccess(c))) return c.json({ error: 'Not found' }, 404);
     const out = await pruneOddsToLatestDay(c.env);
     return c.json({ ...out, ranAt: new Date().toISOString() });
   });
 
   // Manual trigger for the downsampled odds archive (idempotent; safe anytime).
   app.post('/admin/api/archive-odds', async (c) => {
+    if (!(await hasAdminAccess(c))) return c.json({ error: 'Not found' }, 404);
     const out = await archiveOddsBeforePrune(c.env);
     return c.json({ ...out, ranAt: new Date().toISOString() });
   });
@@ -312,7 +322,12 @@ app.onError((err, c) => {
   // is filled gradually by refreshHitRateCache + per-request self-heal, not here).
   async function warmStrategyPnl(env: Env): Promise<{ ok: boolean; pending: number; cached?: boolean; error?: string }> {
     try {
-      const req = new Request('https://internal/api/analyze/strategy-pnl?refresh=1', { method: 'GET' });
+      const req = new Request('https://internal/api/analyze/strategy-pnl?refresh=1', {
+        method: 'GET',
+        headers: env.ADMIN_TOKEN
+          ? { authorization: `Bearer ${env.ADMIN_TOKEN}` }
+          : undefined,
+      });
       const res = await app.fetch(req, env, { waitUntil: () => {}, passThroughOnException: () => {} } as any);
       const data: any = await res.json().catch(() => ({}));
       if (data?.error) return { ok: false, pending: -1, error: data.error };
@@ -322,6 +337,7 @@ app.onError((err, c) => {
 
   // Manual trigger for the strategy-pnl warmup (idempotent; safe anytime).
   app.post('/admin/api/warm-strategy-pnl', async (c) => {
+    if (!(await hasAdminAccess(c))) return c.json({ error: 'Not found' }, 404);
     const out = await warmStrategyPnl(c.env);
     return c.json({ ...out, ranAt: new Date().toISOString() });
   });

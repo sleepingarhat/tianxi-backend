@@ -4,8 +4,43 @@ import { generateAnalysisSummary } from '../services/ai';
 import { fetchLatestWinOddsByRace, attachMarketBlend, MARKET_BLEND_BETA, normHorseKey } from '../lib/market-blend';
 import { parseHkjcDividends, BOX_POOL_MAP } from '../lib/parse-dividends';
 import { computeRaceProbabilities, roundCoverage } from '../lib/pl-prob';
+import {
+  projectExplainForPublic,
+  projectHitRateForPublic,
+  projectHitRateRollupForPublic,
+  projectStrategyPnlForPublic,
+  projectTodayPicksForPublic,
+  projectTopPicksForPublic,
+} from '../lib/public-today-picks';
+import {
+  SESSION_COOKIE,
+  readCookie,
+  verifySession,
+} from '../lib/admin-auth';
 
 export const analyzeRoutes = new Hono<{ Bindings: Env }>();
+
+export async function hasAdminAccess(c: any): Promise<boolean> {
+  const env = c.env as any;
+  const cookie = readCookie(c.req.header('cookie'), SESSION_COOKIE);
+  if (cookie && env.SESSION_HMAC_SECRET) {
+    const payload = await verifySession(cookie, env.SESSION_HMAC_SECRET);
+    const allowlist = String(env.ADMIN_GITHUB_USER || '')
+      .split(',')
+      .map((login: string) => login.trim())
+      .filter(Boolean);
+    if (payload && allowlist.includes(payload.user)) return true;
+  }
+  const expected = env.ADMIN_TOKEN as string | undefined;
+  const header = c.req.header('authorization') || '';
+  const bearer = header.startsWith('Bearer ') ? header.slice(7) : '';
+  const queryToken = c.req.query('token') || '';
+  return Boolean(expected && (bearer === expected || queryToken === expected));
+}
+
+function privateRouteUnavailable(c: any) {
+  return c.json({ error: 'Not found' }, 404);
+}
   // ── Hit-rate cache (cron-driven) ────────────────────────────────────
   // Past-meeting hit-rate is computed once by the daily cron in src/index.ts
   // and stored here so the admin page can render instantly without hammering
@@ -37,6 +72,9 @@ export const analyzeRoutes = new Hono<{ Bindings: Env }>();
   const HIT_RATE_CACHE_VERSION = 'tx3';
   function _engineKey(engine: string): string {
     return `${engine}-${HIT_RATE_CACHE_VERSION}`;
+  }
+  export function hitRateEngineKey(engine: string): string {
+    return _engineKey(engine);
   }
 
   // Box-bet payouts for the model top-4 are scraped LIVE from the official HKJC
@@ -1078,6 +1116,7 @@ export async function computeHitRateStats(db: any, date: string, engine: EloEngi
 
 // POST /api/analyze — 因子分析（TimesFM + AI 綜合建議）
 analyzeRoutes.post('/', async (c) => {
+  if (!(await hasAdminAccess(c))) return privateRouteUnavailable(c);
   const body = await c.req.json<AnalyzeRequest>();
   const { raceId, factors } = body;
 
@@ -1735,7 +1774,8 @@ async function computeComposite(
 analyzeRoutes.get('/top-picks', async (c) => {
   const raceId = c.req.query('raceId');
   if (!raceId) return c.json({ error: '請提供 raceId' }, 400);
-  const engine: EloEngine = c.req.query('engine') === 'v11' ? 'v11' : 'v12';
+  const admin = await hasAdminAccess(c);
+  const engine: EloEngine = admin && c.req.query('engine') === 'v11' ? 'v11' : 'v12';
 
   const race = await c.env.DB.prepare(`
     SELECT r.*, rm.date, rm.venue, rm.track_condition
@@ -1797,7 +1837,7 @@ analyzeRoutes.get('/top-picks', async (c) => {
 
     const eloReady = picks.some((p: any) => p.eloComposite != null);
   const engineInUse = picks.find((p: any) => p.eloEngine)?.eloEngine ?? engine;
-  return c.json({
+  const payload = {
     raceId,
     raceNumber: race.race_number,
     date: race.date,
@@ -1808,7 +1848,8 @@ analyzeRoutes.get('/top-picks', async (c) => {
     picks: picks.slice(0, 5),
     allPicks: picks, // full field for race page if needed
     note: eloReady ? null : 'Elo 資料整備中 · 排名暫以勝率+賠率估算',
-  });
+  };
+  return c.json(admin ? payload : projectTopPicksForPublic(payload));
 });
 
 // GET /api/analyze/explain?raceId=X&horseId=Y — breakdown for one horse
@@ -1822,7 +1863,8 @@ analyzeRoutes.get('/explain', async (c) => {
   `).bind(raceId).first<any>();
   if (!race) return c.json({ error: '找不到該場賽事' }, 404);
 
-  const engine: EloEngine = c.req.query('engine') === 'v11' ? 'v11' : 'v12';
+  const admin = await hasAdminAccess(c);
+  const engine: EloEngine = admin && c.req.query('engine') === 'v11' ? 'v11' : 'v12';
   let picks: any[] = [];
   try {
     picks = await computeComposite(c.env.DB, raceId, race.date, engine);
@@ -1861,7 +1903,7 @@ analyzeRoutes.get('/explain', async (c) => {
     lines.push(`最終預測分 ${pick.finalScore}（綜合 ELO ${pick.eloComposite} ${pick.factorBonus >= 0 ? '+' : ''}${pick.factorBonus} 場次調整）`);
   }
 
-  return c.json({
+  const payload = {
     raceId,
     horseId,
     rank: pick.rank,
@@ -1879,75 +1921,18 @@ analyzeRoutes.get('/explain', async (c) => {
     finalScore: pick.finalScore,
     pWin: pick.pWin,
     pTop3: pick.pTop3,
+    pTop4: pick.pTop4,
     valueDelta: pick.valueDelta,
     daysSinceLast: pick.daysSinceLast,
     comment: lines.join(' · '),
-  });
+  };
+  return c.json(admin ? payload : projectExplainForPublic(payload));
 });
 
-// GET /api/analyze/factors — 可用因子列表
+// Public factor details are intentionally unavailable. The model's inputs,
+// weights, diagnostics and rejected research stay behind the internal boundary.
 analyzeRoutes.get('/factors', (c) => {
-  return c.json({
-    factors: [
-      {
-        category: '檔位與賽道',
-        items: [
-          { id: 'draw', name: '檔位優勢', description: '分析各檔位對不同途程的勝率影響', icon: 'grid-3x3' },
-          { id: 'course', name: '場地', description: '沙田/跑馬地場地特性與適應度', icon: 'map-pin' },
-          { id: 'going', name: '場地狀況', description: '好地、黏地、軟地等場地狀態評估', icon: 'cloud-rain' },
-        ],
-      },
-      {
-        category: '速度與節奏',
-        items: [
-          { id: 'pace', name: '分段時間趨勢', description: '預測全場步速節奏與受惠馬匹', icon: 'timer' },
-          { id: 'sectional', name: '分段時間詳細', description: '每段200米用時拆解與比較', icon: 'bar-chart-3' },
-          { id: 'running_position', name: '沿途走位', description: '分析沿途位置與最終名次關係', icon: 'route' },
-        ],
-      },
-      {
-        category: '近期狀態與表現',
-        items: [
-          { id: 'form', name: '近期近績', description: '最近6至10場表現走勢分析', icon: 'trending-up' },
-          { id: 'finish_time', name: '完成時間趨勢', description: '歷次完成時間對比與進步幅度', icon: 'clock' },
-          { id: 'placing', name: '名次表現', description: '歷史名次分佈與穩定性評估', icon: 'award' },
-        ],
-      },
-      {
-        category: '血統與馬匹背景',
-        items: [
-          { id: 'bloodline', name: '血統適應度', description: '父系母系對場地途程的適應性', icon: 'dna' },
-        ],
-      },
-      {
-        category: '晨操與試閘',
-        items: [
-          { id: 'trackwork', name: '晨操資料', description: '晨操時間與狀態追蹤', icon: 'sunrise' },
-          { id: 'trial', name: '試閘結果', description: '試閘出閘反應與實戰狀態評估', icon: 'flag' },
-        ],
-      },
-      {
-        category: '騎師與練馬師',
-        items: [
-          { id: 'jockey', name: '騎師近期狀態', description: '騎師近期勝率與場地配合度', icon: 'user' },
-          { id: 'trainer', name: '練馬師/馬房狀態', description: '練馬師近期成績與馬房整體表現', icon: 'home' },
-          { id: 'jockey_trainer', name: '騎練配對', description: '騎師與練馬師歷史配對勝率分析', icon: 'users' },
-        ],
-      },
-      {
-        category: '配備與健康',
-        items: [
-          { id: 'equipment', name: '配備變化', description: '眼罩、舌繫帶等配備變更影響', icon: 'shield' },
-        ],
-      },
-      {
-        category: '資金與賠率',
-        items: [
-          { id: 'odds_flow', name: '即時賠率與資金流向', description: '追蹤賠率變動與大額資金動向', icon: 'dollar-sign' },
-        ],
-      },
-    ],
-  });
+  return c.json({ error: 'Not found' }, 404);
 });
 
 
@@ -2370,8 +2355,8 @@ analyzeRoutes.get('/factors', (c) => {
           const raceEntries = raceMap.get(raceNum)!;
           const firstE = raceEntries[0];
           const raceDB = racesDBMap.get(raceNum);
-          const raceId = raceDB?.id ?? null;
           const lgbLookupRaceId: string = raceDB?.id ?? `race_${targetDate}_${meeting.venue}_${raceNum}`;
+          const raceId: string = raceDB?.id ?? lgbLookupRaceId;
           const raceTitle = raceDB?.title ?? (raceNum > 0 ? `第 ${raceNum} 場` : `${targetDate} 排位`);
           const raceDistance: number | null = firstE.distance ?? null;
           const raceGoing: string | null = raceDB?.going ?? meeting.track_condition ?? null;
@@ -2651,26 +2636,35 @@ analyzeRoutes.get('/factors', (c) => {
 
       analyzeRoutes.get('/today-picks', async (c) => {
         try {
-          const engine: EloEngine = c.req.query('engine') === 'v11' ? 'v11' : 'v12';
-          const fresh = c.req.query('fresh') === '1';
-          const venue = c.req.query('venue') || undefined;
+          const admin = await hasAdminAccess(c);
+          const engine: EloEngine = admin && c.req.query('engine') === 'v11' ? 'v11' : 'v12';
+          const fresh = admin && c.req.query('fresh') === '1';
+          const venue = admin ? (c.req.query('venue') || undefined) : undefined;
           const result = await runRaceDayReportCompute(c.env.DB, engine, { fresh, venue });
-          if (result?.error) return c.json({ error: result.error }, (result.status ?? 500) as any);
-          return c.json(result);
-        } catch (err: any) {
-          return c.json({ error: 'today-picks failed', detail: err?.message ?? String(err) }, 500);
+          if (result?.error) {
+            const status = Number(result.status);
+            const publicStatus = status >= 400 && status < 600 ? status : 500;
+            return c.json(
+              admin ? { error: result.error } : { error: 'today-picks unavailable' },
+              publicStatus as any,
+            );
+          }
+          return c.json(admin ? result : projectTodayPicksForPublic(result));
+        } catch {
+          return c.json({ error: 'today-picks unavailable' }, 500);
         }
       });
 
       // POST /admin/api/refresh-race-day-report — manual rebuild trigger (admin only via token gate upstream)
       analyzeRoutes.post('/refresh-race-day-report', async (c) => {
         try {
+          if (!(await hasAdminAccess(c))) return privateRouteUnavailable(c);
           const engine: EloEngine = c.req.query('engine') === 'v11' ? 'v11' : 'v12';
           const result = await runRaceDayReportCompute(c.env.DB, engine, { fresh: true });
           if (result?.error) return c.json({ error: result.error }, (result.status ?? 500) as any);
           return c.json({ ok: true, date: result.date, venue: result.venue, races: result.races?.length ?? 0, computeMs: result.computeMs, seedSummary: result.seedSummary, predictionLog: result.predictionLog, generatedAt: result.generatedAt });
-        } catch (err: any) {
-          return c.json({ error: 'refresh failed', detail: err?.message ?? String(err) }, 500);
+        } catch {
+          return c.json({ error: 'refresh failed' }, 500);
         }
       });
 
@@ -2684,6 +2678,7 @@ analyzeRoutes.get('/factors', (c) => {
           // Returns per-variant × per-strategy: bets, hits, hitRate, avgPayout, totalPnL, roiPct
           analyzeRoutes.get('/roi', async (c) => {
             try {
+              if (!(await hasAdminAccess(c))) return privateRouteUnavailable(c);
               const days = Math.max(1, Math.min(365, Number(c.req.query('days') ?? '60')));
               const sinceDate = new Date(Date.now() - days * 86400000).toISOString().substring(0, 10);
               const { results } = await c.env.DB.prepare(
@@ -2763,8 +2758,8 @@ analyzeRoutes.get('/factors', (c) => {
                 },
                 summary,
               });
-            } catch (e: any) {
-              return c.json({ error: String(e?.message ?? e) }, 500);
+            } catch {
+              return c.json({ error: 'roi failed' }, 500);
             }
           });
 
@@ -2773,6 +2768,7 @@ analyzeRoutes.get('/factors', (c) => {
         // Default [3, 8] follows SP_3_8 strategy proven +19% ROI on baseline 60d backtest.
         analyzeRoutes.get('/value-picks', async (c) => {
           try {
+            if (!(await hasAdminAccess(c))) return privateRouteUnavailable(c);
             const dateParam = c.req.query('date') ?? null;
             const minOdds = Math.max(1.01, Number(c.req.query('min') ?? '3'));
             const maxOdds = Math.max(minOdds, Number(c.req.query('max') ?? '8'));
@@ -2827,8 +2823,8 @@ analyzeRoutes.get('/factors', (c) => {
               races: report.races?.length ?? 0, oddsAvailable, oddsTotal,
               valuePicks: picks, generatedAt: new Date().toISOString(),
             });
-          } catch (err: any) {
-            return c.json({ error: 'value-picks failed', detail: err?.message ?? String(err) }, 500);
+          } catch {
+            return c.json({ error: 'value-picks failed' }, 500);
           }
         });
 
@@ -2840,6 +2836,7 @@ analyzeRoutes.get('/factors', (c) => {
       // GET /api/analyze/backtest-dates?days=90 — list dates with race_results in window
       analyzeRoutes.get('/backtest-dates', async (c) => {
         try {
+          if (!(await hasAdminAccess(c))) return privateRouteUnavailable(c);
           const days = Math.max(1, Math.min(365, Number(c.req.query('days') ?? '90')));
           const since = new Date(Date.now() - days * 86400000).toISOString().substring(0, 10);
           // No upper-date bound: EXISTS(race_results.finishing_position>0) already limits to
@@ -2854,8 +2851,8 @@ analyzeRoutes.get('/factors', (c) => {
                ORDER BY m.date ASC`
           ).bind(since).all<{ date: string }>();
           return c.json({ ok: true, days, dates: (results ?? []).map(r => r.date) });
-        } catch (err: any) {
-          return c.json({ error: 'list failed', detail: err?.message ?? String(err) }, 500);
+        } catch {
+          return c.json({ error: 'list failed' }, 500);
         }
       });
 
@@ -2863,12 +2860,13 @@ analyzeRoutes.get('/factors', (c) => {
       // POST /api/analyze/join-prediction-results?date=YYYY-MM-DD — backfill actuals into prediction_log
       analyzeRoutes.post('/join-prediction-results', async (c) => {
         try {
+          if (!(await hasAdminAccess(c))) return privateRouteUnavailable(c);
           const date = c.req.query('date');
           if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return c.json({ error: 'date=YYYY-MM-DD required' }, 400);
           const r = await joinPredictionResults(c.env.DB, date);
           return c.json({ ok: true, date, ...r });
-        } catch (err: any) {
-          return c.json({ error: 'join failed', detail: err?.message ?? String(err) }, 500);
+        } catch {
+          return c.json({ error: 'join failed' }, 500);
         }
       });
     
@@ -2876,6 +2874,7 @@ analyzeRoutes.get('/factors', (c) => {
       // GET /api/analyze/picks-by-date?date=YYYY-MM-DD — 指定賽事日全因子預測（支援未來/過去日期）
       analyzeRoutes.get('/picks-by-date', async (c) => {
         try {
+          if (!(await hasAdminAccess(c))) return privateRouteUnavailable(c);
           const db = c.env.DB;
           const date = c.req.query('date');
           if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return c.json({ error: '請提供 YYYY-MM-DD 格式日期' }, 400);
@@ -2983,8 +2982,8 @@ analyzeRoutes.get('/factors', (c) => {
             }
           }
           return c.json({ ...result, source });
-        } catch (err: any) {
-          return c.json({ error: 'picks-by-date failed', detail: err?.message ?? String(err) }, 500);
+        } catch {
+          return c.json({ error: 'picks-by-date failed' }, 500);
         }
       });
 
@@ -2997,12 +2996,13 @@ analyzeRoutes.get('/factors', (c) => {
           try {
             const date = c.req.query('date');
             if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return c.json({ error: '請提供 YYYY-MM-DD 格式日期' }, 400);
-            const engine: EloEngine = c.req.query('engine') === 'v11' ? 'v11' : 'v12';
-            const refresh = c.req.query('refresh') === '1';
+            const admin = await hasAdminAccess(c);
+            const engine: EloEngine = admin && c.req.query('engine') === 'v11' ? 'v11' : 'v12';
+            const refresh = admin && c.req.query('refresh') === '1';
             // P3-C: ?alpha=0.62 lets offline tuner sweep candidates without
             // mutating production α. When provided, bypass cache (read+write)
             // so each α gets a fresh per-race blend.
-            const alphaRaw = c.req.query('alpha');
+            const alphaRaw = admin ? c.req.query('alpha') : undefined;
             const alphaOverride = alphaRaw != null && alphaRaw !== ''
               ? Number(alphaRaw) : undefined;
             const hasAlpha = typeof alphaOverride === 'number'
@@ -3012,7 +3012,7 @@ analyzeRoutes.get('/factors', (c) => {
               if (hasAlpha) {
                 const cachedA = await readHitRateAlphaCache(c.env.DB, date, engine, alphaOverride as number);
                 if (cachedA) {
-                  return c.json({
+                  const payload = {
                     date,
                     venue: cachedA.meeting?.venue,
                     trackCondition: cachedA.meeting?.track_condition,
@@ -3022,12 +3022,13 @@ analyzeRoutes.get('/factors', (c) => {
                     races: cachedA.races,
                     generatedAt: cachedA.cachedAt,
                     fromCache: true,
-                  });
+                  };
+                  return c.json(admin ? payload : projectHitRateForPublic(payload));
                 }
               } else {
                 const cached = await readHitRateCache(c.env.DB, date, engine);
                 if (cached && !hitRateCacheNeedsBoxRecompute(cached)) {
-                  return c.json({
+                  const payload = {
                     date,
                     venue: cached.meeting?.venue,
                     trackCondition: cached.meeting?.track_condition,
@@ -3036,7 +3037,8 @@ analyzeRoutes.get('/factors', (c) => {
                     races: cached.races,
                     generatedAt: cached.cachedAt,
                     fromCache: true,
-                  });
+                  };
+                  return c.json(admin ? payload : projectHitRateForPublic(payload));
                 }
               }
             }
@@ -3050,7 +3052,7 @@ analyzeRoutes.get('/factors', (c) => {
             } else {
               await writeHitRateCache(c.env.DB, date, engine, result).catch(() => {});
             }
-            return c.json({
+            const payload = {
               date,
               venue: result.meeting.venue,
               trackCondition: result.meeting.track_condition,
@@ -3060,9 +3062,10 @@ analyzeRoutes.get('/factors', (c) => {
               races: result.races,
               generatedAt: new Date().toISOString(),
               fromCache: false,
-            });
-          } catch (err: any) {
-            return c.json({ error: 'hit-rate failed', detail: err?.message ?? String(err) }, 500);
+            };
+            return c.json(admin ? payload : projectHitRateForPublic(payload));
+          } catch {
+            return c.json({ error: 'hit-rate failed' }, 500);
           }
         });
 
@@ -3090,8 +3093,8 @@ analyzeRoutes.get('/factors', (c) => {
             ).bind(String(alpha)).run();
             const currentAlpha = await getEnsembleAlpha(c.env.DB);
             return c.json({ applied: true, alpha, currentAlpha, appliedAt: new Date().toISOString() });
-          } catch (err: any) {
-            return c.json({ error: 'ensemble-alpha failed', detail: err?.message ?? String(err) }, 500);
+          } catch {
+            return c.json({ error: 'ensemble-alpha failed' }, 500);
           }
         });
 
@@ -3172,8 +3175,8 @@ analyzeRoutes.get('/factors', (c) => {
             }
 
             return c.json({ table, filters: { entityId, since, until, idLike, axisKey, limit }, schema, facts, rows });
-          } catch (err: any) {
-            return c.json({ error: 'd1-inspect failed', detail: err?.message ?? String(err) }, 500);
+          } catch {
+            return c.json({ error: 'd1-inspect failed' }, 500);
           }
         });
 
@@ -3183,7 +3186,8 @@ analyzeRoutes.get('/factors', (c) => {
           const db = c.env.DB;
           const daysParam = c.req.query('days');
           const days = Math.max(1, Math.min(180, parseInt(daysParam || '30', 10) || 30));
-          const engine: EloEngine = c.req.query('engine') === 'v11' ? 'v11' : 'v12';
+          const admin = await hasAdminAccess(c);
+          const engine: EloEngine = admin && c.req.query('engine') === 'v11' ? 'v11' : 'v12';
           const today = new Date().toISOString().substring(0, 10);
           const cutoff = new Date(Date.now() - days * 86400000).toISOString().substring(0, 10);
           // Rollup-level cache: aggregating per-meeting cache over N meetings is
@@ -3191,7 +3195,7 @@ analyzeRoutes.get('/factors', (c) => {
           // window + engine, validated by `to`=today. Safe because the rollup
           // window is [cutoff, today) — today's results never count until the
           // calendar day rolls over, so a per-day key is exact. ?refresh=1 bypasses.
-          const refresh = c.req.query('refresh') === '1';
+          const refresh = admin && c.req.query('refresh') === '1';
           const rollupKey = `__rollup_${days}`;
           // Version-derived key (NOT hardcoded 'tx3') so a HIT_RATE_CACHE_VERSION
           // bump invalidates rollup rows in lockstep with per-meeting rows.
@@ -3201,7 +3205,9 @@ analyzeRoutes.get('/factors', (c) => {
               const row = await db.prepare(`SELECT payload_json FROM meeting_hit_rate_cache WHERE date=? AND engine=?`).bind(rollupKey, rollupEng).first<{ payload_json: string }>();
               if (row?.payload_json) {
                 const parsed = JSON.parse(row.payload_json);
-                if (parsed && parsed.to === today) return c.json({ ...parsed, cached: true });
+                if (parsed && parsed.to === today) {
+                  return c.json(admin ? { ...parsed, cached: true } : projectHitRateRollupForPublic(parsed));
+                }
               }
             } catch (e) { console.warn('hit-rate-rollup cache read failed', e); /* fall through to recompute */ }
           }
@@ -3274,9 +3280,9 @@ analyzeRoutes.get('/factors', (c) => {
               await db.prepare(`INSERT OR REPLACE INTO meeting_hit_rate_cache (date, engine, payload_json, computed_at) VALUES (?, ?, ?, ?)`)
                 .bind(rollupKey, rollupEng, JSON.stringify(payload), new Date().toISOString()).run();
             } catch (e) { console.warn('hit-rate-rollup cache write failed', e); /* best-effort */ }
-            return c.json(payload);
-        } catch (err: any) {
-          return c.json({ error: 'hit-rate-rollup failed', detail: err?.message ?? String(err) }, 500);
+            return c.json(admin ? payload : projectHitRateRollupForPublic(payload));
+        } catch {
+          return c.json({ error: 'hit-rate-rollup failed' }, 500);
         }
       });
 
@@ -3292,12 +3298,13 @@ analyzeRoutes.get('/factors', (c) => {
       analyzeRoutes.get('/strategy-pnl', async (c) => {
         try {
           const db = c.env.DB;
-          const engine: EloEngine = c.req.query('engine') === 'v11' ? 'v11' : 'v12';
+          const admin = await hasAdminAccess(c);
+          const engine: EloEngine = admin && c.req.query('engine') === 'v11' ? 'v11' : 'v12';
           const today = new Date().toISOString().substring(0, 10);
-          const refresh = c.req.query('refresh') === '1';
+          const refresh = admin && c.req.query('refresh') === '1';
           const engKey = _engineKey(engine);
           // engine-start anchor (mirror computeStrategyPnl) so the cache key matches.
-          let from = c.req.query('from') || '';
+          let from = admin ? (c.req.query('from') || '') : '';
           if (!/^\d{4}-\d{2}-\d{2}$/.test(from)) {
             // Mirror computeStrategyPnl: anchor to the first HK race day of June
             // 2026 onward (pre-June history excluded) so the cache key matches.
@@ -3332,7 +3339,11 @@ analyzeRoutes.get('/factors', (c) => {
                     );
                   } catch (e) { /* no execution context -> skip bg refresh */ }
                 }
-                return c.json({ ...parsed, cached: true, stale });
+                return c.json(
+                  admin
+                    ? { ...parsed, cached: true, stale }
+                    : projectStrategyPnlForPublic(parsed),
+                );
               }
             } catch (e) { console.warn('strategy-pnl cache read failed', e); /* fall through to compute */ }
           }
@@ -3340,9 +3351,9 @@ analyzeRoutes.get('/factors', (c) => {
           // Cold path (no cache yet, or ?refresh=1): compute with a small
           // foreground fill budget (recent days only); the helper writes the cache.
           const payload = await computeStrategyPnl(db, engine, { from, fillBudget: 1, deadlineMs: 15000 });
-          return c.json(payload);
-        } catch (err: any) {
-          return c.json({ error: 'strategy-pnl failed', detail: err?.message ?? String(err) }, 500);
+          return c.json(admin ? payload : projectStrategyPnlForPublic(payload));
+        } catch {
+          return c.json({ error: 'strategy-pnl failed' }, 500);
         }
       });
 
@@ -3353,6 +3364,7 @@ analyzeRoutes.get('/factors', (c) => {
       // ?apply=1 writes winner α into app_settings (key='ensemble_alpha').
       analyzeRoutes.get('/ensemble-tune', async (c) => {
         try {
+          if (!(await hasAdminAccess(c))) return privateRouteUnavailable(c);
           const db = c.env.DB;
           const days = Math.max(7, Math.min(180, parseInt(c.req.query('days') || '30', 10) || 30));
           const apply = c.req.query('apply') === '1';
@@ -3434,8 +3446,8 @@ analyzeRoutes.get('/factors', (c) => {
             applyDenied,
             generatedAt: new Date().toISOString(),
           });
-        } catch (err: any) {
-          return c.json({ error: 'ensemble-tune failed', detail: err?.message ?? String(err) }, 500);
+        } catch {
+          return c.json({ error: 'ensemble-tune failed' }, 500);
         }
       });
   

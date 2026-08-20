@@ -12,7 +12,9 @@
     "test:horse-career-stats": "tsx scripts/test-horse-career-stats.ts",
     "test:horse-career-api": "tsx scripts/test-horse-career-api.ts",
     "scrape-racecard": "tsx scripts/scrape-racecard.ts",
-    "test:market-blend": "tsx scripts/test-market-blend.ts"
+    "test:market-blend": "tsx scripts/test-market-blend.ts",
+    "test:running-style": "tsx scripts/test-running-style.ts",
+    "test:public-today-picks": "tsx scripts/test-public-today-picks.ts"
   },
   "dependencies": {
     "hkjc-api": "^1.0.5",

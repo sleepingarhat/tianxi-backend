@@ -5,6 +5,13 @@ import {
   getHorseCareerStats,
   type HorseCareerStats,
 } from '../lib/horse-career-stats';
+import {
+  computeRunningStyles,
+  dateFromRaceId,
+  validateDate,
+  validateHorseIds,
+  validateRaceId,
+} from '../lib/running-style';
 
 export const horsesRoutes = new Hono<{ Bindings: Env }>();
 
@@ -107,6 +114,99 @@ horsesRoutes.get('/', async (c) => {
   } catch (err: any) {
     return c.json({ horses: [], note: 'Elo 資料整備中', error: err?.message }, 200);
   }
+});
+
+// GET /api/horses/running-styles — public batch running-style labels
+horsesRoutes.get('/running-styles', async (c) => {
+  const rawIds = (c.req.query('horseIds') ?? '')
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean);
+  const horseIds = [...new Set(rawIds)];
+  if (!horseIds.length) {
+    return c.json({ error: 'horseIds is required' }, 400);
+  }
+  if (horseIds.length > 50) {
+    return c.json({ error: 'horseIds: max 50 IDs per request' }, 400);
+  }
+  if (!validateHorseIds(horseIds)) {
+    return c.json({
+      error: 'horseIds: all IDs must be canonical horse_ identifiers',
+    }, 400);
+  }
+
+  const raceId = c.req.query('raceId') ?? null;
+  const beforeDate = c.req.query('beforeDate') ?? null;
+  let cutoffDate: string;
+  if (raceId !== null) {
+    if (!validateRaceId(raceId)) {
+      return c.json({
+        error: 'raceId must match race_YYYY-MM-DD_ST|HV_N with a real date',
+      }, 400);
+    }
+    cutoffDate = dateFromRaceId(raceId);
+  } else if (beforeDate !== null) {
+    if (!validateDate(beforeDate)) {
+      return c.json({ error: 'beforeDate must be a real YYYY-MM-DD date' }, 400);
+    }
+    cutoffDate = beforeDate;
+  } else {
+    cutoffDate = new Date(Date.now() + 8 * 60 * 60 * 1000)
+      .toISOString()
+      .slice(0, 10);
+  }
+
+  const placeholders = horseIds.map(() => '?').join(',');
+  let formRows: any[] = [];
+  let resultRows: any[] = [];
+
+  try {
+    const response = await c.env.DB.prepare(`
+      SELECT horse_id, race_date, venue, race_number,
+             running_position, total_runners
+      FROM horse_form_records
+      WHERE horse_id IN (${placeholders})
+        AND race_date < ?
+        AND running_position IS NOT NULL
+        AND running_position != ''
+      ORDER BY race_date DESC, race_number DESC
+    `).bind(...horseIds, cutoffDate).all<any>();
+    formRows = response.results ?? [];
+  } catch {
+    formRows = [];
+  }
+
+  try {
+    const response = await c.env.DB.prepare(`
+      SELECT rr.horse_id,
+             rm.date AS race_date,
+             rm.venue,
+             r.race_number,
+             rr.running_position,
+             (
+               SELECT COUNT(*)
+               FROM race_results field
+               WHERE field.race_id = rr.race_id
+             ) AS total_runners
+      FROM race_results rr
+      JOIN races r ON r.id = rr.race_id
+      JOIN race_meetings rm ON rm.id = r.meeting_id
+      WHERE rr.horse_id IN (${placeholders})
+        AND rm.date < ?
+        AND rr.running_position IS NOT NULL
+        AND rr.running_position != ''
+      ORDER BY rm.date DESC, r.race_number DESC
+    `).bind(...horseIds, cutoffDate).all<any>();
+    resultRows = response.results ?? [];
+  } catch {
+    resultRows = [];
+  }
+
+  const styles = computeRunningStyles([
+    ...formRows.map((row) => ({ ...row, source_priority: 0 })),
+    ...resultRows.map((row) => ({ ...row, source_priority: 1 })),
+  ]);
+  return c.json({ cutoffDate, styles });
 });
 
 // GET /api/horses/:id — 馬匹詳細資料
