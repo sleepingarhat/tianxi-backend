@@ -15,6 +15,7 @@
     "test:market-blend": "tsx scripts/test-market-blend.ts",
     "test:running-style": "tsx scripts/test-running-style.ts",
     "test:public-today-picks": "tsx scripts/test-public-today-picks.ts",
+    "test:membership": "tsx scripts/test-membership.ts",
     "test:admin-auth": "tsx scripts/test-admin-auth.ts"
   },
   "dependencies": {

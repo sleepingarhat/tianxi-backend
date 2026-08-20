@@ -26,6 +26,9 @@ jobs:
       - name: Regression test — admin credentials never come from URLs
         run: npx tsx scripts/test-admin-auth.ts
 
+      - name: Regression test — membership entitlements and free tier
+        run: npx tsx scripts/test-membership.ts
+
       - name: Deploy to Cloudflare Workers
         run: npx wrangler deploy
         env:

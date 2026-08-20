@@ -9,6 +9,7 @@ import {
   projectHitRateForPublic,
   projectHitRateRollupForPublic,
   projectStrategyPnlForPublic,
+  projectTodayPicksForFree,
   projectTodayPicksForPublic,
   projectTopPicksForPublic,
 } from '../lib/public-today-picks';
@@ -21,6 +22,38 @@ export const analyzeRoutes = new Hono<{ Bindings: Env }>();
 
 function privateRouteUnavailable(c: any) {
   return c.json({ error: 'Not found' }, 404);
+}
+
+async function raceHasSettledResults(db: D1Database, raceId: string): Promise<boolean> {
+  const row = await db.prepare(
+    `SELECT 1 AS ok FROM race_results
+     WHERE race_id=? AND finishing_position > 0 LIMIT 1`,
+  ).bind(raceId).first<{ ok: number }>().catch(() => null);
+  return row?.ok === 1;
+}
+
+async function publicMayReadRace(
+  db: D1Database,
+  race: { id: string; meeting_id: string; race_number: number },
+): Promise<boolean> {
+  if (await raceHasSettledResults(db, race.id)) return true;
+  const firstRace = await db.prepare(
+    `SELECT MIN(race_number) AS n FROM races WHERE meeting_id=?`,
+  ).bind(race.meeting_id).first<{ n: number | null }>().catch(() => null);
+  return Number(race.race_number) === Number(firstRace?.n);
+}
+
+async function raceDayReportIsSettled(db: D1Database, value: any): Promise<boolean> {
+  const races = Array.isArray(value?.races) ? value.races : [];
+  const raceIds = races.map((race: any) => race?.raceId)
+    .filter((id: unknown): id is string => typeof id === 'string' && id.length > 0);
+  if (!races.length || raceIds.length !== races.length) return false;
+  const placeholders = raceIds.map(() => '?').join(',');
+  const { results } = await db.prepare(
+    `SELECT DISTINCT race_id FROM race_results
+     WHERE finishing_position > 0 AND race_id IN (${placeholders})`,
+  ).bind(...raceIds).all<{ race_id: string }>().catch(() => ({ results: [] as { race_id: string }[] }));
+  return new Set((results ?? []).map((row) => row.race_id)).size === raceIds.length;
 }
   // ── Hit-rate cache (cron-driven) ────────────────────────────────────
   // Past-meeting hit-rate is computed once by the daily cron in src/index.ts
@@ -1764,6 +1797,9 @@ analyzeRoutes.get('/top-picks', async (c) => {
     WHERE r.id = ? AND rm.venue IN ('ST','HV')
   `).bind(raceId).first<any>();
   if (!race) return c.json({ error: '找不到該場賽事' }, 404);
+  if (!admin && !(await publicMayReadRace(c.env.DB, race))) {
+    return c.json({ error: 'active membership required' }, 403);
+  }
 
   let picks: any[] = [];
   try {
@@ -1845,6 +1881,9 @@ analyzeRoutes.get('/explain', async (c) => {
   if (!race) return c.json({ error: '找不到該場賽事' }, 404);
 
   const admin = await hasAdminAccess(c, ADMIN_AUTH_POLICY.SESSION_OR_BEARER);
+  if (!admin && !(await publicMayReadRace(c.env.DB, race))) {
+    return c.json({ error: 'active membership required' }, 403);
+  }
   const engine: EloEngine = admin && c.req.query('engine') === 'v11' ? 'v11' : 'v12';
   let picks: any[] = [];
   try {
@@ -2405,7 +2444,7 @@ analyzeRoutes.get('/factors', (c) => {
       // Extracted so cron + admin manual trigger can re-use the same logic.
       // Cache-first by default; pass { fresh: true } to force recompute + cache write.
 
-      async function runRaceDayReportCompute(db: D1Database, engine: EloEngine, opts: { fresh?: boolean; venue?: string } = {}): Promise<any> {
+      export async function runRaceDayReportCompute(db: D1Database, engine: EloEngine, opts: { fresh?: boolean; venue?: string } = {}): Promise<any> {
         const fresh = opts.fresh === true;
         const forceVenue = opts.venue;
         const todayStr = new Date().toISOString().split('T')[0];
@@ -2630,7 +2669,12 @@ analyzeRoutes.get('/factors', (c) => {
               publicStatus as any,
             );
           }
-          return c.json(admin ? result : projectTodayPicksForPublic(result));
+          if (admin) return c.json(result);
+          return c.json(
+            await raceDayReportIsSettled(c.env.DB, result)
+              ? projectTodayPicksForPublic(result)
+              : projectTodayPicksForFree(result),
+          );
         } catch {
           return c.json({ error: 'today-picks unavailable' }, 500);
         }

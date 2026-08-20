@@ -14,6 +14,7 @@ import { loungeRoutes } from './routes/lounge';
 import { silksRoutes } from './routes/silks';
 import { silksSvgRoutes } from './routes/silks_svg';
 import { adminRoutes } from './routes/admin';
+import { membershipRoutes, proPage } from './routes/membership';
 import { getSeasonStatus } from './lib/season';
 import { ADMIN_AUTH_POLICY, buildAdminBearerHeaders, hasAdminAccess } from './lib/admin-auth';
   import { computeHitRateStats, ensureHitRateCacheTable, writeHitRateCache, readHitRateCache, ensureRaceDayReportCacheTable, joinPredictionResults, ensurePredictionLogTable, hitRateEngineKey } from './routes/analyze';
@@ -91,7 +92,16 @@ app.route('/api/odds', oddsRoutes);
 app.route('/api/lounge', loungeRoutes);
 app.route('/api/silks', silksRoutes);
 app.route('/api/silks-svg', silksSvgRoutes);
+app.route('/api/membership', membershipRoutes);
 app.route('/admin', adminRoutes);
+
+app.get('/pro', (c) => c.redirect('/pro/', 301));
+app.get('/pro/', (c) => c.html(proPage(), 200, {
+  'Cache-Control': 'no-store, private',
+  'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+  'Referrer-Policy': 'no-referrer',
+  'X-Content-Type-Options': 'nosniff',
+}));
 
 // 404
 app.notFound((c) => {

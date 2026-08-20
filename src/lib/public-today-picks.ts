@@ -167,6 +167,14 @@ export function projectTodayPicksForPublic(value: unknown): JsonRecord {
   return projected;
 }
 
+export function projectTodayPicksForFree(value: unknown): JsonRecord {
+  const projected = projectTodayPicksForPublic(value);
+  projected.races = Array.isArray(projected.races)
+    ? projected.races.slice(0, 1)
+    : [];
+  return projected;
+}
+
 export function projectTopPicksForPublic(value: unknown): JsonRecord {
   if (!isRecord(value)) return { picks: [] };
   const projected = copyScalars(value, [
