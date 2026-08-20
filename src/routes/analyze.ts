@@ -719,7 +719,7 @@ function buildPickReason(pick: any): string {
 // 被 computePicksFromEntries (hit-rate) 與 runRaceDayReportCompute (today-picks) 共用，
 // 防止兩條路徑 drift（曾經 hit-rate 冇 LGB 路徑 → admin 面板顯示純 ELO）。
 export async function loadLgbScoresForMeeting(
-  db: any,
+  db: D1Database,
   raceNumbers: number[],
   racesDBMap: Map<number, any>,
   targetDate: string,
@@ -763,7 +763,7 @@ export async function loadLgbScoresForMeeting(
 //     — never return a partial frozen set, which would shrink denominators and
 //     create a second misleading scorecard; partial/empty/error → null → recompute.
 async function loadFrozenPicksForHitRate(
-  db: any,
+  db: D1Database,
   date: string,
   engine: string,
   entries: any[],
@@ -851,7 +851,7 @@ async function loadFrozenPicksForHitRate(
   return { races };
 }
 
-export async function computeHitRateStats(db: any, date: string, engine: EloEngine, alphaOverride?: number, opts?: { boxPayouts?: boolean }): Promise<
+export async function computeHitRateStats(db: D1Database, date: string, engine: EloEngine, alphaOverride?: number, opts?: { boxPayouts?: boolean }): Promise<
   | { error: string; status: number }
   | { meeting: any; races: any[]; summary: any }
 > {
@@ -2618,7 +2618,7 @@ analyzeRoutes.get('/factors', (c) => {
         attachRaceQuality(racePredictions);
         const eloReady = racePredictions.some((r) => r.picks?.some((p: any) => p.eloComposite != null));
         const computeMs = Date.now() - t0;
-        const payload = {
+        const payload: Record<string, unknown> = {
           date: targetDate, venue: meeting.venue, trackCondition: meeting.track_condition,
           eloEngine: engine, eloWeights: ELO_WEIGHTS, eloReady, races: racePredictions,
           seedSummary: { ratingSeeded: seedRatingCount, classSeeded: seedClassCount, totalSeeded: seedRatingCount + seedClassCount },

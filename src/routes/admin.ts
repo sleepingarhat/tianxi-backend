@@ -31,7 +31,10 @@ interface AdminEnv {
   ADMIN_GITHUB_USER?: string; // comma-separated allowlist of GitHub logins
 }
 
-export const adminRoutes = new Hono<{ Bindings: AdminEnv }>();
+export const adminRoutes = new Hono<{
+  Bindings: AdminEnv;
+  Variables: { adminUser: string };
+}>();
 
 function isAdminAllowlisted(env: AdminEnv, login: string): boolean {
   const list = (env.ADMIN_GITHUB_USER || '').split(',').map((s) => s.trim()).filter(Boolean);
@@ -123,7 +126,7 @@ adminRoutes.use('*', async (c, next) => {
   if (cookie && c.env.SESSION_HMAC_SECRET) {
     const payload = await verifySession(cookie, c.env.SESSION_HMAC_SECRET);
     if (payload && isAdminAllowlisted(c.env, payload.user)) {
-      c.set('adminUser' as any, payload.user);
+      c.set('adminUser', payload.user);
       await next();
       return;
     }
@@ -509,7 +512,8 @@ adminRoutes.get('/api/coverage', async (c) => {
       scalar<number>(db, `SELECT COUNT(*) FROM race_results rr JOIN races r ON r.id=rr.race_id JOIN race_meetings m ON m.id=r.meeting_id WHERE m.date >= date('now','-90 day') AND rr.running_position IS NOT NULL AND rr.running_position != ''`),
     ]);
 
-    const pct = (n: number, d: number) => d > 0 ? Math.round((n/d)*1000)/10 : 0;
+    const pct = (n: number | null, d: number | null) =>
+      d != null && d > 0 ? Math.round(((n ?? 0) / d) * 1000) / 10 : 0;
 
     return c.json({
       generatedAt: new Date().toISOString(),
@@ -1483,7 +1487,7 @@ adminRoutes.post('/api/migrate-prediction-log-lgb', async (c) => {
       ).bind(...ids).all<{ id: string }>();
       const raceIds = (raceIdRows ?? []).map((r) => r.id);
 
-      const counts: Record<string, number> = {};
+      const counts: Record<string, number | string> = {};
       if (raceIds.length > 0) {
         const rIn = raceIds.map(() => '?').join(',');
         // Hard-delete child rows (non-nullable race_id FK)
