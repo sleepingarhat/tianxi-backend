@@ -5,8 +5,8 @@
  *   1. Session cookie `admin_session=<base64url(payload)>.<base64url(hmac)>`
  *      issued by the GitHub OAuth callback after verifying the user is in the
  *      ADMIN_GITHUB_USER allowlist. HMAC is keyed with SESSION_HMAC_SECRET.
- *   2. Legacy bearer/query `?token=`/`Authorization: Bearer` matching ADMIN_TOKEN
- *      (kept for scripts and emergency access).
+ *   2. `Authorization: Bearer` matching ADMIN_TOKEN, kept for automation and
+ *      emergency access without putting the credential in a URL.
  *
  * No KV / D1 storage required — the cookie is stateless and self-verifying.
  */

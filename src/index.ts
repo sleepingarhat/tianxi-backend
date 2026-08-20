@@ -21,7 +21,16 @@ const app = new Hono<{ Bindings: Env }>();
 
 // Middleware
 app.use('*', cors());
-app.use('*', logger());
+app.use('*', logger((message, ...rest) => {
+  // Hono's default access logger includes the entire query string. Keep request
+  // metadata useful without persisting OAuth codes, filters, or legacy admin
+  // credentials that an old bookmark may still send.
+  const match = message.match(/^((?:<--|-->)\s+\S+\s+)(\S+)(.*)$/);
+  const safeMessage = match
+    ? `${match[1]}${match[2].split('?')[0]}${match[3]}`
+    : message;
+  console.log(safeMessage, ...rest);
+}));
 
 // Health check
 app.get('/', (c) => {

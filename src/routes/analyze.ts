@@ -34,8 +34,7 @@ export async function hasAdminAccess(c: any): Promise<boolean> {
   const expected = env.ADMIN_TOKEN as string | undefined;
   const header = c.req.header('authorization') || '';
   const bearer = header.startsWith('Bearer ') ? header.slice(7) : '';
-  const queryToken = c.req.query('token') || '';
-  return Boolean(expected && (bearer === expected || queryToken === expected));
+  return Boolean(expected && bearer === expected);
 }
 
 function privateRouteUnavailable(c: any) {
@@ -3075,12 +3074,7 @@ analyzeRoutes.get('/factors', (c) => {
         // from the heavy compute path.
         analyzeRoutes.post('/ensemble-alpha', async (c) => {
           try {
-            const expected = (c.env as any).ADMIN_TOKEN as string | undefined;
-            const header = c.req.header('authorization') || '';
-            const bearer = header.startsWith('Bearer ') ? header.slice(7) : '';
-            const queryTok = c.req.query('token') || '';
-            const ok = !!expected && (bearer === expected || queryTok === expected);
-            if (!ok) return c.json({ error: 'unauthorized' }, 401);
+            if (!(await hasAdminAccess(c))) return c.json({ error: 'unauthorized' }, 401);
 
             const body = await c.req.json().catch(() => ({} as any));
             const alpha = Number((body as any)?.alpha);
@@ -3104,12 +3098,7 @@ analyzeRoutes.get('/factors', (c) => {
         // Whitelisted tables only; no arbitrary SQL.
         analyzeRoutes.get('/d1-inspect', async (c) => {
           try {
-            const expected = (c.env as any).ADMIN_TOKEN as string | undefined;
-            const header = c.req.header('authorization') || '';
-            const bearer = header.startsWith('Bearer ') ? header.slice(7) : '';
-            const queryTok = c.req.query('token') || '';
-            const ok = !!expected && (bearer === expected || queryTok === expected);
-            if (!ok) return c.json({ error: 'unauthorized' }, 401);
+            if (!(await hasAdminAccess(c))) return c.json({ error: 'unauthorized' }, 401);
 
             const ALLOWED: Record<string, { entityCol?: string; dateCol?: string }> = {
               horse_elo_snapshots:   { entityCol: 'horse_id',   dateCol: 'as_of_date' },
@@ -3417,14 +3406,9 @@ analyzeRoutes.get('/factors', (c) => {
           let applied = false;
           let applyDenied = false;
           if (apply && winner) {
-            // P1 fix: gate write behind ADMIN_TOKEN (Bearer header or ?token=).
             // Route is mounted under public /api/analyze, so the apply path
-            // would otherwise allow unauthenticated model-parameter mutation.
-            const expected = (c.env as any).ADMIN_TOKEN as string | undefined;
-            const header = c.req.header('authorization') || '';
-            const bearer = header.startsWith('Bearer ') ? header.slice(7) : '';
-            const queryTok = c.req.query('token') || '';
-            const ok = !!expected && (bearer === expected || queryTok === expected);
+            // must require the same session-or-Bearer admin credentials.
+            const ok = await hasAdminAccess(c);
             if (!ok) {
               applyDenied = true;
             } else {

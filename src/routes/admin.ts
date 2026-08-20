@@ -131,13 +131,12 @@ adminRoutes.use('*', async (c, next) => {
       return;
     }
   }
-  // 2. Legacy bearer/query token (scripts, emergency access)
+  // 2. Bearer token (automation and emergency access)
   const expected = c.env.ADMIN_TOKEN;
   if (expected) {
     const header = c.req.header('authorization') || '';
     const bearer = header.startsWith('Bearer ') ? header.slice(7) : '';
-    const queryTok = c.req.query('token') || '';
-    if (bearer === expected || queryTok === expected) {
+    if (bearer === expected) {
       await next();
       return;
     }
@@ -1131,7 +1130,7 @@ adminRoutes.get('/api/meetings', async (c) => {
 });
 
 // ── /api/jockey-elo-debug?name=布浩榮 — diagnose jockey ELO snapshot lookup ──
-// Auth handled by mount-layer middleware (Bearer header or ?token=).
+// Auth handled by mount-layer middleware (session cookie or Bearer header).
 
 // Seed missing jockey/trainer ELO snapshots in production D1.
 // Inserts a 1500-rating snapshot for every (jockey|trainer) without any snapshot,
@@ -1645,9 +1644,8 @@ adminRoutes.post('/api/migrate-prediction-log-lgb', async (c) => {
 adminRoutes.get('/', async (c) => {
   c.header('Cache-Control', 'no-store, no-cache, must-revalidate');
   c.header('Pragma', 'no-cache');
-  const token = c.req.query('token') || '';
   const data = await fetchAdminPageData(c.env);
-  return c.html(renderPanel(token, data));
+  return c.html(renderPanel(data));
 });
 
 // ── Server-side data aggregation for admin panel ──────────────────────────
@@ -1883,7 +1881,7 @@ async function fetchAdminPageData(env: AdminEnv): Promise<Record<string, any>> {
   };
 }
 
-function renderPanel(token: string, preloaded: Record<string, any>): string {
+function renderPanel(preloaded: Record<string, any>): string {
   const _alpha = preloaded && preloaded.ensembleAlpha != null ? Number(preloaded.ensembleAlpha) : null;
   const _alphaOk = _alpha != null && Number.isFinite(_alpha);
   const alphaLabel = _alphaOk ? (_alpha as number).toFixed(2) : '—';
@@ -2160,7 +2158,6 @@ function renderPanel(token: string, preloaded: Record<string, any>): string {
   <script>
   // ── 伺服器端預載資料 (SSR) — 無需任何 fetch 呼叫 ──
   const D = ${JSON.stringify(preloaded).replace(/</g, "\\u003c")};
-  const TOKEN = ${JSON.stringify(token).replace(/</g, "\\u003c")};
   console.log('[admin] SSR D loaded:', { has_coverage: !!(D && D.coverage), has_meetings: !!(D && D.meetings), has_status: !!(D && D.status), keys: D ? Object.keys(D) : null });
   // ── Lemniscate Bloom loader (loading indicator; backtick/backslash-free) ──
   (function(){
