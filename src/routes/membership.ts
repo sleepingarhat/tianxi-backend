@@ -16,6 +16,7 @@ import {
   readCookie,
   sessionCookie,
   sha256,
+  whopAuthorizationUrl,
   type MembershipEntitlement,
 } from '../lib/membership';
 import { projectTodayPicksForPublic } from '../lib/public-today-picks';
@@ -216,17 +217,12 @@ membershipRoutes.get('/login', async (c) => {
     redirectUri,
   ).run();
   c.header('Set-Cookie', oauthCookie(browserNonce));
-  const authorize = new URL('https://api.whop.com/oauth/authorize');
-  authorize.search = new URLSearchParams({
-    client_id: WHOP_OAUTH_CLIENT_ID,
-    redirect_uri: redirectUri,
-    response_type: 'code',
-    scope: 'openid profile',
-    code_challenge: await sha256(verifier),
-    code_challenge_method: 'S256',
+  return c.redirect(whopAuthorizationUrl({
+    redirectUri,
     state,
-  }).toString();
-  return c.redirect(authorize.toString(), 302);
+    nonce: browserNonce,
+    codeChallenge: await sha256(verifier),
+  }), 302);
 });
 
 membershipRoutes.get('/oauth/callback', async (c) => {

@@ -49,6 +49,26 @@ export function randomToken(bytes = 32): string {
   return base64Url(data);
 }
 
+export function whopAuthorizationUrl(input: {
+  redirectUri: string;
+  state: string;
+  nonce: string;
+  codeChallenge: string;
+}): string {
+  const authorize = new URL('https://api.whop.com/oauth/authorize');
+  authorize.search = new URLSearchParams({
+    client_id: WHOP_OAUTH_CLIENT_ID,
+    redirect_uri: input.redirectUri,
+    response_type: 'code',
+    scope: 'openid profile',
+    state: input.state,
+    nonce: input.nonce,
+    code_challenge: input.codeChallenge,
+    code_challenge_method: 'S256',
+  }).toString();
+  return authorize.toString();
+}
+
 export async function sha256(value: string): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
   return base64Url(new Uint8Array(digest));

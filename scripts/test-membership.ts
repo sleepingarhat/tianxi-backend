@@ -11,6 +11,7 @@ import {
   oauthCookie,
   readCookie,
   sessionCookie,
+  whopAuthorizationUrl,
 } from '../src/lib/membership';
 import { projectTodayPicksForFree } from '../src/lib/public-today-picks';
 
@@ -67,6 +68,17 @@ assert.deepEqual(CHECKOUT_URLS, {
   day: 'https://whop.com/tianxi-2d70/38-79/',
   month: 'https://whop.com/tianxi-2d70/198/',
 });
+
+const authorizeUrl = new URL(whopAuthorizationUrl({
+  redirectUri: 'https://tianxi.racing/api/membership/oauth/callback',
+  state: 'state-value',
+  nonce: 'nonce-value',
+  codeChallenge: 'challenge-value',
+}));
+assert.equal(authorizeUrl.searchParams.get('client_id'), 'app_G2CjSxrds7D5Qz');
+assert.equal(authorizeUrl.searchParams.get('nonce'), 'nonce-value');
+assert.equal(authorizeUrl.searchParams.get('code_challenge_method'), 'S256');
+assert.equal(authorizeUrl.searchParams.get('scope'), 'openid profile');
 
 const free = projectTodayPicksForFree({
   date: '2026-08-20',
