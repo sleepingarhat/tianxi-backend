@@ -59,8 +59,7 @@ factorBonus  = fDraw.bonus + fWeight.bonus
 | 檔位偏差 `fDraw` | `(venue, distance)` bucket 出閘位歷史勝率 | additive |
 | 負磅變化 `fWeight` | 今戰負磅 vs 近戰平均負磅 Δ | additive |
 
-> v11 ELO fallback 已於 2026-05-22 移除（production D1 已完成 v12 migration）。
-> 所有 ELO read 直接查 `id LIKE 'v12:%'` 行。
+所有 ELO read 直接查 `id LIKE 'v12:%'` 行。
 
 ### α 自癒 auto-gate（每賽日自動，無人手）
 
@@ -90,11 +89,3 @@ factorBonus  = fDraw.bonus + fWeight.bonus
 | GET | `/api/analyze/backtest-dates?days=` | 列出有 race_results 嘅 race day |
 | GET | `/api/analyze/d1-inspect?table=&limit=` | ADMIN — D1 schema + sample row 探查 |
 | POST | `/api/analyze/ensemble-alpha {alpha}` | ADMIN — 切換生產 α |
-
----
-
-## 歷史清理紀錄
-
-- **2026-05-22**: v11 ELO 引擎完全 strip（D1 100% v12）
-- **2026-05-25**: qimen / meihua / TimesFM 探索代碼 strip（從未進入生產）
-- **2026-05-25**: backtest A/B 報告 routes（start-backtest-bg / backtest-report / backtest-diff / backtest-status / ensemble-only-range）連同 `prediction_log` 嘅 `qimen-bt` / `baseline-bt` / `qimen` variant strip。剩 `baseline` variant（TX-Oracle v3.2 生產輸出）
