@@ -57,7 +57,7 @@ adminGateRoutes.post('/login', async (c) => {
   }
   return new Response(null, {
     status: 302,
-    headers: { Location: '/admin/', 'Set-Cookie': buildSessionCookie(session) },
+    headers: { Location: '/admin', 'Set-Cookie': buildSessionCookie(session) },
   });
 });
 

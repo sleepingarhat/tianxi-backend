@@ -4,6 +4,7 @@ main = "src/index.ts"
 compatibility_date = "2025-04-14"
 compatibility_flags = ["nodejs_compat"]
 usage_model = "unbound"
+workers_dev = true
 
 [vars]
 ENVIRONMENT = "production"
@@ -22,6 +23,48 @@ database_id = "aad1636e-869a-43f5-aa95-4a19e3aa5517"
 # binding = "CACHE"
 # id = "placeholder"
 
+# Custom domain: Pages owns the public site; Worker must own /api,/admin,/pro.
+# Exact /admin (no trailing slash) was previously falling through to Pages 404.
+[[routes]]
+pattern = "tianxi.racing/api/*"
+zone_name = "tianxi.racing"
+
+[[routes]]
+pattern = "tianxi.racing/admin"
+zone_name = "tianxi.racing"
+
+[[routes]]
+pattern = "tianxi.racing/admin/*"
+zone_name = "tianxi.racing"
+
+[[routes]]
+pattern = "tianxi.racing/pro"
+zone_name = "tianxi.racing"
+
+[[routes]]
+pattern = "tianxi.racing/pro/*"
+zone_name = "tianxi.racing"
+
+[[routes]]
+pattern = "www.tianxi.racing/api/*"
+zone_name = "tianxi.racing"
+
+[[routes]]
+pattern = "www.tianxi.racing/admin"
+zone_name = "tianxi.racing"
+
+[[routes]]
+pattern = "www.tianxi.racing/admin/*"
+zone_name = "tianxi.racing"
+
+[[routes]]
+pattern = "www.tianxi.racing/pro"
+zone_name = "tianxi.racing"
+
+[[routes]]
+pattern = "www.tianxi.racing/pro/*"
+zone_name = "tianxi.racing"
+
   [triggers]
   crons = [
     "0 19 * * *",  # 03:00 HKT daily — refresh past-meeting hit-rate cache
@@ -30,4 +73,3 @@ database_id = "aad1636e-869a-43f5-aa95-4a19e3aa5517"
     "0 4 * * *",   # 12:00 HKT daily — second pre-race refresh
     "0 10 * * *",  # 18:00 HKT daily — refresh report 1h before HV first race
   ]
-  
