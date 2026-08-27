@@ -14,6 +14,7 @@ import { loungeRoutes } from './routes/lounge';
 import { silksRoutes } from './routes/silks';
 import { silksSvgRoutes } from './routes/silks_svg';
 import { adminRoutes } from './routes/admin';
+import { adminGateRoutes } from './routes/admin-gate';
 import { membershipRoutes, proPage } from './routes/membership';
 import { getSeasonStatus } from './lib/season';
 import { ADMIN_AUTH_POLICY, buildAdminBearerHeaders, hasAdminAccess } from './lib/admin-auth';
@@ -93,6 +94,7 @@ app.route('/api/lounge', loungeRoutes);
 app.route('/api/silks', silksRoutes);
 app.route('/api/silks-svg', silksSvgRoutes);
 app.route('/api/membership', membershipRoutes);
+app.route('/admin', adminGateRoutes);
 app.route('/admin', adminRoutes);
 
 app.get('/pro', (c) => c.redirect('/pro/', 301));
@@ -385,5 +387,4 @@ app.onError((err, c) => {
       );
     },
   };
-
 
