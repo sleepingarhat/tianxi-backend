@@ -105,12 +105,43 @@ export function readCookie(cookieHeader: string | undefined, name: string): stri
   return null;
 }
 
+export const TOKEN_SESSION_USER = 'admin-token';
+
 export function isAdminAllowlisted(env: AdminAuthEnv, login: string): boolean {
   const allowlist = String(env.ADMIN_GITHUB_USER || '')
     .split(',')
     .map((candidate) => candidate.trim())
     .filter(Boolean);
   return allowlist.includes(login);
+}
+
+export function sessionSigningSecret(env: AdminAuthEnv): string | undefined {
+  return env.SESSION_HMAC_SECRET || env.ADMIN_TOKEN;
+}
+
+export async function issueAdminTokenSession(
+  env: AdminAuthEnv,
+  presented: string,
+): Promise<string | null> {
+  const expected = env.ADMIN_TOKEN;
+  if (!expected || !presented || presented !== expected) return null;
+  const secret = sessionSigningSecret(env);
+  if (!secret) return null;
+  return signSession(newSessionPayload(TOKEN_SESSION_USER), secret);
+}
+
+export async function readPresentedAdminSecret(request: Request): Promise<string> {
+  const ct = request.headers.get('content-type') || '';
+  if (ct.includes('application/x-www-form-urlencoded') || ct.includes('multipart/form-data')) {
+    const form = await request.formData();
+    return String(form.get('credential') || form.get('secret') || form.get('password') || '').trim();
+  }
+  if (ct.includes('application/json')) {
+    const body = await request.json().catch(() => null) as Record<string, unknown> | null;
+    const value = body?.credential ?? body?.secret ?? body?.password ?? '';
+    return String(value || '').trim();
+  }
+  return '';
 }
 
 /**
@@ -125,9 +156,12 @@ export async function hasAdminAccess(
 ): Promise<boolean> {
   if (policy === ADMIN_AUTH_POLICY.SESSION_OR_BEARER) {
     const cookie = readCookie(c.req.header('cookie'), SESSION_COOKIE);
-    if (cookie && c.env.SESSION_HMAC_SECRET) {
-      const payload = await verifySession(cookie, c.env.SESSION_HMAC_SECRET);
-      if (payload && isAdminAllowlisted(c.env, payload.user)) return true;
+    const secret = sessionSigningSecret(c.env);
+    if (cookie && secret) {
+      const payload = await verifySession(cookie, secret);
+      if (payload && (payload.user === TOKEN_SESSION_USER || isAdminAllowlisted(c.env, payload.user))) {
+        return true;
+      }
     }
   }
 
