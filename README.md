@@ -1,27 +1,18 @@
 # 天喜後端 · tianxi-backend
 
-[![Deploy](https://github.com/sleepingarhat/tianxi-backend/actions/workflows/deploy.yml/badge.svg)](https://github.com/sleepingarhat/tianxi-backend/actions/workflows/deploy.yml)
-[![LGB Predict](https://github.com/sleepingarhat/tianxi-backend/actions/workflows/lgb_predict_upcoming.yml/badge.svg)](https://github.com/sleepingarhat/tianxi-backend/actions/workflows/lgb_predict_upcoming.yml)
-[![LGB Backfill](https://github.com/sleepingarhat/tianxi-backend/actions/workflows/lgb_backfill.yml/badge.svg)](https://github.com/sleepingarhat/tianxi-backend/actions/workflows/lgb_backfill.yml)
-[![Racecard](https://github.com/sleepingarhat/tianxi-backend/actions/workflows/capy_racecard.yml/badge.svg)](https://github.com/sleepingarhat/tianxi-backend/actions/workflows/capy_racecard.yml)
-[![Results](https://github.com/sleepingarhat/tianxi-backend/actions/workflows/capy_results.yml/badge.svg)](https://github.com/sleepingarhat/tianxi-backend/actions/workflows/capy_results.yml)
-[![Sanity](https://github.com/sleepingarhat/tianxi-backend/actions/workflows/engine_sanity_daily.yml/badge.svg)](https://github.com/sleepingarhat/tianxi-backend/actions/workflows/engine_sanity_daily.yml)
+天喜賽馬預測的生產 API 與 TX-Oracle v3.2 引擎。
 
-數據庫那掛綠／紅 badge 係 **GitHub Actions 最近一跑結果**，唔係人手 PASS 表。本 repo 現在同款：上面每個 badge 點進去係自動 workflow。每日 sanity 會寫 [reports/SANITY.md](./reports/SANITY.md)。
+公開站台：[tianxi.racing](https://tianxi.racing)
 
-Cloudflare Workers + D1 API、TX-Oracle v3.2 預測引擎、內部管理控制台。
+## 產品
 
-## 技術梯
+TX-Oracle 對每場香港賽馬輸出獨贏、頭三、頭四概率與排名。模型用 LightGBM LambdaRank 學習名次順序，再與多軸 Elo 進行組合；臨場獨贏賠率只作參考欄，不進入排名模型。賽季中按賽程輸出訓練健康指標；休季自動暫停定時更新，開季後自動恢復。
 
-- **Runtime**: Cloudflare Workers (Hono v4)
-- **Database**: Cloudflare D1（SQLite，綁定名 `DB`）
-- **語言**: TypeScript 5.9
-- **部署**: `wrangler deploy`
+截至上季最後一日（2026-07-15），引擎仍用當日凍結的預測紀錄，不改寫歷史戰績。
 
-## 系統架構（3 repos 生態）
+## 技術
 
-| Repo | 角色 |
-|------|------|
-| **tianxi-database**（public） | HKJC 爬取 · CSV 數據底 · GHA 調度 · ELO pipeline |
-| **tianxi-backend**（本 repo · public） | D1 API + TX-Oracle v3.2 預測引擎 + 管理控制台 |
-| **tianxi-site**（public） | CF Pages 純靜態前端 |
+- Cloudflare Workers（Hono）+ D1
+- TX-Oracle v3.2：LambdaRank + Elo v12 + 因子補償
+- 前端：[tianxi-site](https://github.com/sleepingarhat/tianxi-site)
+- 賽事數據：[tianxi-database](https://github.com/sleepingarhat/tianxi-database)
