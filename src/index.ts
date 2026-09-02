@@ -66,7 +66,7 @@ app.post('/admin/api/set-season-mode', async (c) => {
   ).run().catch(() => {});
   await c.env.DB.prepare(
     `INSERT INTO app_settings (key, value, updated_at) VALUES ('season_mode', ?, datetime('now'))
-     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
   ).bind(mode).run();
   const s = await getSeasonStatus(c.env.DB);
   return c.json({ ok: true, ...s, setAt: new Date().toISOString() });
@@ -85,10 +85,6 @@ app.route('/api/silks', silksRoutes);
 app.route('/api/silks-svg', silksSvgRoutes);
 app.route('/api/membership', membershipRoutes);
 app.route('/ops', opsRoutes);
-
-app.get('/admin', (c) => c.redirect('/ops', 302));
-app.get('/admin/', (c) => c.redirect('/ops', 302));
-
 app.route('/admin', adminGateRoutes);
 app.route('/admin', adminRoutes);
 
@@ -196,20 +192,52 @@ app.onError((err, c) => {
     try {
       const latest = await env.DB.prepare(`SELECT MAX(race_date) AS d FROM odds_snapshots`).first<{ d: string | null }>();
       const keptDate = latest?.d ?? null;
-      if (!keptDate) return { ok: true, keptDate: null, snapshotsDeleted: 0, poolTotalsDeleted: 0 };
+      if (!keptDate) {
+        return { ok: true, keptDate: null, snapshotsDeleted: 0, poolTotalsDeleted: 0 };
+      }
       const r1 = await env.DB.prepare(`DELETE FROM odds_snapshots WHERE race_date < ?`).bind(keptDate).run();
       const r2 = await env.DB.prepare(`DELETE FROM pool_totals WHERE race_date < ?`).bind(keptDate).run().catch(() => ({ meta: { changes: 0 } } as any));
-      return { ok: true, keptDate, snapshotsDeleted: (r1 as any)?.meta?.changes ?? 0, poolTotalsDeleted: (r2 as any)?.meta?.changes ?? 0 };
+      return {
+        ok: true,
+        keptDate,
+        snapshotsDeleted: (r1 as any)?.meta?.changes ?? 0,
+        poolTotalsDeleted: (r2 as any)?.meta?.changes ?? 0,
+      };
     } catch (e: any) {
       return { ok: false, keptDate: null, snapshotsDeleted: 0, poolTotalsDeleted: 0, error: e?.message ?? String(e) };
     }
   }
 
-  async function archiveOddsBeforePrune(env: Env): Promise<{ ok: boolean; oddsArchived: number; poolTotalsArchived: number; error?: string }> {
+  async function archiveOddsBeforePrune(env: Env): Promise<{
+    ok: boolean;
+    oddsArchived: number;
+    poolTotalsArchived: number;
+    error?: string;
+  }> {
     try {
       await env.DB.prepare(`CREATE TABLE IF NOT EXISTS odds_archive (id TEXT PRIMARY KEY, race_date TEXT NOT NULL, venue TEXT NOT NULL, race_number INTEGER NOT NULL, pool_type TEXT NOT NULL, combination TEXT NOT NULL, odds REAL, snapshot_at TEXT NOT NULL, source_commit TEXT)`).run();
+      await env.DB.prepare(`CREATE INDEX IF NOT EXISTS idx_odds_archive_lookup ON odds_archive (race_date, venue, race_number, pool_type, combination, snapshot_at)`).run();
       await env.DB.prepare(`CREATE TABLE IF NOT EXISTS pool_totals_archive (id TEXT PRIMARY KEY, race_date TEXT NOT NULL, venue TEXT NOT NULL, race_number INTEGER NOT NULL, pool_type TEXT NOT NULL, total_investment REAL, snapshot_at TEXT NOT NULL, source_commit TEXT)`).run();
-      return { ok: true, oddsArchived: 0, poolTotalsArchived: 0 };
+      await env.DB.prepare(`CREATE INDEX IF NOT EXISTS idx_pool_totals_archive_lookup ON pool_totals_archive (race_date, venue, race_number, pool_type, snapshot_at)`).run();
+      const a1 = await env.DB.prepare(`INSERT OR IGNORE INTO odds_archive (id, race_date, venue, race_number, pool_type, combination, odds, snapshot_at, source_commit)
+         SELECT id, race_date, venue, race_number, pool_type, combination, odds, snapshot_at, source_commit FROM (
+           SELECT *,
+             ROW_NUMBER() OVER (PARTITION BY race_date,venue,race_number,pool_type,combination ORDER BY snapshot_at ASC)  AS rn_asc,
+             ROW_NUMBER() OVER (PARTITION BY race_date,venue,race_number,pool_type,combination ORDER BY snapshot_at DESC) AS rn_desc
+           FROM odds_snapshots
+           WHERE pool_type IN ('WIN','PLA') AND race_date < (SELECT MAX(race_date) FROM odds_snapshots)
+         )
+         WHERE rn_asc = 1 OR rn_desc <= 6`).run();
+      const a2 = await env.DB.prepare(`INSERT OR IGNORE INTO pool_totals_archive (id, race_date, venue, race_number, pool_type, total_investment, snapshot_at, source_commit)
+         SELECT id, race_date, venue, race_number, pool_type, total_investment, snapshot_at, source_commit FROM (
+           SELECT *,
+             ROW_NUMBER() OVER (PARTITION BY race_date,venue,race_number,pool_type ORDER BY snapshot_at ASC)  AS rn_asc,
+             ROW_NUMBER() OVER (PARTITION BY race_date,venue,race_number,pool_type ORDER BY snapshot_at DESC) AS rn_desc
+           FROM pool_totals
+           WHERE race_date < (SELECT MAX(race_date) FROM pool_totals)
+         )
+         WHERE rn_asc = 1 OR rn_desc <= 6`).run();
+      return { ok: true, oddsArchived: (a1 as any)?.meta?.changes ?? 0, poolTotalsArchived: (a2 as any)?.meta?.changes ?? 0 };
     } catch (e: any) {
       return { ok: false, oddsArchived: 0, poolTotalsArchived: 0, error: e?.message ?? String(e) };
     }
@@ -229,7 +257,10 @@ app.onError((err, c) => {
 
   async function warmStrategyPnl(env: Env): Promise<{ ok: boolean; pending: number; cached?: boolean; error?: string }> {
     try {
-      const req = new Request('https://internal/api/analyze/strategy-pnl?refresh=1', { method: 'GET', headers: buildAdminBearerHeaders(env) });
+      const req = new Request('https://internal/api/analyze/strategy-pnl?refresh=1', {
+        method: 'GET',
+        headers: buildAdminBearerHeaders(env),
+      });
       const res = await app.fetch(req, env, { waitUntil: () => {}, passThroughOnException: () => {} } as any);
       const data: any = await res.json().catch(() => ({}));
       if (data?.error) return { ok: false, pending: -1, error: data.error };
@@ -246,9 +277,19 @@ app.onError((err, c) => {
   export default {
     fetch: app.fetch,
     async scheduled(_event: any, env: Env, ctx: any): Promise<void> {
-      ctx.waitUntil(refreshHitRateCache(env).then((r) => console.log('[cron] hit-rate refresh', r)).then(() => warmStrategyPnl(env)));
-      ctx.waitUntil(refreshRaceDayReport(env));
-      ctx.waitUntil(backfillPredictionResults(env));
-      ctx.waitUntil(archiveOddsBeforePrune(env).then(() => pruneOddsToLatestDay(env)));
+      ctx.waitUntil(
+        refreshHitRateCache(env)
+          .then((r) => console.log('[cron] hit-rate refresh', r))
+          .then(() => warmStrategyPnl(env))
+          .then((r) => console.log('[cron] strategy-pnl warmup', r)),
+      );
+      ctx.waitUntil(refreshRaceDayReport(env).then((r) => console.log('[cron] race-day report refresh', r)));
+      ctx.waitUntil(backfillPredictionResults(env).then((r) => console.log('[cron] prediction backfill', r)));
+      ctx.waitUntil(
+        archiveOddsBeforePrune(env)
+          .then((a) => console.log('[cron] odds archive', a))
+          .then(() => pruneOddsToLatestDay(env))
+          .then((r) => console.log('[cron] odds prune', r)),
+      );
     },
   };
