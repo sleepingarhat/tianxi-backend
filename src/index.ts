@@ -25,9 +25,6 @@ const app = new Hono<{ Bindings: Env }>();
 // Middleware
 app.use('*', cors());
 app.use('*', logger((message, ...rest) => {
-  // Hono's default access logger includes the entire query string. Keep request
-  // metadata useful without persisting OAuth codes, filters, or legacy admin
-  // credentials that an old bookmark may still send.
   const match = message.match(/^((?:<--|-->)\s+\S+\s+)(\S+)(.*)$/);
   const safeMessage = match
     ? `${match[1]}${match[2].split('?')[0]}${match[3]}`
@@ -35,7 +32,6 @@ app.use('*', logger((message, ...rest) => {
   console.log(safeMessage, ...rest);
 }));
 
-// Health check
 app.get('/', (c) => {
   return c.json({
     name: '天喜娛樂 Tianxi Entertainment API',
@@ -44,9 +40,6 @@ app.get('/', (c) => {
   });
 });
 
-// ── 休季自動化: GET /api/season ─────────────────────────────────────
-// Public season status — read by the tianxi-site banner and by the GH
-// Actions season_gate pre-flight in both repos. Cheap (3 tiny D1 lookups).
 app.get('/api/season', async (c) => {
   const s = await getSeasonStatus(c.env.DB);
   return c.json({
@@ -56,8 +49,6 @@ app.get('/api/season', async (c) => {
   });
 });
 
-// Admin override: POST /admin/api/set-season-mode?mode=auto|in|off
-// Bearer-gated (same posture as set-alpha). 'auto' restores detection.
 app.post('/admin/api/set-season-mode', async (c) => {
   if (!(await hasAdminAccess(c, ADMIN_AUTH_POLICY.BEARER_ONLY))) {
     return c.json({ error: 'unauthorized (Bearer required)' }, 401);
@@ -81,7 +72,6 @@ app.post('/admin/api/set-season-mode', async (c) => {
   return c.json({ ok: true, ...s, setAt: new Date().toISOString() });
 });
 
-// API Routes
 app.route('/api/meetings', meetingsRoutes);
 app.route('/api/races', racesRoutes);
 app.route('/api/horses', horsesRoutes);
@@ -94,6 +84,28 @@ app.route('/api/lounge', loungeRoutes);
 app.route('/api/silks', silksRoutes);
 app.route('/api/silks-svg', silksSvgRoutes);
 app.route('/api/membership', membershipRoutes);
+
+// Unauthenticated browser hits on /admin go to the password form.
+// Query-string tokens are ignored on purpose — use the form, get a cookie.
+app.get('/admin', async (c) => {
+  if (await hasAdminAccess(c, ADMIN_AUTH_POLICY.SESSION_OR_BEARER)) {
+    const dest = new URL(c.req.url);
+    dest.pathname = '/';
+    dest.search = '';
+    return adminRoutes.fetch(new Request(dest.toString(), c.req.raw), c.env);
+  }
+  return c.redirect('/admin/login', 302);
+});
+app.get('/admin/', async (c) => {
+  if (await hasAdminAccess(c, ADMIN_AUTH_POLICY.SESSION_OR_BEARER)) {
+    const dest = new URL(c.req.url);
+    dest.pathname = '/';
+    dest.search = '';
+    return adminRoutes.fetch(new Request(dest.toString(), c.req.raw), c.env);
+  }
+  return c.redirect('/admin/login', 302);
+});
+
 app.route('/admin', adminGateRoutes);
 app.route('/admin', adminRoutes);
 
@@ -105,20 +117,15 @@ app.get('/pro/', (c) => c.html(proPage(), 200, {
   'X-Content-Type-Options': 'nosniff',
 }));
 
-// 404
 app.notFound((c) => {
   return c.json({ error: 'Not Found' }, 404);
 });
 
-// Error handler
 app.onError((err, c) => {
   console.error('Unhandled error:', err);
   return c.json({ error: 'Internal Server Error' }, 500);
 });
 
-// ── Scheduled cron: refresh past-meeting hit-rate cache ─────────────
-  // Runs daily 03:00 HKT. Backfills up to 12 oldest past meetings per tick;
-  // once caught up, only newly-finalised meetings need (re)computing.
   async function refreshHitRateCache(env: Env): Promise<{ refreshed: number; errors: number }> {
     await ensureHitRateCacheTable(env.DB);
     const today = new Date().toISOString().substring(0, 10);
@@ -143,16 +150,13 @@ app.onError((err, c) => {
     return { refreshed, errors };
   }
 
-  // Manual trigger endpoint for admin: POST /admin/api/refresh-hit-cache
   app.post('/admin/api/refresh-hit-cache', async (c) => {
     if (!(await hasAdminAccess(c, ADMIN_AUTH_POLICY.SESSION_OR_BEARER))) return c.json({ error: 'Not found' }, 404);
     const out = await refreshHitRateCache(c.env);
     return c.json({ ok: true, ...out, ranAt: new Date().toISOString() });
   });
-  // Surface cached lookup so admin can display "cache populated" without a DB hit elsewhere
   void readHitRateCache;
 
-  // Backfill prediction_log with actual results for recent past meetings (last 7 days).
     async function backfillPredictionResults(env: Env): Promise<{ daysProcessed: number; totalUpdated: number }> {
       try {
         await ensurePredictionLogTable(env.DB);
@@ -172,14 +176,12 @@ app.onError((err, c) => {
       } catch (e: any) { return { daysProcessed: 0, totalUpdated: 0 }; }
     }
 
-    // Manual trigger: POST /admin/api/backfill-prediction-results
     app.post('/admin/api/backfill-prediction-results', async (c) => {
       if (!(await hasAdminAccess(c, ADMIN_AUTH_POLICY.SESSION_OR_BEARER))) return c.json({ error: 'Not found' }, 404);
       const out = await backfillPredictionResults(c.env);
       return c.json({ ok: true, ...out, ranAt: new Date().toISOString() });
     });
 
-    // Pre-compute today's race-day report so admin page renders instantly.
   async function refreshRaceDayReport(env: Env): Promise<{ ok: boolean; date?: string; venue?: string; races?: number; computeMs?: number; seedSummary?: any; error?: string }> {
     try {
       await ensureRaceDayReportCacheTable(env.DB);
@@ -201,14 +203,6 @@ app.onError((err, c) => {
     return c.json({ ...out, ranAt: new Date().toISOString() });
   });
 
-  // ── Odds retention (2026-05-27): keep ONLY the latest race day ──────
-  // Engine does NOT use odds; they are reference/record-only. After each
-  // race day's predictions + results are persisted, older odds are
-  // expendable. Runs daily via cron AFTER hit-rate + prediction backfill,
-  // so any same-day join is already done.
-  // Policy: DELETE odds_snapshots / pool_totals rows WHERE race_date <
-  // (SELECT MAX(race_date) ...). Single-day retention prevents D1 from
-  // re-hitting the 10GB cap that wedged 5/27.
   async function pruneOddsToLatestDay(env: Env): Promise<{
     ok: boolean;
     keptDate: string | null;
@@ -241,13 +235,6 @@ app.onError((err, c) => {
     }
   }
 
-  // ── Downsampled odds ARCHIVE (2026-06-16) ──────────────────────────
-  // Before the latest-day prune deletes the retention window, copy a thin
-  // slice of WIN/PLA odds + pool_totals (first + last 6 snapshots per series
-  // ≈ 7 timepoints) into permanent *_archive tables. Self-migrating
-  // (CREATE TABLE IF NOT EXISTS) so no manual D1 migration is needed.
-  // ~47MB/yr vs ~37GB/yr for full retention. The engine still ignores odds;
-  // this is groundwork for a future market-drift signal. MUST run BEFORE prune.
   async function archiveOddsBeforePrune(env: Env): Promise<{
     ok: boolean;
     oddsArchived: number;
@@ -268,9 +255,6 @@ app.onError((err, c) => {
         `CREATE INDEX IF NOT EXISTS idx_pool_totals_archive_lookup ON pool_totals_archive (race_date, venue, race_number, pool_type, snapshot_at)`
       ).run();
 
-      // WIN/PLA odds: keep first + last 6 snapshots per series for the days the
-      // prune is about to delete (race_date < MAX). INSERT OR IGNORE on the
-      // shared id → idempotent across cron ticks.
       const a1 = await env.DB.prepare(
         `INSERT OR IGNORE INTO odds_archive (id, race_date, venue, race_number, pool_type, combination, odds, snapshot_at, source_commit)
          SELECT id, race_date, venue, race_number, pool_type, combination, odds, snapshot_at, source_commit FROM (
@@ -283,7 +267,6 @@ app.onError((err, c) => {
          WHERE rn_asc = 1 OR rn_desc <= 6`
       ).run();
 
-      // pool_totals (all pools — small money-flow signal): same downsample.
       const a2 = await env.DB.prepare(
         `INSERT OR IGNORE INTO pool_totals_archive (id, race_date, venue, race_number, pool_type, total_investment, snapshot_at, source_commit)
          SELECT id, race_date, venue, race_number, pool_type, total_investment, snapshot_at, source_commit FROM (
@@ -306,37 +289,18 @@ app.onError((err, c) => {
     }
   }
 
-  // Manual trigger for admin verification.
   app.post('/admin/api/prune-odds', async (c) => {
     if (!(await hasAdminAccess(c, ADMIN_AUTH_POLICY.SESSION_OR_BEARER))) return c.json({ error: 'Not found' }, 404);
     const out = await pruneOddsToLatestDay(c.env);
     return c.json({ ...out, ranAt: new Date().toISOString() });
   });
 
-  // Manual trigger for the downsampled odds archive (idempotent; safe anytime).
   app.post('/admin/api/archive-odds', async (c) => {
     if (!(await hasAdminAccess(c, ADMIN_AUTH_POLICY.SESSION_OR_BEARER))) return c.json({ error: 'Not found' }, 404);
     const out = await archiveOddsBeforePrune(c.env);
     return c.json({ ...out, ranAt: new Date().toISOString() });
   });
 
-  // ── Strategy-P&L aggregate warmup (2026-06-26) ─────────────────────
-  // The /strategy-pnl per-day aggregate (synthetic key `__strategy_pnl_<from>`)
-  // is only built lazily on the first visit after each new race day, and only
-  // cached when pending===0 with to===today. After a race day's results land —
-  // or once the UTC calendar day rolls over — that cache goes stale (to!==today),
-  // so the next first-visitor eats a slow recompute. This warmup acts as a
-  // synthetic daily visitor from the cron so a real cold load returns the cached
-  // line instantly (全自動, no first-visitor penalty).
-  //
-  // Runs AFTER refreshHitRateCache so each newly-settled day's per-meeting
-  // boxPayouts cache is fresh first; a single endpoint hit then re-aggregates
-  // off those per-day caches and writes the synthetic aggregate row when
-  // pending===0. A warm same-UTC-day cache short-circuits to `cached:true` (zero
-  // work); a stale cache is rebuilt. We deliberately do ONE call (not a fill
-  // loop) — the endpoint self-heals at most one pending day per request, so the
-  // warmup never turns into a heavy backlog drain (any long historical backlog
-  // is filled gradually by refreshHitRateCache + per-request self-heal, not here).
   async function warmStrategyPnl(env: Env): Promise<{ ok: boolean; pending: number; cached?: boolean; error?: string }> {
     try {
       const req = new Request('https://internal/api/analyze/strategy-pnl?refresh=1', {
@@ -350,7 +314,6 @@ app.onError((err, c) => {
     } catch (e: any) { return { ok: false, pending: -1, error: e?.message ?? String(e) }; }
   }
 
-  // Manual trigger for the strategy-pnl warmup (idempotent; safe anytime).
   app.post('/admin/api/warm-strategy-pnl', async (c) => {
     if (!(await hasAdminAccess(c, ADMIN_AUTH_POLICY.SESSION_OR_BEARER))) return c.json({ error: 'Not found' }, 404);
     const out = await warmStrategyPnl(c.env);
@@ -360,9 +323,6 @@ app.onError((err, c) => {
   export default {
     fetch: app.fetch,
     async scheduled(_event: any, env: Env, ctx: any): Promise<void> {
-      // Refresh per-meeting boxPayouts caches first, THEN warm the strategy-pnl
-      // aggregate off those fresh per-day caches (chained, not a separate
-      // waitUntil) so the aggregate never reads a half-filled day.
       ctx.waitUntil(
         refreshHitRateCache(env)
           .then((r) => console.log('[cron] hit-rate refresh', r))
@@ -375,10 +335,6 @@ app.onError((err, c) => {
       ctx.waitUntil(
         backfillPredictionResults(env).then((r) => console.log('[cron] prediction backfill', r)),
       );
-      // Archive a thin WIN/PLA + pool_totals slice, THEN prune. Chained (not a
-      // separate waitUntil) so the archive copy always finishes before the
-      // prune deletes those rows. Archive is non-fatal (returns {ok:false}
-      // instead of throwing) → prune still runs even if archiving fails.
       ctx.waitUntil(
         archiveOddsBeforePrune(env)
           .then((a) => console.log('[cron] odds archive', a))
@@ -387,4 +343,3 @@ app.onError((err, c) => {
       );
     },
   };
-
