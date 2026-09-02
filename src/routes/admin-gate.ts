@@ -44,16 +44,24 @@ ${github}
 adminGateRoutes.get('/login', (c) => {
   const on = githubReady(c.env);
   return c.html(loginPage(
-    on ? '可用內部密鑰或 GitHub 登入。' : 'GitHub OAuth 未設定，請用內部密鑰登入。',
+    on
+      ? '可用內部密鑰或 GitHub 登入。只貼密鑰本身，或連舊網址一齊貼都可以。'
+      : '請用內部密鑰登入。只貼密鑰本身即可；若貼左整條舊監控網址亦會自動抽出 token。',
     on,
   ));
 });
 
 adminGateRoutes.post('/login', async (c) => {
   const presented = await readPresentedAdminSecret(c.req.raw);
+  if (!presented) {
+    return c.html(loginPage('未讀到密鑰。請貼內部密鑰或舊監控網址。', githubReady(c.env)), 401);
+  }
+  if (!c.env.ADMIN_TOKEN) {
+    return c.html(loginPage('伺服器未設定內部密鑰。', githubReady(c.env)), 503);
+  }
   const session = await issueAdminTokenSession(c.env, presented);
   if (!session) {
-    return c.html(loginPage('密鑰不正確。', githubReady(c.env)), 401);
+    return c.html(loginPage('密鑰不正確。請確認係雲端 ADMIN_TOKEN，唔係用戶端會員密碼。', githubReady(c.env)), 401);
   }
   return new Response(null, {
     status: 302,

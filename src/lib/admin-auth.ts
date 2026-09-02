@@ -107,6 +107,28 @@ export function readCookie(cookieHeader: string | undefined, name: string): stri
 
 export const TOKEN_SESSION_USER = 'admin-token';
 
+/** Accept raw secret, or a pasted monitor URL that contains ?token=. */
+export function normalizePresentedAdminSecret(raw: string): string {
+  const s = String(raw || '').trim().replace(/^['"]|['"]$/g, '');
+  if (!s) return '';
+  try {
+    if (/^https?:\/\//i.test(s)) {
+      const u = new URL(s);
+      const t = u.searchParams.get('token');
+      if (t) return t.trim();
+    }
+    if (s.includes('token=')) {
+      const q = s.includes('?') ? s.slice(s.indexOf('?') + 1) : s;
+      const params = new URLSearchParams(q.split('#')[0]);
+      const t = params.get('token');
+      if (t) return t.trim();
+    }
+  } catch {
+    /* fall through */
+  }
+  return s;
+}
+
 export function isAdminAllowlisted(env: AdminAuthEnv, login: string): boolean {
   const allowlist = String(env.ADMIN_GITHUB_USER || '')
     .split(',')
@@ -124,7 +146,8 @@ export async function issueAdminTokenSession(
   presented: string,
 ): Promise<string | null> {
   const expected = env.ADMIN_TOKEN;
-  if (!expected || !presented || presented !== expected) return null;
+  const got = normalizePresentedAdminSecret(presented);
+  if (!expected || !got || got !== expected) return null;
   const secret = sessionSigningSecret(env);
   if (!secret) return null;
   return signSession(newSessionPayload(TOKEN_SESSION_USER), secret);
@@ -132,16 +155,15 @@ export async function issueAdminTokenSession(
 
 export async function readPresentedAdminSecret(request: Request): Promise<string> {
   const ct = request.headers.get('content-type') || '';
+  let raw = '';
   if (ct.includes('application/x-www-form-urlencoded') || ct.includes('multipart/form-data')) {
     const form = await request.formData();
-    return String(form.get('credential') || form.get('secret') || form.get('password') || '').trim();
-  }
-  if (ct.includes('application/json')) {
+    raw = String(form.get('credential') || form.get('secret') || form.get('password') || '');
+  } else if (ct.includes('application/json')) {
     const body = await request.json().catch(() => null) as Record<string, unknown> | null;
-    const value = body?.credential ?? body?.secret ?? body?.password ?? '';
-    return String(value || '').trim();
+    raw = String(body?.credential ?? body?.secret ?? body?.password ?? '');
   }
-  return '';
+  return normalizePresentedAdminSecret(raw);
 }
 
 /**
