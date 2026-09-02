@@ -5,26 +5,41 @@ import { fetchLatestWinOddsByRace, normHorseKey } from '../lib/market-blend';
 
 export const meetingsRoutes = new Hono<{ Bindings: Env }>();
 
-// Declared race count from the upcoming entry list (racecard). Used when a
-// meeting's races table isn't populated yet (pre-results) so single-meeting
-// endpoints report the declared field size (e.g. 11 場) instead of 0/null,
-// mirroring the COALESCE fallback already used by the list endpoint.
-async function declaredRaceCount(db: Env['DB'], date: string, venue: string): Promise<number> {
-  const row = await db
-    .prepare(
-      "SELECT COUNT(DISTINCT race_number) AS n FROM entries_upcoming WHERE race_date = ? AND venue = ? AND race_number > 0"
-    )
-    .bind(date, venue)
-    .first<{ n: number }>();
-  return row?.n ?? 0;
+function venueName(v: string | null | undefined) {
+  return v === 'ST' ? '沙田' : v === 'HV' ? '跑馬地' : v;
 }
 
-// Pre-results racecard: the post-race `races` table is empty until results
-// land, but the declared field (entries_upcoming) exists from the moment the
-// racecard is published. Build race rows in the same shape as /:date so the
-// dashboard RACE CARD + schedule featured meeting can show the day's races
-// (field size, class, distance) BEFORE the meeting runs. Post times / going /
-// prize are unknown pre-results and fill in once the races table is populated.
+function toMeetingDto(m: RaceMeetingRow) {
+  return {
+    id: m.id,
+    date: m.date,
+    venue: m.venue,
+    venueName: venueName(m.venue),
+    trackCondition: m.track_condition,
+    weather: m.weather,
+    totalRaces: m.total_races,
+  };
+}
+
+function isGhost(m: RaceMeetingRow) {
+  const n = Number(m.total_races);
+  return Number.isFinite(n) && n > 0 && n < 4;
+}
+
+async function declaredRaceCount(db: Env['DB'], date: string, venue: string): Promise<number> {
+  try {
+    const row = await db
+      .prepare(
+        'SELECT COUNT(DISTINCT race_number) AS n FROM entries_upcoming WHERE race_date = ? AND venue = ? AND race_number > 0'
+      )
+      .bind(date, venue)
+      .first<{ n: number }>();
+    return row?.n ?? 0;
+  } catch {
+    return 0;
+  }
+}
+
 async function buildRacecardFromEntries(
   db: Env['DB'],
   date: string,
@@ -97,136 +112,109 @@ async function buildRacecardFromEntries(
   });
 }
 
-// GET /api/meetings — 賽事日列表
-// Query params: ?from=2026-01-01&to=2026-04-16&venue=ST&limit=20&offset=0
+// GET /api/meetings — list. Keep the query cheap: no per-row subquery on
+// entries_upcoming. That correlated COUNT + EXISTS 500'd D1 at limit=80.
 meetingsRoutes.get('/', async (c) => {
   const from = c.req.query('from');
   const to = c.req.query('to');
   const venue = c.req.query('venue');
-  const month = c.req.query('month'); // YYYY-MM
-  const limit = parseInt(c.req.query('limit') || '20');
-  const offset = parseInt(c.req.query('offset') || '0');
+  const month = c.req.query('month');
+  const limit = Math.min(Math.max(parseInt(c.req.query('limit') || '20', 10) || 20, 1), 200);
+  const offset = Math.max(parseInt(c.req.query('offset') || '0', 10) || 0, 0);
 
-  // FIX 2026-05-20 dup-row bug: (a) COALESCE total_races fallback to entries_upcoming
-  // distinct race count for upcoming meetings whose races aren't populated yet;
-  // (b) hide phantom meetings with neither races nor entries (legacy dirty data).
-  let sql =
-    'SELECT m.id, m.date, m.venue, m.track_condition, m.weather, ' +
-    '  COALESCE(m.total_races, ' +
-    '    (SELECT COUNT(DISTINCT race_number) FROM entries_upcoming ' +
-    '     WHERE race_date = m.date AND venue = m.venue AND race_number > 0) ' +
-    '  ) AS total_races ' +
-    'FROM race_meetings m WHERE 1=1 ' +
-    'AND ( ' +
-    '  m.total_races IS NOT NULL ' +
-    '  OR EXISTS (SELECT 1 FROM entries_upcoming WHERE race_date = m.date AND venue = m.venue AND race_number > 0) ' +
-    ') ' +
-    // Anti-ghost: a real HK race day ALWAYS has >=8 races, so a declared
-    // total_races of 1-3 is always a phantom from a stale HKJC scrape (e.g.
-    // 2026-05-31 ghost HV "1 場" carrying 2026-05-27's results). Hide it
-    // unconditionally. (Old rule required a sibling meeting with MORE races,
-    // which failed when the real same-date meeting was still upcoming with
-    // total_races=NULL.)
-    'AND NOT (m.total_races IS NOT NULL AND m.total_races > 0 AND m.total_races < 4) ' +
-    // HK-only: never list overseas/simulcast venues (S1, S2, …). HK uses ST/HV.
-    "AND m.venue IN ('ST','HV')";
-  const params: unknown[] = [];
+  const run = async (heavy: boolean) => {
+    let sql =
+      'SELECT m.id, m.date, m.venue, m.track_condition, m.weather, m.total_races ' +
+      "FROM race_meetings m WHERE m.venue IN ('ST','HV') ";
+    const params: unknown[] = [];
+    if (heavy) {
+      sql += 'AND (m.total_races IS NULL OR m.total_races >= 4) ';
+    }
+    if (from) { sql += ' AND m.date >= ?'; params.push(from); }
+    if (to) { sql += ' AND m.date <= ?'; params.push(to); }
+    if (venue) { sql += ' AND m.venue = ?'; params.push(venue.toUpperCase()); }
+    if (month && /^\d{4}-\d{2}$/.test(month)) {
+      sql += ' AND substr(m.date, 1, 7) = ?';
+      params.push(month);
+    }
+    sql += ' ORDER BY m.date DESC LIMIT ? OFFSET ?';
+    params.push(limit + 16, offset);
+    const { results } = await c.env.DB.prepare(sql).bind(...params).all<RaceMeetingRow>();
+    return (results ?? []).filter((m) => !isGhost(m)).slice(0, limit).map(toMeetingDto);
+  };
 
-  if (from) {
-    sql += ' AND date >= ?';
-    params.push(from);
+  try {
+    const meetings = await run(true);
+    return c.json({ meetings, total: meetings.length });
+  } catch (err) {
+    console.error('[meetings.list]', err);
+    try {
+      const meetings = await run(false);
+      return c.json({ meetings, total: meetings.length, degraded: true });
+    } catch (err2) {
+      console.error('[meetings.list.fallback]', err2);
+      return c.json({ meetings: [], total: 0, error: 'meetings_unavailable' }, 200);
+    }
   }
-  if (to) {
-    sql += ' AND date <= ?';
-    params.push(to);
-  }
-  if (venue) {
-    sql += ' AND venue = ?';
-    params.push(venue.toUpperCase());
-  }
-  if (month && /^\d{4}-\d{2}$/.test(month)) {
-    sql += " AND substr(date, 1, 7) = ?";
-    params.push(month);
-  }
-
-  sql += ' ORDER BY date DESC LIMIT ? OFFSET ?';
-  params.push(limit, offset);
-
-  const { results } = await c.env.DB.prepare(sql).bind(...params).all<RaceMeetingRow>();
-
-  const meetings = (results ?? []).map((m) => ({
-    id: m.id,
-    date: m.date,
-    venue: m.venue,
-    venueName: m.venue === 'ST' ? '沙田' : m.venue === 'HV' ? '跑馬地' : m.venue,
-    trackCondition: m.track_condition,
-    weather: m.weather,
-    totalRaces: m.total_races,
-  }));
-
-  return c.json({ meetings, total: meetings.length });
 });
 
-// GET /api/meetings/next — Phase B · 下一個賽馬日（含每場概要）
-// Returns next future-dated meeting with its races list (or latest past meeting if none upcoming).
 meetingsRoutes.get('/next', async (c) => {
   const today = new Date().toISOString().split('T')[0];
+  try {
+    let meeting = await c.env.DB.prepare(
+      "SELECT * FROM race_meetings WHERE date >= ? AND venue IN ('ST','HV') ORDER BY date ASC LIMIT 1"
+    ).bind(today).first<RaceMeetingRow>();
 
-  let meeting = await c.env.DB.prepare(
-    "SELECT * FROM race_meetings WHERE date >= ? AND venue IN ('ST','HV') ORDER BY date ASC LIMIT 1"
-  ).bind(today).first<RaceMeetingRow>();
+    let fallback = false;
+    if (!meeting) {
+      meeting = await c.env.DB.prepare(
+        "SELECT * FROM race_meetings WHERE venue IN ('ST','HV') ORDER BY date DESC LIMIT 1"
+      ).first<RaceMeetingRow>();
+      fallback = true;
+    }
 
-  let fallback = false;
-  if (!meeting) {
-    meeting = await c.env.DB.prepare(
-      "SELECT * FROM race_meetings WHERE venue IN ('ST','HV') ORDER BY date DESC LIMIT 1"
-    ).first<RaceMeetingRow>();
-    fallback = true;
+    if (!meeting) {
+      return c.json({ error: '資料庫冇賽事紀錄' }, 404);
+    }
+
+    const { results: races } = await c.env.DB.prepare(
+      'SELECT id, race_number, title, class, distance, going, track, course, start_time FROM races WHERE meeting_id = ? ORDER BY race_number'
+    ).bind(meeting.id).all<any>();
+
+    let totalRaces = (races ?? []).length || meeting.total_races;
+    if (!totalRaces) totalRaces = await declaredRaceCount(c.env.DB, meeting.date, meeting.venue);
+
+    return c.json({
+      id: meeting.id,
+      date: meeting.date,
+      venue: meeting.venue,
+      venueName: venueName(meeting.venue),
+      trackCondition: meeting.track_condition,
+      weather: meeting.weather,
+      totalRaces,
+      fallback,
+      races: (races ?? []).map((r) => ({
+        id: r.id,
+        raceNumber: r.race_number,
+        title: r.title,
+        className: r.class,
+        distanceM: r.distance,
+        going: r.going,
+        track: r.track,
+        course: r.course,
+        startTime: r.start_time,
+        handicapType: r.title || null,
+      })),
+    });
+  } catch (err) {
+    console.error('[meetings.next]', err);
+    return c.json({ error: 'meetings_unavailable' }, 200);
   }
-
-  if (!meeting) {
-    return c.json({ error: '資料庫冇賽事紀錄' }, 404);
-  }
-
-  const { results: races } = await c.env.DB.prepare(
-    'SELECT id, race_number, title, class, distance, going, track, course, start_time FROM races WHERE meeting_id = ? ORDER BY race_number'
-  ).bind(meeting.id).all<any>();
-
-  let totalRaces = (races ?? []).length || meeting.total_races;
-  if (!totalRaces) totalRaces = await declaredRaceCount(c.env.DB, meeting.date, meeting.venue);
-
-  return c.json({
-    id: meeting.id,
-    date: meeting.date,
-    venue: meeting.venue,
-    venueName: meeting.venue === 'ST' ? '沙田' : meeting.venue === 'HV' ? '跑馬地' : meeting.venue,
-    trackCondition: meeting.track_condition,
-    weather: meeting.weather,
-    totalRaces,
-    fallback,
-    races: (races ?? []).map((r) => ({
-      id: r.id,
-      raceNumber: r.race_number,
-      title: r.title,
-      className: r.class,
-      distanceM: r.distance,
-      going: r.going,
-      track: r.track,
-      course: r.course,
-      startTime: r.start_time,
-      handicapType: r.title || null,
-    })),
-  });
 });
 
-// GET /api/meetings/:date — 指定日期賽事詳情（含所有場次）
 meetingsRoutes.get('/:date', async (c) => {
     const date = c.req.param('date');
-
-    // Fix (2026-05-13): race_meetings has duplicate rows per date (legacy
-    // ingestion bug). Naive .first() picks an arbitrary row whose id may not
-    // match the new races. Pick the row with the highest race_count to
-    // self-heal against duplicates.
+    try {
     const { results: bestMeeting } = await c.env.DB.prepare(
       `SELECT rm.*, COUNT(r.id) AS _race_count
          FROM race_meetings rm
@@ -246,7 +234,6 @@ meetingsRoutes.get('/:date', async (c) => {
       'SELECT * FROM races WHERE meeting_id = ? ORDER BY race_number'
     ).bind(meeting.id).all();
 
-    // 每場賽事附帶出賽馬匹
     const ptMap = await fetchPostTimeMap(c.env.DB, meeting.date, meeting.venue);
     const racesWithHorses = await Promise.all(
       (races ?? []).map(async (race: any) => {
@@ -304,8 +291,6 @@ meetingsRoutes.get('/:date', async (c) => {
       })
     );
 
-    // Pre-results fallback: surface the declared racecard when the post-race
-    // `races` table isn't populated yet, so upcoming meetings aren't blank.
     let racesOut: any[] = racesWithHorses;
     if (racesOut.length === 0) {
       racesOut = await buildRacecardFromEntries(
@@ -320,18 +305,21 @@ meetingsRoutes.get('/:date', async (c) => {
       id: meeting.id,
       date: meeting.date,
       venue: meeting.venue,
-      venueName: meeting.venue === 'ST' ? '沙田' : meeting.venue === 'HV' ? '跑馬地' : meeting.venue,
+      venueName: venueName(meeting.venue),
       trackCondition: meeting.track_condition,
       weather: meeting.weather,
       totalRaces,
       races: racesOut,
     });
+    } catch (err) {
+      console.error('[meetings.date]', err);
+      return c.json({ error: '找不到該日期的賽事' }, 404);
+    }
   });
 
-// GET /api/meetings/next — 下一個賽馬日
 meetingsRoutes.get('/next/upcoming', async (c) => {
   const today = new Date().toISOString().split('T')[0];
-
+  try {
   const meeting = await c.env.DB.prepare(
     "SELECT * FROM race_meetings WHERE date >= ? AND venue IN ('ST','HV') ORDER BY date ASC LIMIT 1"
   ).bind(today).first<RaceMeetingRow>();
@@ -347,18 +335,20 @@ meetingsRoutes.get('/next/upcoming', async (c) => {
     id: meeting.id,
     date: meeting.date,
     venue: meeting.venue,
-    venueName: meeting.venue === 'ST' ? '沙田' : meeting.venue === 'HV' ? '跑馬地' : meeting.venue,
+    venueName: venueName(meeting.venue),
     trackCondition: meeting.track_condition,
     weather: meeting.weather,
     totalRaces,
   });
+  } catch (err) {
+    console.error('[meetings.upcoming]', err);
+    return c.json({ error: '暫時冇即將舉行的賽事' }, 404);
+  }
 });
 
-// GET /api/meetings/smart/current — 智能優先級
-// 優先返下一個未跑嘅賽馬日；如果冇，返最近一個已跑嘅
 meetingsRoutes.get('/smart/current', async (c) => {
   const today = new Date().toISOString().split('T')[0];
-
+  try {
   const upcoming = await c.env.DB.prepare(
     "SELECT * FROM race_meetings WHERE date >= ? AND venue IN ('ST','HV') ORDER BY date ASC LIMIT 1"
   ).bind(today).first<RaceMeetingRow>();
@@ -379,11 +369,15 @@ meetingsRoutes.get('/smart/current', async (c) => {
     id: pick.id,
     date: pick.date,
     venue: pick.venue,
-    venueName: pick.venue === 'ST' ? '沙田' : pick.venue === 'HV' ? '跑馬地' : pick.venue,
+    venueName: venueName(pick.venue),
     trackCondition: pick.track_condition,
     weather: pick.weather,
     totalRaces,
     mode: isFuture ? 'upcoming' : 'historical',
-    isEntryListOnly: isFuture, // 未開跑 = 只有排位表
+    isEntryListOnly: isFuture,
   });
+  } catch (err) {
+    console.error('[meetings.smart]', err);
+    return c.json({ error: '資料庫冇賽事紀錄' }, 404);
+  }
 });
