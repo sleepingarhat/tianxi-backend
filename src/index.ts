@@ -85,15 +85,6 @@ app.route('/api/silks', silksRoutes);
 app.route('/api/silks-svg', silksSvgRoutes);
 app.route('/api/membership', membershipRoutes);
 app.route('/ops', opsRoutes);
-
-app.get('/admin', async (c) => {
-  if (await hasAdminAccess(c, ADMIN_AUTH_POLICY.SESSION_OR_BEARER)) {
-    return adminRoutes.fetch(c.req.raw, c.env);
-  }
-  return c.redirect('/admin/login', 302);
-});
-app.get('/admin/', (c) => c.redirect('/admin', 302));
-
 app.route('/admin', adminGateRoutes);
 app.route('/admin', adminRoutes);
 
