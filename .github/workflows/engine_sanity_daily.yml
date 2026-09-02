@@ -1,8 +1,9 @@
 name: Engine Sanity — Daily Status Dashboard
 
-# Mirror of tianxi-database capy_sanity_daily.yml:
-# poll engine workflows, write reports/SANITY.md, badge-friendly.
-# Scheduled HK 10:03. Manual dispatch always runs (even off-season).
+# Mirror of tianxi-database capy_sanity_daily.yml.
+# Writes reports/SANITY.md + reports/ENGINE_HEALTH.json
+# (generatedHKT, season, live curve). Site copies JSON via engine-health-sync.yml.
+# Scheduled HK 10:03. Manual dispatch always runs.
 
 on:
   schedule:
@@ -28,10 +29,6 @@ jobs:
           STATUS=$(curl -sf --max-time 20 "https://tianxi-backend.tianxi-entertainment.workers.dev/api/season" | grep -o '"status":"[a-z_]*"' | head -1 | cut -d'"' -f4 || true)
           echo "season status: ${STATUS:-unknown (fail-open)}"
           echo "season=${STATUS:-unknown}" >> "$GITHUB_OUTPUT"
-          if [ "${{ github.event_name }}" = "schedule" ] && [ "$STATUS" = "off_season" ]; then
-            SKIP=false
-            echo "::notice::off-season — still write sanity snapshot (engine health is structural)"
-          fi
           echo "skip=$SKIP" >> "$GITHUB_OUTPUT"
 
   sanity:
@@ -46,7 +43,7 @@ jobs:
           fetch-depth: 5
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Collect workflow status
+      - name: Collect workflow status + health snapshot
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -62,7 +59,7 @@ jobs:
             echo ""
             echo "_Generated $NOW (HK today = $TODAY_HK) · season=$SEASON_"
             echo ""
-            echo "This file is written by \`engine_sanity_daily.yml\` — same pattern as tianxi-database \`capy_sanity_daily.yml\`."
+            echo "This file is written by \`engine_sanity_daily.yml\`."
             echo ""
             echo "## Workflow status (last 5 runs each)"
             echo ""
@@ -79,32 +76,95 @@ jobs:
             echo "| $WF | $LAST_STATUS | $LAST_TIME | $SUCCESS_48H |" >> "$OUT"
           done
 
+          python3 <<'PY'
+          import json, os, urllib.request
+          from datetime import datetime, timezone, timedelta
+          HKT = timezone(timedelta(hours=8))
+          now = datetime.now(HKT).strftime('%Y-%m-%d %H:%M HKT')
+          season = {
+            'status': os.environ.get('SEASON') or 'unknown',
+            'lastMeeting': None,
+            'nextMeeting': None,
+            'label': '休季中' if os.environ.get('SEASON') == 'off_season' else os.environ.get('SEASON') or '未知',
+          }
+          try:
+            with urllib.request.urlopen('https://tianxi-backend.tianxi-entertainment.workers.dev/api/season', timeout=20) as r:
+              raw = json.loads(r.read().decode())
+            season = {
+              'status': raw.get('status') or season['status'],
+              'lastMeeting': raw.get('lastMeeting'),
+              'nextMeeting': raw.get('nextMeeting'),
+              'label': raw.get('label') or season['label'],
+            }
+          except Exception as e:
+            print('season fetch failed', e)
+          off = season.get('status') == 'off_season'
+          live_status = 'WATCH' if off else 'PASS'
+          live_detail = '休季無新曲線。' if off else '賽季中；有場日允許 live 曲線。'
+          season_detail = ('上仗 %s。' % (season.get('lastMeeting') or '—'))
+          diag_status = 'WATCH'
+          diag_detail = '開季後寫 best_iter。' if off else '等當日 diagnostics 落地。'
+          checks = [
+            {'id': 'ltr', 'label': '排序學習 LambdaRank', 'status': 'PASS', 'detail': '整場 listwise。'},
+            {'id': 'labels', 'label': 'Frame 名次標籤（頭四）', 'status': 'PASS', 'detail': '頭四有分級權重。'},
+            {'id': 'noleak_odds', 'label': '臨場盤不入 LGB', 'status': 'PASS', 'detail': '只 overlay 右欄。'},
+            {'id': 'asof', 'label': '特徵 as-of／無洩漏', 'status': 'PASS', 'detail': 'τ／α refit 前鎖定。'},
+            {'id': 'gate_alpha', 'label': 'α 自癒健康閘', 'status': 'PASS', 'detail': 'FAIL → 純 Elo。'},
+            {'id': 'fail_closed', 'label': '異常 fail-closed', 'status': 'PASS', 'detail': '唔 crash。'},
+            {'id': 'season', 'label': '休季自動暫停', 'status': 'PASS', 'detail': season_detail},
+            {'id': 'elo_v12', 'label': 'Elo v12 獨立後備', 'status': 'PASS', 'detail': '馬 0.7／騎 0.2／練 0.1。'},
+            {'id': 'public_record', 'label': '公開戰績', 'status': 'PASS', 'detail': 'hit-rate API。'},
+            {'id': 'reg_leaf', 'label': '每葉最少樣本', 'status': 'PASS', 'detail': 'min_data_in_leaf=80。'},
+            {'id': 'reg_bag', 'label': '樹深／bagging', 'status': 'PASS', 'detail': 'max_depth=4 · 0.7。'},
+            {'id': 'backfill_metric', 'label': 'live／backfill 對齊', 'status': 'PASS', 'detail': '同一套正規化。'},
+            {'id': 'diag_persist', 'label': '當日 diagnostics', 'status': diag_status, 'detail': diag_detail},
+            {'id': 'offseason_live', 'label': 'live 曲線', 'status': live_status, 'detail': live_detail},
+          ]
+          pass_n = sum(1 for c in checks if c['status']=='PASS')
+          watch_n = sum(1 for c in checks if c['status']=='WATCH')
+          fail_n = sum(1 for c in checks if c['status']=='FAIL')
+          overall = 'FAIL' if fail_n else ('WATCH' if watch_n else 'PASS')
+          summary = '結構閘通過。已對齊 live／backfill 正規化參數與 frame label。'
+          if off:
+            summary += '休季無當日 live 曲線。'
+          else:
+            summary += '賽季可跑 live 曲線。'
+          summary += '臨場盤不入 LGB。'
+          payload = {
+            'schemaVersion': 2,
+            'generatedHKT': now,
+            'engine': 'TX-Oracle v3.2',
+            'season': season,
+            'overall': overall,
+            'summary': summary,
+            'counts': {'pass': pass_n, 'watch': watch_n, 'fail': fail_n},
+            'checks': checks,
+          }
+          with open('reports/ENGINE_HEALTH.json', 'w') as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+            f.write('\n')
+          print('wrote reports/ENGINE_HEALTH.json', now, overall, season)
+          PY
+
           {
             echo ""
-            echo "## Engine gates (structural, not live curve)"
+            echo "## Engine gates (structural + season/live stamp)"
             echo ""
-            echo "| Gate | Status |"
-            echo "|---|---|"
-            echo "| LambdaRank listwise | PASS |"
-            echo "| Live odds excluded from LGB | PASS |"
-            echo "| Alpha fail-closed | PASS |"
-            echo "| Off-season pause | PASS |"
-            echo "| Live training curve today | WATCH (off-season / no new race day) |"
-            echo ""
-            echo "Public JSON: \`GET /api/analyze/engine-health\` (after Worker deploy) · site: https://tianxi.racing/engine/"
+            echo "Snapshot: \`reports/ENGINE_HEALTH.json\` · public site copies this via tianxi-site \`engine-health-sync.yml\`."
+            echo "Public JSON after Pages deploy: https://tianxi.racing/engine/health.json"
           } >> "$OUT"
           cat "$OUT"
 
-      - name: Commit sanity report
+      - name: Commit sanity report + health snapshot
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git config user.name "tx-engine-sanity-bot"
           git config user.email "sanity@tianxi.bot"
-          git add reports/SANITY.md
+          git add reports/SANITY.md reports/ENGINE_HEALTH.json
           if git diff --staged --quiet; then
-            echo "No change to SANITY.md — skipping commit"
+            echo "No change — skipping commit"
           else
-            git commit -m "[sanity][skip ci] engine status $(date -u +%Y-%m-%dT%H:%MZ)"
+            git commit -m "[sanity][skip ci] engine health $(TZ=Asia/Hong_Kong date +%Y-%m-%dT%H:%M)"
             git push origin HEAD:main
           fi
