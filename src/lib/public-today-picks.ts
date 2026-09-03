@@ -160,6 +160,8 @@ export function projectTodayPicksForPublic(value: unknown): JsonRecord {
     'trackCondition',
     'eloReady',
     'generatedAt',
+    'frozen',
+    'freezeAppliedRaces',
   ]);
   projected.races = Array.isArray(value.races)
     ? value.races.map(projectRace).filter(Boolean)
@@ -182,6 +184,8 @@ export function projectTopPicksForPublic(value: unknown): JsonRecord {
     'date',
     'venue',
     'eloReady',
+    'frozen',
+    'freezeSource',
   ]);
   const raceId = safeRaceId(value.raceId);
   if (raceId) projected.raceId = raceId;
@@ -198,6 +202,8 @@ export function projectExplainForPublic(value: unknown): JsonRecord {
     'pWin',
     'pTop3',
     'pTop4',
+    'frozen',
+    'freezeSource',
   ]);
   const raceId = safeRaceId(value.raceId);
   if (raceId) projected.raceId = raceId;
@@ -286,6 +292,8 @@ export function projectHitRateForPublic(value: unknown): JsonRecord {
     'venue',
     'trackCondition',
     'generatedAt',
+    'frozen',
+    'source',
   ]);
   projected.summary = isRecord(value.summary)
     ? copyScalars(value.summary, HIT_RATE_SUMMARY_KEYS)
