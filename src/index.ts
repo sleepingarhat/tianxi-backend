@@ -19,7 +19,7 @@ import { opsRoutes } from './routes/ops';
 import { membershipRoutes, proPage } from './routes/membership';
 import { getSeasonStatus } from './lib/season';
 import { ADMIN_AUTH_POLICY, buildAdminBearerHeaders, hasAdminAccess } from './lib/admin-auth';
-  import { computeHitRateStats, ensureHitRateCacheTable, writeHitRateCache, readHitRateCache, ensureRaceDayReportCacheTable, joinPredictionResults, ensurePredictionLogTable, hitRateEngineKey } from './routes/analyze';
+  import { computeHitRateStats, ensureHitRateCacheTable, writeHitRateCache, readHitRateCache, ensureRaceDayReportCacheTable, joinPredictionResults, ensurePredictionLogTable, hitRateEngineKey, auditPredictionLock } from './routes/analyze';
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -155,6 +155,28 @@ app.onError((err, c) => {
       } catch (e: any) { return { daysProcessed: 0, totalUpdated: 0 }; }
     }
 
+    async function auditLatestPredictionLock(env: Env): Promise<{ date?: string; ok?: boolean; mismatchCount?: number; error?: string }> {
+      try {
+        const row = await env.DB.prepare(
+          `SELECT m.date AS date FROM race_meetings m
+             WHERE m.venue IN ('ST','HV')
+               AND EXISTS (
+                 SELECT 1 FROM races r JOIN race_results rr ON rr.race_id = r.id
+                 WHERE r.meeting_id = m.id AND rr.finishing_position > 0
+               )
+             ORDER BY m.date DESC LIMIT 1`,
+        ).first<{ date: string }>().catch(() => null);
+        if (!row?.date) return { ok: true };
+        const audit = await auditPredictionLock(env.DB, row.date, 'v12');
+        if (!audit.ok) {
+          console.warn('[prediction-lock] MISMATCH', row.date, audit.mismatches);
+        }
+        return { date: row.date, ok: audit.ok, mismatchCount: (audit.mismatches || []).length };
+      } catch (e: any) {
+        return { error: e?.message ?? String(e) };
+      }
+    }
+
     app.post('/admin/api/backfill-prediction-results', async (c) => {
       if (!(await hasAdminAccess(c, ADMIN_AUTH_POLICY.SESSION_OR_BEARER))) return c.json({ error: 'Not found' }, 404);
       const out = await backfillPredictionResults(c.env);
@@ -285,6 +307,7 @@ app.onError((err, c) => {
       );
       ctx.waitUntil(refreshRaceDayReport(env).then((r) => console.log('[cron] race-day report refresh', r)));
       ctx.waitUntil(backfillPredictionResults(env).then((r) => console.log('[cron] prediction backfill', r)));
+      ctx.waitUntil(auditLatestPredictionLock(env).then((r) => console.log('[cron] prediction-lock', r)));
       ctx.waitUntil(
         archiveOddsBeforePrune(env)
           .then((a) => console.log('[cron] odds archive', a))
