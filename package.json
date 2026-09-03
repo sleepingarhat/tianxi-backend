@@ -16,7 +16,8 @@
     "test:running-style": "tsx scripts/test-running-style.ts",
     "test:public-today-picks": "tsx scripts/test-public-today-picks.ts",
     "test:membership": "tsx scripts/test-membership.ts",
-    "test:admin-auth": "tsx scripts/test-admin-auth.ts"
+    "test:admin-auth": "tsx scripts/test-admin-auth.ts",
+    "test:prediction-lock": "tsx scripts/test-prediction-lock.ts"
   },
   "dependencies": {
     "hkjc-api": "^1.0.5",

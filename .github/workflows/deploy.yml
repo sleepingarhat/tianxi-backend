@@ -29,6 +29,9 @@ jobs:
       - name: Regression test — membership entitlements and free tier
         run: npx tsx scripts/test-membership.ts
 
+      - name: Regression test — frozen prediction lock SSOT
+        run: npx tsx scripts/test-prediction-lock.ts
+
       - name: Deploy to Cloudflare Workers
         run: npx wrangler deploy
         env:
