@@ -19,7 +19,8 @@ import { opsRoutes } from './routes/ops';
 import { membershipRoutes, proPage } from './routes/membership';
 import { getSeasonStatus } from './lib/season';
 import { ADMIN_AUTH_POLICY, buildAdminBearerHeaders, hasAdminAccess } from './lib/admin-auth';
-  import { computeHitRateStats, ensureHitRateCacheTable, writeHitRateCache, readHitRateCache, ensureRaceDayReportCacheTable, joinPredictionResults, ensurePredictionLogTable, hitRateEngineKey, auditPredictionLock } from './routes/analyze';
+import { computeHitRateStats, ensureHitRateCacheTable, writeHitRateCache, readHitRateCache, ensureRaceDayReportCacheTable, joinPredictionResults, ensurePredictionLogTable, hitRateEngineKey } from './routes/analyze';
+import { auditPredictionLock, freezeExplainPayload, freezeMeetingPayload, freezeTopPicksPayload } from './lib/prediction-lock-db';
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -78,6 +79,49 @@ app.route('/api/horses', horsesRoutes);
 app.route('/api/jockeys', jockeysRoutes);
 app.route('/api/trainers', trainersRoutes);
 app.route('/api/chat', chatRoutes);
+
+async function overlayFrozenAnalyzeJson(
+  c: any,
+  next: () => Promise<void>,
+  transform: (db: D1Database, data: any) => Promise<any>,
+) {
+  await next();
+  if (c.res.status !== 200) return;
+  const ct = c.res.headers.get('content-type') || '';
+  if (!ct.includes('json')) return;
+  const data = await c.res.clone().json().catch(() => null);
+  if (!data || data.error) return;
+  try {
+    const out = await transform(c.env.DB, data);
+    return c.json(out);
+  } catch (err) {
+    console.warn('[prediction-lock] overlay failed', err);
+  }
+}
+
+app.get('/api/analyze/prediction-lock', async (c) => {
+  const date = c.req.query('date');
+  if (!date) return c.json({ error: '請提供 date' }, 400);
+  const engine = c.req.query('engine') === 'v11' ? 'v11' : 'v12';
+  const audit = await auditPredictionLock(c.env.DB, date, engine);
+  return c.json(audit);
+});
+
+app.use('/api/analyze/top-picks', (c, next) =>
+  overlayFrozenAnalyzeJson(c, next, (db, data) => freezeTopPicksPayload(db, data)),
+);
+app.use('/api/analyze/today-picks', (c, next) =>
+  overlayFrozenAnalyzeJson(c, next, (db, data) => freezeMeetingPayload(db, data)),
+);
+app.use('/api/analyze/picks-by-date', (c, next) =>
+  overlayFrozenAnalyzeJson(c, next, (db, data) => freezeMeetingPayload(db, data)),
+);
+app.use('/api/analyze/explain', (c, next) =>
+  overlayFrozenAnalyzeJson(c, next, (db, data) =>
+    freezeExplainPayload(db, data, c.req.query('raceId'), c.req.query('horseId')),
+  ),
+);
+
 app.route('/api/analyze', analyzeRoutes);
 app.route('/api/odds', oddsRoutes);
 app.route('/api/lounge', loungeRoutes);
