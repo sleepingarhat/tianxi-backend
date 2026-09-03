@@ -169,7 +169,7 @@ Promise.all([
   $('season').textContent = sea.status==='off_season'?'休季中':'賽季進行中';
   $('seasonSub').textContent = (sea.reason||'') + (cov.quota==='d1_free_tier_exhausted'?' · D1 額已滿':'');
   $('lastMeet').textContent = cov.lastMeeting || '—';
-  $('lastMeetSub').textContent = 'gap '+(sea.gapDays??'—')+' 日';
+  $('lastMeetSub').textContent = 'gap '+(sea.gapDays??'—')+'日';
   if(pnl && pnl.totalNet!=null){
     $('pnl').textContent = money(pnl.totalNet)+' · ROI '+(pnl.roiPct??0)+'%';
     $('pnlSub').textContent = (pnl.from||'')+' → '+(pnl.to||'')+' · '+(pnl.daysEvaluated||0)+'日 / '+(pnl.racesBet||0)+'場';
@@ -192,4 +192,4 @@ Promise.all([
     '<tr><td>'+r.label+'</td><td><span class="chip '+r.history+'">'+S[r.history]+'</span></td><td><span class="chip '+r.auto+'">'+S[r.auto]+'</span></td><td>'+(r.count??'—')+'</td><td>'+(r.latest||'—')+'</td><td>'+(r.workflows||[]).join(' · ')+'</td></tr>'
   ).join('');
 }).catch(()=>{ $('season').textContent='讀唔到'; });
-</script></body></html>`);
+</script></body></html>`));
