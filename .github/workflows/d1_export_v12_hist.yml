@@ -1,0 +1,65 @@
+name: D1 export historical v12 Elo
+
+on:
+  workflow_dispatch:
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - name: Dump pre-2025-02 v12 overall
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/d1h/csv
+          python3 <<'PY'
+          import json, subprocess, calendar, csv
+          from pathlib import Path
+          years = list(range(2016, 2026))
+          def run(sql):
+              r = subprocess.run(['npx','wrangler','d1','execute','tianxi-db','--remote','--json','--command',sql], capture_output=True, text=True)
+              Path('/tmp/d1h/last_err.txt').write_text((r.stderr or '')[-2000:])
+              try:
+                  raw=json.loads(r.stdout or '[]')
+              except Exception:
+                  print('parse fail', r.stdout[:200], r.stderr[-200:])
+                  return []
+              blocks = raw if isinstance(raw, list) else [raw]
+              rows=[]
+              for b in blocks:
+                  rows.extend(b.get('results') or [])
+              print(sql[:90], len(rows), 'rc', r.returncode)
+              return rows
+          def write(name, rows, fields):
+              p=Path('/tmp/d1h/csv')/name
+              with p.open('w', newline='') as f:
+                  w=csv.DictWriter(f, fieldnames=fields, extrasaction='ignore')
+                  w.writeheader(); w.writerows(rows)
+              print('wrote', p, len(rows))
+          h,j,t=[],[],[]
+          for y in years:
+              a,b=f'{y}-01-01', f'{y}-12-31'
+              if y==2025:
+                  b='2025-02-04'
+              h += run(f"SELECT horse_id, as_of_date, rating, games_played FROM horse_elo_snapshots WHERE axis_key='overall' AND CAST(id AS TEXT) LIKE 'v12:%' AND as_of_date>='{a}' AND as_of_date<='{b}'")
+              j += run(f"SELECT jockey_id, as_of_date, rating FROM jockey_elo_snapshots WHERE CAST(id AS TEXT) LIKE 'v12:%' AND as_of_date>='{a}' AND as_of_date<='{b}'")
+              t += run(f"SELECT trainer_id, as_of_date, rating FROM trainer_elo_snapshots WHERE CAST(id AS TEXT) LIKE 'v12:%' AND as_of_date>='{a}' AND as_of_date<='{b}'")
+          write('horse_elo_v12_hist.csv', h, ['horse_id','as_of_date','rating','games_played'])
+          write('jockey_elo_v12_hist.csv', j, ['jockey_id','as_of_date','rating'])
+          write('trainer_elo_v12_hist.csv', t, ['trainer_id','as_of_date','rating'])
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: d1-v12-hist
+          path: /tmp/d1h/csv
+          retention-days: 14
