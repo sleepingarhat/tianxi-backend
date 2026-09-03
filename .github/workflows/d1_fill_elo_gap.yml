@@ -1,0 +1,197 @@
+name: D1 fill Elo gap 2024-02–2025-02
+
+# Rebuild Elo from 2016 on local sqlite (continuous ratings),
+# then INSERT OR REPLACE only the missing as_of_date window into D1.
+# Does not DELETE existing rows. Does not change LGB prod weights.
+
+on:
+  workflow_dispatch:
+    inputs:
+      from:
+        description: 'Gap start (inclusive)'
+        default: '2024-02-01'
+      to:
+        description: 'Gap end (inclusive)'
+        default: '2025-02-25'
+
+jobs:
+  fill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: tianxi-backend
+
+      - uses: actions/checkout@v4
+        with:
+          repository: sleepingarhat/tianxi-database
+          path: hkjc-data
+          sparse-checkout: |
+            data
+            horses/form_records
+            horses/profiles
+            last_sync.json
+          sparse-checkout-cone-mode: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: tianxi-backend/package-lock.json
+
+      - name: Install backend deps
+        working-directory: tianxi-backend
+        run: npm ci
+
+      - name: Import results + form + compute Elo from 2016
+        working-directory: tianxi-backend
+        run: |
+          set -euo pipefail
+          npx tsx scripts/import-csv.ts --data-dir ../hkjc-data/data --db ./bulk-local.db
+          npx tsx scripts/ingest/index.ts form --data-dir=../hkjc-data --db=./bulk-local.db
+          npx tsx scripts/elo/compute.ts --db=./bulk-local.db --reset --from=2016-01-01 --run-label=gapfill_20260903
+
+      - name: Export gap snapshots to SQL chunks
+        working-directory: tianxi-backend
+        env:
+          GAP_FROM: ${{ inputs.from }}
+          GAP_TO: ${{ inputs.to }}
+        run: |
+          sudo apt-get -qq install -y sqlite3 >/dev/null
+          python3 <<'PY'
+          import os, sqlite3, pathlib
+          from_d = os.environ.get('GAP_FROM') or '2024-02-01'
+          to_d = os.environ.get('GAP_TO') or '2025-02-25'
+          db = sqlite3.connect('bulk-local.db')
+          db.row_factory = sqlite3.Row
+          out = pathlib.Path('/tmp/elo_sql')
+          out.mkdir(parents=True, exist_ok=True)
+
+          def esc(v):
+              if v is None: return 'NULL'
+              if isinstance(v, (int, float)): return str(v)
+              return "'" + str(v).replace("'", "''") + "'"
+
+          def horse_code(hid):
+              s = str(hid or '')
+              return s[6:] if s.startswith('horse_') else s
+
+          def prefixed(kind, raw):
+              s = str(raw or '')
+              if s.startswith(kind): return s
+              return kind + s
+
+          files = []
+          nfile = 0
+          buf = []
+          def flush():
+              nonlocal nfile, buf
+              if not buf: return
+              nfile += 1
+              p = out / f'chunk_{nfile:04d}.sql'
+              p.write_text('BEGIN;\n' + '\n'.join(buf) + '\nCOMMIT;\n')
+              files.append(p)
+              buf = []
+
+          # horses: write BOTH unprefixed (compute.ts / dump-features) and v12: (prod reader)
+          rows = db.execute(
+              """SELECT id, horse_id, axis_key, surface, distance_bucket, as_of_race_id,
+                         as_of_date, rating, games_played
+                    FROM horse_elo_snapshots
+                   WHERE axis_key='overall' AND as_of_date>=? AND as_of_date<=?""",
+              (from_d, to_d)).fetchall()
+          print('horse snaps', len(rows))
+          for r in rows:
+              hid = r['horse_id']
+              code = horse_code(hid)
+              date, venue_no = r['as_of_date'], r['id']
+              # original compute id already like horse_XXX|overall|date|ST|n or code|overall|...
+              bare = r['id']
+              if bare.startswith('horse_'):
+                  bare = bare[6:]
+              v12 = 'v12:' + (bare if not bare.startswith('v12:') else bare[4:])
+              for sid in (r['id'], v12):
+                  buf.append(
+                      "INSERT OR REPLACE INTO horse_elo_snapshots "
+                      "(id, horse_id, axis_key, surface, distance_bucket, as_of_race_id, as_of_date, rating, games_played, computed_at) VALUES ("
+                      + ','.join([
+                          esc(sid), esc(hid if str(hid).startswith('horse_') else 'horse_'+str(hid)),
+                          esc(r['axis_key'] or 'overall'), esc(r['surface']), esc(r['distance_bucket']),
+                          esc(r['as_of_race_id']), esc(r['as_of_date']), esc(r['rating']), esc(r['games_played']),
+                          "datetime('now')"
+                      ]) + ');'
+                  )
+                  if len(buf) >= 250: flush()
+
+          jrows = db.execute(
+              """SELECT id, jockey_id, as_of_race_id, as_of_date, rating, games_played
+                    FROM jockey_elo_snapshots WHERE as_of_date>=? AND as_of_date<=?""",
+              (from_d, to_d)).fetchall()
+          print('jockey snaps', len(jrows))
+          for r in jrows:
+              jid = prefixed('jockey_', r['jockey_id'])
+              bare = r['id']
+              v12 = 'v12:' + bare if not str(bare).startswith('v12:') else bare
+              for sid, col in ((r['id'], r['jockey_id']), (v12, jid)):
+                  buf.append(
+                      "INSERT OR REPLACE INTO jockey_elo_snapshots "
+                      "(id, jockey_id, as_of_race_id, as_of_date, rating, games_played, computed_at) VALUES ("
+                      + ','.join([esc(sid), esc(col), esc(r['as_of_race_id']), esc(r['as_of_date']), esc(r['rating']), esc(r['games_played']), "datetime('now')"])
+                      + ');'
+                  )
+                  if len(buf) >= 250: flush()
+
+          trows = db.execute(
+              """SELECT id, trainer_id, as_of_race_id, as_of_date, rating, games_played
+                    FROM trainer_elo_snapshots WHERE as_of_date>=? AND as_of_date<=?""",
+              (from_d, to_d)).fetchall()
+          print('trainer snaps', len(trows))
+          for r in trows:
+              tid = prefixed('trainer_', r['trainer_id'])
+              bare = r['id']
+              v12 = 'v12:' + bare if not str(bare).startswith('v12:') else bare
+              for sid, col in ((r['id'], r['trainer_id']), (v12, tid)):
+                  buf.append(
+                      "INSERT OR REPLACE INTO trainer_elo_snapshots "
+                      "(id, trainer_id, as_of_race_id, as_of_date, rating, games_played, computed_at) VALUES ("
+                      + ','.join([esc(sid), esc(col), esc(r['as_of_race_id']), esc(r['as_of_date']), esc(r['rating']), esc(r['games_played']), "datetime('now')"])
+                      + ');'
+                  )
+                  if len(buf) >= 250: flush()
+          flush()
+          print('sql files', nfile)
+          open('/tmp/elo_sql/manifest.txt','w').write(f'files={nfile} horse={len(rows)} jockey={len(jrows)} trainer={len(trows)}\n')
+          PY
+          wc -l /tmp/elo_sql/*.sql | tail
+          cat /tmp/elo_sql/manifest.txt
+
+      - name: Push SQL chunks to D1 (INSERT OR REPLACE only)
+        working-directory: tianxi-backend
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          n=0
+          for f in /tmp/elo_sql/chunk_*.sql; do
+            n=$((n+1))
+            echo "push $f ($n)"
+            npx wrangler d1 execute tianxi-db --remote --file="$f"
+          done
+          echo "pushed $n files"
+
+      - name: Verify hole filled
+        working-directory: tianxi-backend
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          npx wrangler d1 execute tianxi-db --remote --json --command "SELECT substr(as_of_date,1,7) ym, COUNT(*) n FROM horse_elo_snapshots WHERE axis_key='overall' AND as_of_date>='2024-01-01' AND as_of_date<='2025-03-01' GROUP BY ym ORDER BY ym"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: elo-gap-fill-manifest
+          path: /tmp/elo_sql/manifest.txt
+          retention-days: 14
