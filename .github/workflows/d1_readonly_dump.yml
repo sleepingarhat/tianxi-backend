@@ -1,0 +1,103 @@
+name: D1 Read-only dump (v12 Elo)
+
+# SELECT only. Never INSERT/UPDATE/DELETE. Artifact only.
+# Needs existing CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID (same as capy_results).
+
+on:
+  workflow_dispatch:
+    inputs:
+      note:
+        description: 'Why this dump (audit trail)'
+        required: false
+        default: 'replica v12 inspect'
+
+jobs:
+  dump:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install wrangler
+        run: npm ci
+
+      - name: List tables + Elo-like counts (SELECT only)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/d1dump
+          npx wrangler d1 execute tianxi-db --remote --json --command "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name" > /tmp/d1dump/tables.json
+          python3 - <<'PY'
+          import json,re,subprocess,os
+          tables=json.load(open('/tmp/d1dump/tables.json'))
+          names=[]
+          for block in tables if isinstance(tables,list) else [tables]:
+              rows=block.get('results') or block.get('result') or []
+              if isinstance(block, list):
+                  continue
+              for r in rows:
+                  n=r.get('name') or r.get('Name')
+                  if n: names.append(n)
+          if not names:
+              # wrangler json shape: [{results:[{name:...}]}]
+              raw=tables
+              if isinstance(raw,list):
+                  for block in raw:
+                      for r in (block.get('results') or []):
+                          if r.get('name'): names.append(r['name'])
+          open('/tmp/d1dump/table_names.txt','w').write('\n'.join(names)+'\n')
+          print('tables', len(names))
+          print('\n'.join(names))
+          PY
+
+      - name: Dump v12 / elo snapshots (SELECT)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          # Probe likely tables without writing.
+          for CMD in \
+            "SELECT name FROM sqlite_master WHERE type='table' AND (name LIKE '%elo%' OR name LIKE '%rating%') ORDER BY name" \
+            "SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table'" ; do
+            echo "SQL: $CMD"
+            npx wrangler d1 execute tianxi-db --remote --json --command "$CMD" | tee -a /tmp/d1dump/probe.jsonl || true
+          done
+          # Per-table count for elo-ish names discovered above.
+          python3 - <<'PY'
+          import json,subprocess,os,re
+          names=open('/tmp/d1dump/table_names.txt').read().split()
+          interesting=[n for n in names if re.search(r'elo|rating|lgb|pred', n, re.I)]
+          print('interesting', interesting)
+          open('/tmp/d1dump/interesting.txt','w').write('\n'.join(interesting)+'\n')
+          PY
+          while read -r T; do
+            [ -z "$T" ] && continue
+            echo "COUNT $T"
+            npx wrangler d1 execute tianxi-db --remote --json --command "SELECT COUNT(*) AS n FROM [$T]" > "/tmp/d1dump/count_${T}.json" || true
+            npx wrangler d1 execute tianxi-db --remote --json --command "SELECT * FROM [$T] WHERE CAST(id AS TEXT) LIKE 'v12:%' LIMIT 5" > "/tmp/d1dump/v12sample_${T}.json" || true
+            npx wrangler d1 execute tianxi-db --remote --json --command "SELECT COUNT(*) AS n FROM [$T] WHERE CAST(id AS TEXT) LIKE 'v12:%'" > "/tmp/d1dump/v12count_${T}.json" || true
+          done < /tmp/d1dump/interesting.txt
+
+      - name: Summarize
+        run: |
+          python3 - <<'PY'
+          import json,glob,os
+          out={'note':'read-only','writes':0,'files':sorted(os.listdir('/tmp/d1dump'))}
+          print(json.dumps(out, indent=2))
+          PY
+          ls -lh /tmp/d1dump | head
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: d1-readonly-v12-dump
+          path: /tmp/d1dump
+          retention-days: 14
