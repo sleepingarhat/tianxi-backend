@@ -1,0 +1,61 @@
+name: D1 Elo gap diagnose
+
+on:
+  workflow_dispatch:
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - name: Counts by month and id prefix
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/gap
+          npx wrangler d1 execute tianxi-db --remote --json --command "SELECT * FROM elo_runs" > /tmp/gap/elo_runs.json
+          npx wrangler d1 execute tianxi-db --remote --json --command "SELECT substr(as_of_date,1,7) ym, SUM(CASE WHEN id LIKE 'v12:%' THEN 1 ELSE 0 END) v12, SUM(CASE WHEN id NOT LIKE 'v12:%' THEN 1 ELSE 0 END) other, COUNT(*) n FROM horse_elo_snapshots WHERE axis_key='overall' GROUP BY ym ORDER BY ym" > /tmp/gap/horse_ym.json
+          npx wrangler d1 execute tianxi-db --remote --json --command "SELECT substr(as_of_date,1,7) ym, SUM(CASE WHEN id LIKE 'v12:%' THEN 1 ELSE 0 END) v12, SUM(CASE WHEN id NOT LIKE 'v12:%' THEN 1 ELSE 0 END) other, COUNT(*) n FROM jockey_elo_snapshots GROUP BY ym ORDER BY ym" > /tmp/gap/jockey_ym.json
+          npx wrangler d1 execute tianxi-db --remote --json --command "SELECT substr(computed_at,1,7) ym, COUNT(*) n FROM horse_elo_snapshots WHERE axis_key='overall' GROUP BY ym ORDER BY ym" > /tmp/gap/horse_computed.json
+          npx wrangler d1 execute tianxi-db --remote --json --command "SELECT substr(rm.date,1,7) ym, COUNT(*) n FROM race_results rr JOIN races r ON r.id=rr.race_id JOIN race_meetings rm ON rm.id=r.meeting_id WHERE rr.finishing_position>0 AND rr.finishing_position<99 GROUP BY ym ORDER BY ym" > /tmp/gap/results_ym.json
+          npx wrangler d1 execute tianxi-db --remote --json --command "SELECT substr(id,1,8) prefix, COUNT(*) n FROM horse_elo_snapshots WHERE axis_key='overall' AND as_of_date>='2024-01-01' AND as_of_date<'2025-03-01' GROUP BY prefix ORDER BY n DESC LIMIT 20" > /tmp/gap/id_prefix_gap.json
+          npx wrangler d1 execute tianxi-db --remote --json --command "SELECT id, horse_id, as_of_date, computed_at, rating FROM horse_elo_snapshots WHERE axis_key='overall' AND as_of_date>='2024-01-01' AND as_of_date<'2024-02-01' LIMIT 5" > /tmp/gap/sample_2024_01.json
+          npx wrangler d1 execute tianxi-db --remote --json --command "SELECT id, horse_id, as_of_date, computed_at, rating FROM horse_elo_snapshots WHERE axis_key='overall' AND as_of_date>='2024-06-01' AND as_of_date<'2024-07-01' LIMIT 5" > /tmp/gap/sample_2024_06.json
+          npx wrangler d1 execute tianxi-db --remote --json --command "SELECT id, horse_id, as_of_date, computed_at, rating FROM horse_elo_snapshots WHERE axis_key='overall' AND as_of_date>='2025-02-01' AND as_of_date<'2025-03-01' LIMIT 5" > /tmp/gap/sample_2025_02.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          def rows(p):
+              raw=json.loads(Path(p).read_text() or '[]')
+              blocks=raw if isinstance(raw,list) else [raw]
+              out=[]
+              for b in blocks:
+                  if 'error' in b: return [{'error': b.get('error')}]
+                  out.extend(b.get('results') or [])
+              return out
+          print('=== elo_runs ==='); print(json.dumps(rows('/tmp/gap/elo_runs.json'), indent=2, ensure_ascii=False)[:2000])
+          print('=== horse ym ===')
+          for r in rows('/tmp/gap/horse_ym.json'): print(r)
+          print('=== results ym 2023-2026 ===')
+          for r in rows('/tmp/gap/results_ym.json'):
+              ym=r.get('ym') or ''
+              if ym>='2023-01': print(r)
+          print('=== prefix in gap ==='); print(rows('/tmp/gap/id_prefix_gap.json'))
+          print('=== samples ===')
+          for f in ['sample_2024_01.json','sample_2024_06.json','sample_2025_02.json']:
+              print(f, rows('/tmp/gap/'+f))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: elo-gap-diag
+          path: /tmp/gap
+          retention-days: 14
