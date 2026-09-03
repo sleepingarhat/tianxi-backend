@@ -170,3 +170,54 @@ export async function auditPredictionLock(
     mismatches: audit.mismatches,
   };
 }
+
+export async function freezeExplainPayload(
+  db: D1Database,
+  payload: any,
+  raceId?: string | null,
+  horseId?: string | null,
+  engine: string = 'v12',
+): Promise<any> {
+  if (!payload || !raceId || !horseId) return payload;
+  let date = payload.date as string | undefined;
+  let raceNumber = Number(payload.raceNumber);
+  let venue = payload.venue as string | undefined;
+  if (!date || !Number.isFinite(raceNumber)) {
+    try {
+      const row = await db.prepare(
+        `SELECT r.race_number AS race_number, rm.date AS date, rm.venue AS venue
+           FROM races r JOIN race_meetings rm ON rm.id = r.meeting_id
+          WHERE r.id = ?`,
+      ).bind(raceId).first<{ race_number: number; date: string; venue: string }>();
+      if (!row) return payload;
+      date = row.date;
+      raceNumber = Number(row.race_number);
+      venue = row.venue;
+    } catch {
+      return payload;
+    }
+  }
+  if (!(await dateHasSettledResults(db, date, venue))) {
+    payload.frozen = false;
+    return payload;
+  }
+  const frozen = await loadFrozenPicksForDate(db, date, engine);
+  const fr = frozen.get(raceNumber) || [];
+  const fp = fr.find((p: any) =>
+    (p.horseId && String(p.horseId) === String(horseId)) ||
+    (payload.horseNumber != null && String(p.horseNumber) === String(payload.horseNumber)),
+  );
+  if (!fp) {
+    payload.frozen = false;
+    payload.freezeSource = 'missing-log-horse';
+    return payload;
+  }
+  payload.rank = fp.rank ?? payload.rank;
+  payload.pWin = fp.pWin ?? payload.pWin;
+  payload.pTop3 = fp.pTop3 ?? payload.pTop3;
+  payload.pTop4 = fp.pTop4 ?? payload.pTop4;
+  payload.finalScore = fp.finalScore ?? payload.finalScore;
+  payload.frozen = true;
+  payload.freezeSource = 'prediction_log';
+  return payload;
+}
