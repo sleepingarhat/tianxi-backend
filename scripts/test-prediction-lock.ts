@@ -10,13 +10,13 @@ import {
 const frozen = [
   { horseNumber: 10, rank: 1, nameCh: '辣得金', pWin: 0.22, scoreSource: 'lgb' },
   { horseNumber: 3, rank: 2, nameCh: '萬眾開心', pWin: 0.18, scoreSource: 'lgb' },
-  { horseNumber: 2, rank: 3, nameCh: '咥咥友福', pWin: 0.14, scoreSource: 'lgb' },
+  { horseNumber: 2, rank: 3, nameCh: '品品友福', pWin: 0.14, scoreSource: 'lgb' },
   { horseNumber: 1, rank: 4, nameCh: '鄉村樂韻', pWin: 0.12, scoreSource: 'lgb' },
 ];
 const liveDrift = [
   { horseNumber: 10, rank: 1, nameCh: '辣得金', jockeyCh: '何澤堯', pWin: 0.21, scoreSource: 'lgb' },
   { horseNumber: 1, rank: 2, nameCh: '鄉村樂韻', jockeyCh: 'A', pWin: 0.19, scoreSource: 'lgb' },
-  { horseNumber: 2, rank: 3, nameCh: '咥咥友福', jockeyCh: 'B', pWin: 0.15, scoreSource: 'lgb' },
+  { horseNumber: 2, rank: 3, nameCh: '品品友福', jockeyCh: 'B', pWin: 0.15, scoreSource: 'lgb' },
   { horseNumber: 5, rank: 4, nameCh: '洛河', jockeyCh: 'C', pWin: 0.11, scoreSource: 'lgb' },
 ];
 
@@ -50,5 +50,16 @@ assert.equal(audit.mismatches.length, 1);
 assert.equal(audit.mismatches[0].raceNumber, 1);
 assert.equal(audit.mismatches[0].frozenTop4, '10-3-2-1');
 assert.equal(audit.mismatches[0].comparedTop4, '10-1-2-5');
+
+const r4Live = [
+  { horseNumber: 5, rank: 1 }, { horseNumber: 7, rank: 2 },
+  { horseNumber: 1, rank: 3 }, { horseNumber: 6, rank: 4 },
+];
+const r4Frozen = [
+  { horseNumber: 5, rank: 1 }, { horseNumber: 1, rank: 2 },
+  { horseNumber: 7, rank: 3 }, { horseNumber: 2, rank: 4 },
+];
+assert.equal(predictedTop4Key(r4Live), '5-7-1-6');
+assert.equal(predictedTop4Key(applyFrozenOrder(r4Live, r4Frozen).picks), '5-1-7-2');
 
 console.log('prediction-lock ok');
