@@ -147,6 +147,19 @@ ol.picks{margin:0;padding-left:18px}ol.picks li{margin:4px 0}
   <a href="https://www.tianxi.racing/strategy-pnl/">策略盈虧</a>
   <a href="https://www.tianxi.racing/prediction-vs-result/">預測與賽果</a>
   <a href="https://www.tianxi.racing/engine/">引擎健康</a>
+  <a href="https://www.tianxi.racing/engine/monitor.html">監控清單</a>
+</div>
+<div class="card" style="margin:0 12px 16px">
+  <h2>運作模式 · 此輪預測版本</h2>
+  <p class="s" style="margin:0 0 8px"><span class="chip watch">初版</span> 未鎖，刷新可改四擇　　<span class="chip ok">最終版</span> 已鎖，對賬同卡同一套</p>
+  <ol class="picks">
+    <li>公開四擇只有一套帳：已完場讀 prediction_log／hit-rate，唔用 live 重算。</li>
+    <li>鎖係全日跟第一場。規格：第一場開跑前 1.5 小時鎖死整日。</li>
+    <li>出卡跟鎖：T−1.5h 鎖完先出卡，目標 T−1h 發佈最終版。</li>
+    <li>而家已落地：第一場賽果入庫後凍結。T−1.5h 鎖係已批規格。</li>
+    <li>命中率／賽果／卡／本頁必須同一套最終版；live LGB 只留研究路徑。</li>
+  </ol>
+  <div class="s" id="edNote">此輪標籤載入中…</div>
 </div>
 <div class="grid" id="kpis">
   <div class="card"><h2>賽季</h2><div class="k" id="season">…</div><div class="s" id="seasonSub"></div></div>
@@ -182,6 +195,12 @@ Promise.all([
       $('hitSub').textContent = date+' · 獨贏 '+(s.top1HitRate??'—')+'% · 頭四平均 '+(s.top4AvgIntersect??'—');
     }).catch(()=>{});
   }
+  const settled = !!(picks && (picks.settled || (cov.lastMeeting && picks.date && picks.date <= cov.lastMeeting)));
+  const frozen = !!(picks && (picks.frozen || picks.locked || settled));
+  const edLabel = (settled || frozen) ? '最終版' : '初版';
+  const edNote = (settled || frozen) ? '已鎖／已完場 · 與 hit-rate／卡同一套' : '未鎖 · 刷新有機會改四擇';
+  const edEl = $('edNote');
+  if (edEl) edEl.textContent = '此輪預測：' + edLabel + ' · ' + edNote + (picks && picks.date ? ' · ' + picks.date : '');
   if(picks && picks.races){
     $('picks').innerHTML = picks.races.map(r=>{
       const p=(r.picks||[])[0];
