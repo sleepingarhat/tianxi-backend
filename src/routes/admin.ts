@@ -266,11 +266,24 @@ function buildWorkflowMap(runs: any[]): Record<string, WfInfo> {
 
 // Rule helpers
 type Status = 'ok' | 'warn' | 'bad';
-function assessHistory(count: number | null, latest: string | null, minCount: number, maxStaleDays: number): Status {
+// 2026-09-05: staleness is measured against a REFERENCE date, not "now".
+// Race-day-driven datasets (results, form, trackwork, injury, ELO) can only
+// advance when HK racing happens; during the ~7-week summer break every one of
+// them turned red even though the pipelines were perfectly healthy. Passing the
+// last completed race day as `refIso` makes the check season-aware: it still
+// goes red when a meeting HAS run and the dataset failed to follow.
+function assessHistory(
+  count: number | null,
+  latest: string | null,
+  minCount: number,
+  maxStaleDays: number,
+  refIso?: string | null,
+): Status {
   if (count == null || count === 0) return 'bad';
   if (count < minCount * 0.3) return 'bad';
   if (!latest) return count >= minCount ? 'ok' : 'warn';
-  const ageDays = (Date.now() - new Date(latest).getTime()) / 86400000;
+  const refMs = refIso ? Math.min(Date.parse(refIso), Date.now()) : Date.now();
+  const ageDays = Math.max(0, (refMs - new Date(latest).getTime()) / 86400000);
   if (ageDays > maxStaleDays * 3) return 'bad';
   return 'ok';
 }
@@ -316,6 +329,13 @@ adminRoutes.get('/api/coverage', async (c) => {
   const runs = await fetchRunsRobust(c.env);  // per-workflow fetch — low-cadence workflows no longer scroll off the window
   const wf = buildWorkflowMap(runs);
 
+  // Season context: race-day-driven datasets are graded against the last
+  // COMPLETED HK meeting instead of today (see assessHistory).
+  const season = await getSeasonStatus(db).catch(() => null);
+  const raceRef = season?.lastMeeting
+    ? `${season.lastMeeting}T23:59:59Z`
+    : await scalar<string>(db, `SELECT MAX(date) FROM race_meetings WHERE date <= date('now','localtime')`).then(d => (d ? `${d}T23:59:59Z` : null));
+
   // Gather all counts + latest dates in parallel
   const [mc, rc, rsc, hc, jc, tc, twc, ic, fc, ec, oc, heC, jeC, teC,
          latestM, latestE, latestTW, latestElo, latestOdds, latestResult,
@@ -349,41 +369,41 @@ adminRoutes.get('/api/coverage', async (c) => {
 
   const datasets = [
     { key: 'meetings', label: '賽馬日', count: mc, latest: latestM,
-      history: assessHistory(mc, latestM, 880, 14),
+      history: assessHistory(mc, latestM, 880, 14, raceRef),
       ...rowAuto(wf, ['capy_race_daily.yml', 'Capy Race Day — RacingData Results', 'capy_d1_sync.yml']),
       workflows: ['capy_race_daily', 'capy_d1_sync'], detail: `${mc} 場 · 最新 ${fd(latestM)}` },
     { key: 'races', label: '場次', count: rc, latest: latestM,
-      history: assessHistory(rc, latestM, 8000, 14),
+      history: assessHistory(rc, latestM, 8000, 14, raceRef),
       ...rowAuto(wf, ['capy_race_daily.yml', 'Capy Race Day — RacingData Results']),
       workflows: ['capy_race_daily'], detail: `${rc} 場次` },
     { key: 'results', label: '賽果', count: rsc, latest: latestResult,
-      history: assessHistory(rsc, latestResult, 95000, 14),
+      history: assessHistory(rsc, latestResult, 95000, 14, raceRef),
       ...rowAuto(wf, ['capy_race_daily.yml', 'Capy Race Day — RacingData Results', 'capy_d1_sync.yml']),
       workflows: ['capy_race_daily', 'capy_d1_sync'], detail: `${rsc} 行 · 最新 ${fd(latestResult)}` },
     { key: 'horses', label: '馬匹', count: hc, latest: latestM,
-      history: assessHistory(hc, latestM, 5000, 21),
+      history: assessHistory(hc, latestM, 5000, 21, raceRef),
       ...rowAuto(wf, ['capy_race_daily.yml', 'capy_pool_a.yml']),
       workflows: ['capy_race_daily', 'capy_pool_a'], detail: `${hc} 匹` },
     { key: 'jockeys', label: '騎師', count: jc, latest: latestM,
-      history: assessHistory(jc, latestM, 150, 21),
+      history: assessHistory(jc, latestM, 150, 21, raceRef),
       ...rowAuto(wf, ['capy_race_daily.yml']),
       workflows: ['capy_race_daily'], detail: `${jc} 位` },
     { key: 'trainers', label: '練馬師', count: tc, latest: latestM,
-      history: assessHistory(tc, latestM, 150, 21),
+      history: assessHistory(tc, latestM, 150, 21, raceRef),
       ...rowAuto(wf, ['capy_race_daily.yml']),
       workflows: ['capy_race_daily'], detail: `${tc} 位` },
     { key: 'trackwork', label: '晨操', count: twc, latest: latestTW,
-      history: assessHistory(twc, latestTW, 5000, 3),
+      history: assessHistory(twc, latestTW, 5000, 3, raceRef),
       ...rowAuto(wf, ['capy_pool_a.yml', 'capy_d1_sync_pool_a.yml',
         'Capy Pool A — Horse Profiles + Trackwork + Injury', 'Capy D1 Sync Pool A — trackwork + injury + form']),
       workflows: ['capy_pool_a', 'capy_d1_sync_pool_a'], detail: `${twc} 行 · 最新 ${fd(latestTW)}` },
     { key: 'injury', label: '傷患', count: ic, latest: latestInjury,
-      history: assessHistory(ic, latestInjury, 1200, 30),
+      history: assessHistory(ic, latestInjury, 1200, 30, raceRef),
       ...rowAuto(wf, ['capy_pool_a.yml', 'capy_d1_sync_pool_a.yml',
         'Capy Pool A — Horse Profiles + Trackwork + Injury']),
       workflows: ['capy_pool_a', 'capy_d1_sync_pool_a'], detail: `${ic} 行 · 最新 ${fd(latestInjury)}` },
     { key: 'form', label: '往績 (form records)', count: fc, latest: latestForm,
-      history: assessHistory(fc, latestForm, 180000, 30),
+      history: assessHistory(fc, latestForm, 180000, 30, raceRef),
       ...rowAuto(wf, ['capy_race_daily.yml', 'capy_pool_a.yml', 'capy_d1_sync_pool_a.yml']),
       workflows: ['capy_race_daily', 'capy_pool_a'], detail: `${fc} 行 · 最新 ${fd(latestForm)}` },
     { key: 'entries', label: '排位表 (upcoming)', count: ec, latest: latestE,
@@ -392,19 +412,19 @@ adminRoutes.get('/api/coverage', async (c) => {
         'Capy Entries — Race Card (排位表)', 'Capy D1 Sync Entries — forward-looking racecards']),
       workflows: ['capy_entries', 'capy_d1_sync_entries'], detail: `${ec} 行 · 最新 ${fd(latestE)}` },
     { key: 'odds', label: '賠率', count: oc, latest: latestOdds,
-      history: assessHistory(oc, latestOdds, 1000, 3),
+      history: assessHistory(oc, latestOdds, 1000, 3, raceRef),
       ...rowAuto(wf, ['capy_odds.yml', 'Capy Odds — live snapshot (hkjc-api GraphQL)']),
       workflows: ['capy_odds'], detail: `${oc} 行 · 最新 ${fd(latestOdds)}` },
     { key: 'horseElo', label: '馬匹 ELO', count: heC, latest: latestElo,
-      history: assessHistory(heC, latestElo, 75000, 7),
+      history: assessHistory(heC, latestElo, 75000, 7, raceRef),
       ...rowAuto(wf, ['ELO Post-Race Auto-Update', 'elo-post-race.yml', 'capy_race_daily.yml']),
       workflows: ['ELO Post-Race Auto-Update'], detail: `${heC} snapshots · 最新 ${fd(latestElo)}` },
     { key: 'jockeyElo', label: '騎師 ELO', count: jeC, latest: latestElo,
-      history: assessHistory(jeC, latestElo, 45000, 7),
+      history: assessHistory(jeC, latestElo, 45000, 7, raceRef),
       ...rowAuto(wf, ['ELO Post-Race Auto-Update', 'elo-post-race.yml']),
       workflows: ['ELO Post-Race Auto-Update'], detail: `${jeC} snapshots` },
     { key: 'trainerElo', label: '練馬師 ELO', count: teC, latest: latestElo,
-      history: assessHistory(teC, latestElo, 45000, 7),
+      history: assessHistory(teC, latestElo, 45000, 7, raceRef),
       ...rowAuto(wf, ['ELO Post-Race Auto-Update', 'elo-post-race.yml']),
       workflows: ['ELO Post-Race Auto-Update'], detail: `${teC} snapshots` },
   ];
@@ -455,7 +475,15 @@ adminRoutes.get('/api/coverage', async (c) => {
       sourceLabel: 'race_results × jockey_id × trainer_id', note: '使用中 · 需 ≥10 合作場次 · 最大調整 ±12 ELO' },
   ];
 
-  return c.json({ datasets, factors, checkedAt: new Date().toISOString() });
+  return c.json({
+    datasets,
+    factors,
+    season: season
+      ? { status: season.status, lastMeeting: season.lastMeeting, nextMeeting: season.nextMeeting, gapDays: season.gapDays }
+      : null,
+    staleReference: raceRef,
+    checkedAt: new Date().toISOString(),
+  });
 });
 
   // ── /api/feature-audit ─ Coverage stats for the 5 candidate ML features
@@ -996,10 +1024,15 @@ adminRoutes.get('/api/alerts', async (c) => {
     if (hrs > 6) alerts.push({ level: 'red', msg: `賠率已停更新 ${hrs.toFixed(1)} 小時` });
   }
 
+  // 2026-09-05: trackwork only publishes around race days — measure the lag
+  // against the last COMPLETED meeting so the summer break stops crying wolf.
   const twLatest = await scalar<string>(db, `SELECT MAX(trackwork_date) FROM horse_trackwork`);
+  const lastDoneMeeting = await scalar<string>(
+    db, `SELECT MAX(date) FROM race_meetings WHERE date <= date('now','localtime') AND venue IN ('ST','HV')`);
   if (twLatest) {
-    const days = Math.floor((now.getTime() - new Date(twLatest).getTime()) / 86400000);
-    if (days > 3) alerts.push({ level: 'yellow', msg: `晨操資料落後 ${days} 日（最新：${twLatest}）` });
+    const refMs = lastDoneMeeting ? Math.min(Date.parse(lastDoneMeeting), now.getTime()) : now.getTime();
+    const days = Math.floor(Math.max(0, refMs - Date.parse(twLatest)) / 86400000);
+    if (days > 3) alerts.push({ level: 'yellow', msg: `晨操資料落後最近賽馬日 ${days} 日（最新：${twLatest}）` });
   } else alerts.push({ level: 'yellow', msg: '晨操資料完全冇' });
 
   const nextMeet = await scalar<string>(db, `SELECT MIN(date) FROM race_meetings WHERE date >= date('now','localtime')`);
@@ -1011,7 +1044,10 @@ adminRoutes.get('/api/alerts', async (c) => {
   const meetLatest = await scalar<string>(db, `SELECT MAX(date) FROM race_meetings`);
   if (meetLatest) {
     const days = Math.floor((now.getTime() - new Date(meetLatest).getTime()) / 86400000);
-    if (days > 14) alerts.push({ level: 'red', msg: `賽馬日已 ${days} 日冇更新（${meetLatest}）` });
+    // A known FUTURE meeting means the calendar is current — no alert.
+    if (days > 14 && meetLatest < new Date(now.getTime() + 8 * 3600000).toISOString().substring(0, 10)) {
+      alerts.push({ level: 'red', msg: `賽馬日已 ${days} 日冇更新（${meetLatest}）` });
+    }
   }
 
   // 2026-05-25: bumped from 20 → 50; busy days (URGENT-fix cascades) had 19/20
