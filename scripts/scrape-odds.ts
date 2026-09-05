@@ -19,7 +19,20 @@
   import { resolve } from 'node:path';
   import { randomUUID } from 'node:crypto';
   // @ts-ignore - hkjc-api ships d.ts; no package-json `types` guard needed
-  import { HorseRacingAPI } from 'hkjc-api';
+  import { HorseRacingAPI, defaultClient, horseOddsQuery, horsePoolQuery } from 'hkjc-api';
+
+  // hkjc-api's getRaceOdds/getRacePools helpers do NOT forward date/venueCode,
+  // so HKJC always answers with raceMeetings[0] — which is a simulcast (S1/S2…)
+  // meeting whenever one is open, yielding 0 rows for the real HK card.
+  // Query the GraphQL endpoint directly with date + venueCode instead.
+  async function fetchPmPools(date: string, venueCode: string, raceNo: number, oddsTypes: string[]): Promise<any[]> {
+    const r: any = await defaultClient.request(horseOddsQuery, { date, venueCode, raceNo, oddsTypes });
+    return r?.raceMeetings?.[0]?.pmPools ?? [];
+  }
+  async function fetchPoolInvs(date: string, venueCode: string, raceNo: number, oddsTypes: string[]): Promise<any[]> {
+    const r: any = await defaultClient.request(horsePoolQuery, { date, venueCode, raceNo, oddsTypes });
+    return r?.raceMeetings?.[0]?.poolInvs ?? [];
+  }
 
   type PoolType =
     | 'WIN' | 'PLA'
@@ -99,7 +112,7 @@
     const venueFilter = arg('venue', '').toUpperCase();
     const sourceCommit = process.env.GITHUB_SHA ?? null;
 
-    const api = new HorseRacingAPI();
+    const api = new HorseRacingAPI(); // still used for the meeting list
 
     // getAllRaces() returns RaceMeeting[] (array), not a single object.
     // Use the first meeting as the current/active meeting.
@@ -113,8 +126,13 @@
       process.exit(0);
     }
 
-    // Prefer a meeting that matches --date/--venue filters; else take first
-    let meeting: any = meetings[0];
+    // Prefer a meeting that matches --date/--venue filters; otherwise take the
+    // earliest LOCAL HK meeting (ST/HV). Simulcast meetings (S1…S5) carry no
+    // HK pools and used to shadow the real card because they sort first.
+    const hkMeetings = meetings
+      .filter((m: any) => ['ST', 'HV'].includes(String(m.venueCode ?? m.venue ?? '').toUpperCase()))
+      .sort((a: any, b: any) => String(a.date ?? '').localeCompare(String(b.date ?? '')));
+    let meeting: any = hkMeetings[0] ?? meetings[0];
     if (dateFilter || venueFilter) {
       const matched = meetings.find((m: any) => {
         const dOk = !dateFilter || (m.date ?? '') === dateFilter;
@@ -175,7 +193,7 @@
       for (let i = 0; i < wantPools.length; i += 4) {
         const chunk = wantPools.slice(i, i + 4);
 
-        const pmPools: any[] = await api.getRaceOdds(raceNo, chunk as any).catch((e: any) => {
+        const pmPools: any[] = await fetchPmPools(meetingDate, venueCode, raceNo, chunk as any).catch((e: any) => {
           console.error(`[odds] race ${raceNo} getRaceOdds ${chunk.join(',')} failed:`, e?.message ?? e);
           return [];
         });
@@ -206,7 +224,7 @@
         }
 
         // getRacePools() returns poolInv[] where each has: { oddsType, investment, ... }
-        const poolInvs: any[] = await api.getRacePools(raceNo, chunk as any).catch(() => []);
+        const poolInvs: any[] = await fetchPoolInvs(meetingDate, venueCode, raceNo, chunk as any).catch(() => []);
         if (!Array.isArray(poolInvs)) continue;
         for (const poolInv of poolInvs) {
           const pool = (poolInv.oddsType ?? '') as PoolType;
