@@ -953,6 +953,7 @@ export async function computeHitRateStats(db: D1Database, date: string, engine: 
     let top1Hits = 0, top3AnyHits = 0, top3SumIntersect = 0, racesEvaluated = 0;
     let quinellaHits = 0, qpHits = 0, trioHits = 0, tierceHits = 0;
     let first4Hits = 0, first4Eligible = 0;
+    let quartetHits = 0;  // 四重彩：頭四名要順序全中
     let top4SumIntersect = 0, top4Eligible = 0;
     const races = picksData.races.map((race: any) => {
       const actualSorted = (actualByRace.get(race.raceNumber) ?? []).sort((a: any, b: any) => a.finishing_position - b.finishing_position);
@@ -992,6 +993,9 @@ export async function computeHitRateStats(db: D1Database, date: string, engine: 
       // First 4 (F4): our top 4 == actual top 4 (any order)
       const first4Hit = predictedTop4.length === 4 && actualTop4.length === 4
         && predictedTop4.every((p: any) => actualTop4Ids.has(p.horseId));
+      // Quartet (4T, 四重彩): our top 4 == actual top 4 in EXACT order
+      const quartetHit = predictedTop4.length === 4 && actualTop4.length === 4
+        && predictedTop4.every((p: any, i: number) => p.horseId === actualTop4[i]?.horse_id);
 
       if (actualTop3.length >= 3) {
         racesEvaluated++;
@@ -1008,6 +1012,7 @@ export async function computeHitRateStats(db: D1Database, date: string, engine: 
       if (actualTop4.length >= 4) {
         first4Eligible++;
         if (first4Hit) first4Hits++;
+        if (quartetHit) quartetHits++;
         top4Eligible++;
         top4SumIntersect += top4IntersectCount;
       }
@@ -1080,7 +1085,7 @@ export async function computeHitRateStats(db: D1Database, date: string, engine: 
         })),
         top1Hit, top3IntersectCount: intersect, top3AnyHit,
         top4IntersectCount,
-        quinellaHit, qpHit, trioHit, tierceHit, first4Hit,
+        quinellaHit, qpHit, trioHit, tierceHit, first4Hit, quartetHit,
         boxPayouts,
       };
     });
@@ -1110,9 +1115,10 @@ export async function computeHitRateStats(db: D1Database, date: string, engine: 
         trioHitRate: rate(trioHits, racesEvaluated),
         tierceHitRate: rate(tierceHits, racesEvaluated),
         first4HitRate: rate(first4Hits, first4Eligible),
+        quartetHitRate: rate(quartetHits, first4Eligible),
         top1Hits, top3AnyHits, top3SumIntersect,
         quinellaHits, qpHits, trioHits, tierceHits,
-        first4Hits, first4Eligible,
+        first4Hits, first4Eligible, quartetHits,
         // New: 首/次/三/四選平均命中數 (out of 4)
         top4SumIntersect, top4Eligible,
         top4AvgIntersect: top4Eligible ? Math.round(top4SumIntersect / top4Eligible * 100) / 100 : null,
@@ -3235,7 +3241,7 @@ analyzeRoutes.get('/factors', (c) => {
           const meetingDates: any[] = (datesQ.results as any[]) || [];
                   let totalRaces = 0, totalTop1Hits = 0, totalTop3AnyHits = 0, totalTop3Intersect = 0;
             let totalQuinella = 0, totalQp = 0, totalTrio = 0, totalTierce = 0;
-            let totalFirst4 = 0, totalFirst4Eligible = 0;
+            let totalFirst4 = 0, totalFirst4Eligible = 0, totalQuartet = 0;
             let totalTop4Intersect = 0, totalTop4Eligible = 0;
             const perMeeting: any[] = [];
             const errors: any[] = [];
@@ -3245,7 +3251,7 @@ analyzeRoutes.get('/factors', (c) => {
                 // Falls back to live compute (and back-fills cache) when row missing
                 // or has stale Stage-4a shape (no quinellaHits field).
                 let r: any = await readHitRateCache(db, m.date, engine);
-                if (!r?.summary || r.summary.quinellaHits === undefined || r.summary.top4SumIntersect === undefined) {
+                if (!r?.summary || r.summary.quinellaHits === undefined || r.summary.top4SumIntersect === undefined || r.summary.quartetHits === undefined) {
                   const computed = await computeHitRateStats(db, m.date, engine);
                   if ('error' in computed) { errors.push({date: m.date, error: computed.error}); continue; }
                   await writeHitRateCache(db, m.date, engine, computed).catch(() => {});
@@ -3264,6 +3270,7 @@ analyzeRoutes.get('/factors', (c) => {
                 totalTierce += s.tierceHits ?? 0;
                 totalFirst4 += s.first4Hits ?? 0;
                 totalFirst4Eligible += s.first4Eligible ?? 0;
+                totalQuartet += s.quartetHits ?? 0;
                 totalTop4Intersect += s.top4SumIntersect ?? 0;
                 totalTop4Eligible += s.top4Eligible ?? 0;
               } catch (e: any) { errors.push({date: m.date, error: e?.message || String(e)}); }
@@ -3282,12 +3289,14 @@ analyzeRoutes.get('/factors', (c) => {
               trioHitRate: rRate(totalTrio, totalRaces),
               tierceHitRate: rRate(totalTierce, totalRaces),
               first4HitRate: rRate(totalFirst4, totalFirst4Eligible),
+              quartetHitRate: rRate(totalQuartet, totalFirst4Eligible),
               top4AvgIntersect: totalTop4Eligible ? Math.round(totalTop4Intersect / totalTop4Eligible * 100) / 100 : null,
               top4Eligible: totalTop4Eligible,
               top1Hits: totalTop1Hits, top3AnyHits: totalTop3AnyHits,
               quinellaHits: totalQuinella, qpHits: totalQp,
               trioHits: totalTrio, tierceHits: totalTierce,
               first4Hits: totalFirst4, first4Eligible: totalFirst4Eligible,
+              quartetHits: totalQuartet,
               perMeeting, errors,
               generatedAt: new Date().toISOString(),
             };
