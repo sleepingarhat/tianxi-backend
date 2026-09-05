@@ -417,7 +417,8 @@ horsesRoutes.get('/:id/form', async (c) => {
 
   // 晨操記錄 (v2: horse_trackwork)
   const { results: trackwork } = await c.env.DB.prepare(`
-    SELECT id, horse_id, trackwork_date, venue, batch, distance, time_text AS time, partner, comment
+    SELECT id, horse_id, trackwork_date, venue, batch, distance, time_text AS time, time_sec,
+           partner, comment, work_type, track, rider, splits, gear, placing, details
     FROM horse_trackwork
     WHERE horse_id = ?
     ORDER BY trackwork_date DESC
@@ -478,8 +479,17 @@ horsesRoutes.get('/:id/form', async (c) => {
       batch: tw.batch,
       distance: tw.distance,
       time: tw.time,
+      timeSec: tw.time_sec ?? null,
       partner: tw.partner,
       comment: tw.comment,
+      // 2026-09-05 ingest fix: 類別／跑道／助手／分段／配備／名次 now stored
+      workType: tw.work_type ?? tw.batch ?? null,
+      track: tw.track ?? null,
+      rider: tw.rider ?? null,
+      splits: tw.splits ?? null,
+      gear: tw.gear ?? null,
+      placing: tw.placing ?? null,
+      details: tw.details ?? null,
     })),
   });
 });
@@ -661,7 +671,8 @@ horsesRoutes.get('/:id/research', async (c) => {
 
     // 2j. trackwork (v2: horse_trackwork, most recent 15)
     c.env.DB.prepare(`
-      SELECT trackwork_date, venue, batch, distance, time_text, time_sec, partner, comment
+      SELECT trackwork_date, venue, batch, distance, time_text, time_sec, partner, comment,
+             work_type, track, rider, splits, gear, placing, details
       FROM horse_trackwork
       WHERE horse_id = ?
       ORDER BY trackwork_date DESC
@@ -1133,6 +1144,14 @@ horsesRoutes.get('/:id/research', async (c) => {
       timeSec:  tw.time_sec  ?? null,
       partner:  tw.partner  ?? null,
       comment:  tw.comment  ?? null,
+      // 2026-09-05: 場地／跑道／類別／分段／配備／助手 now populated (ingest fix)
+      workType: tw.work_type ?? tw.batch ?? null,
+      track:    tw.track    ?? null,
+      rider:    tw.rider    ?? null,
+      splits:   tw.splits   ?? null,
+      gear:     tw.gear     ?? null,
+      placing:  tw.placing  ?? null,
+      details:  tw.details  ?? null,
     })),
     barrierTrials: trialRows.map((tr: any) => ({
       date:     tr.trial_date,
