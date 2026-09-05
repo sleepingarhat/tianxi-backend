@@ -222,6 +222,7 @@ const HIT_RATE_SUMMARY_KEYS = [
   'trioHitRate',
   'tierceHitRate',
   'first4HitRate',
+  'quartetHitRate',
   'top4AvgIntersect',
   'top1Hits',
   'top3AnyHits',
@@ -230,6 +231,7 @@ const HIT_RATE_SUMMARY_KEYS = [
   'trioHits',
   'tierceHits',
   'first4Hits',
+  'quartetHits',
   'first4Eligible',
   'top4Eligible',
 ] as const;
