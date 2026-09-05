@@ -209,7 +209,8 @@ jobs:
           FROM=$(date -u +%Y-%m-%d)
           TO=$(date -u -d "+${DAYS_AHEAD} day" +%Y-%m-%d)
           echo "Fetching entries $FROM .. $TO"
-          curl -fsSL "https://tianxi.racing/admin/api/entries-upcoming-export?from=$FROM&to=$TO&token=$ADMIN_TOKEN" \
+          curl -fsSL -H "Authorization: Bearer $ADMIN_TOKEN" \
+            "https://tianxi.racing/admin/api/entries-upcoming-export?from=$FROM&to=$TO" \
             -o upcoming-entries.json
           echo "Entry count: $(jq '.count' upcoming-entries.json)"
           jq '.entries[0]' upcoming-entries.json || true
