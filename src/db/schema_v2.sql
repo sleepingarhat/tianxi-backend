@@ -99,7 +99,7 @@ CREATE INDEX IF NOT EXISTS idx_hfr_unmatched ON horse_form_records(horse_id) WHE
 -- legacy trackwork table 保留俾現有 code，新 ingestion 寫入 horse_trackwork
 -- Migration path: 之後逐步 shift legacy writers 到新表
 CREATE TABLE IF NOT EXISTS horse_trackwork (
-  id TEXT PRIMARY KEY,                 -- hash(horse_id + date + venue + distance + time)
+  id TEXT PRIMARY KEY,                 -- hash(horse + date + venue + distance + time + work_type + details)
   horse_id TEXT NOT NULL REFERENCES horses(id),
   trackwork_date TEXT NOT NULL,
   venue TEXT,                          -- 沙田 / 跑馬地 / 磡角 等
@@ -109,6 +109,14 @@ CREATE TABLE IF NOT EXISTS horse_trackwork (
   time_sec REAL,                       -- normalized 秒，文字則 NULL
   partner TEXT,                        -- 合操馬
   comment TEXT,                        -- 狀態備註
+  -- 2026-09-05: scraper 其實輸出以下欄位，ingest 之前冇讀，導致全表 detail 欄位 NULL
+  work_type TEXT,                      -- 晨操類別：快操 / 試閘 / 出賽 / 踱步 / 游水
+  track TEXT,                          -- 跑道：內圈 / 全天候 / 草地 / 飛機場
+  rider TEXT,                          -- 策騎者（助手 / 騎師名）
+  splits TEXT,                         -- 分段時間，空格分隔 '30.8 26.2'
+  gear TEXT,                           -- 配備
+  placing TEXT,                        -- 出賽名次 '5/14'
+  details TEXT,                        -- 原文操練詳情（保留以便重新解析）
   source_commit TEXT,
   ingested_at TEXT DEFAULT (datetime('now')),
   UNIQUE(horse_id, trackwork_date, venue, distance, time_text)
