@@ -12,8 +12,22 @@ export function formRecordId(horseCode: string, dateIso: string, venue: string |
   return `hfr_${horseCode}_${dateIso}_${venue ?? 'NA'}_${raceNo}`;
 }
 
-export function trackworkId(horseCode: string, dateIso: string, venue: string | null, distance: string | null, timeText: string | null): string {
-  return `htw_${horseCode}_${dateIso}_${shortHash(`${venue}|${distance}|${timeText}`)}`;
+// 2026-09-05: added workType + raw details to the hash. A horse often has 2-3
+// sessions on one morning (游水 + 踱步 + 快操) that share NULL distance/time, so
+// the old 3-part key collapsed them into a single row. `None` (not `null`) is the
+// placeholder for blank parts — matches the Python backfill that seeded D1.
+export function trackworkId(
+  horseCode: string,
+  dateIso: string,
+  venue: string | null,
+  distance: string | null,
+  timeText: string | null,
+  workType: string | null = null,
+  details: string | null = null,
+): string {
+  const nn = (v: string | null) => (v == null || v === '' ? 'None' : v);
+  const key = `${nn(venue)}|${nn(distance)}|${nn(timeText)}|${workType ?? ''}|${details ?? ''}`;
+  return `htw_${horseCode}_${dateIso}_${shortHash(key)}`;
 }
 
 export function injuryId(horseCode: string, dateIso: string, injuryType: string): string {
