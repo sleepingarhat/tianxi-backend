@@ -154,6 +154,15 @@ async function raceDayReportIsSettled(db: D1Database, value: any): Promise<boole
     return isFinite(at) && (Date.now() - at) > 6 * 3600 * 1000;
   }
 
+  // Caches written before the frozen-alpha accountability change carry no
+  // per-race scoreSource, so 預測與賽果 cannot label which model version was
+  // actually frozen. Treat those as stale once, so the next view self-heals.
+  function hitRateCacheNeedsSourceRecompute(cached: any): boolean {
+    const races = cached && Array.isArray(cached.races) ? cached.races : null;
+    if (!races || !races.length) return false;
+    return races.some((r: any) => r && r.scoreSource == null);
+  }
+
   export async function readHitRateCache(db: D1Database, date: string, engine: string): Promise<any | null> {
     try {
       const row = await db.prepare(
@@ -3071,7 +3080,7 @@ analyzeRoutes.get('/factors', (c) => {
                 }
               } else {
                 const cached = await readHitRateCache(c.env.DB, date, engine);
-                if (cached && !hitRateCacheNeedsBoxRecompute(cached)) {
+                if (cached && !hitRateCacheNeedsBoxRecompute(cached) && !hitRateCacheNeedsSourceRecompute(cached)) {
                   const payload = {
                     date,
                     venue: cached.meeting?.venue,
