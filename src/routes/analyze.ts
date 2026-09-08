@@ -886,7 +886,7 @@ async function loadFrozenPicksForHitRate(
   return { races };
 }
 
-export async function computeHitRateStats(db: D1Database, date: string, engine: EloEngine, alphaOverride?: number, opts?: { boxPayouts?: boolean; eloWeightsOverride?: EloWeights; drawModelOverride?: DrawModel }): Promise<
+export async function computeHitRateStats(db: D1Database, date: string, engine: EloEngine, alphaOverride?: number, opts?: { boxPayouts?: boolean; eloWeightsOverride?: EloWeights; drawModelOverride?: DrawModel; drawScaleOverride?: number }): Promise<
   | { error: string; status: number }
   | { meeting: any; races: any[]; summary: any }
 > {
@@ -933,11 +933,12 @@ export async function computeHitRateStats(db: D1Database, date: string, engine: 
   // log exists (e.g. meetings predating prediction_log).
   const eloWeightsOverride = opts?.eloWeightsOverride;
   const drawModelOverride = opts?.drawModelOverride;
-  let picksData: any = (alphaOverride == null && eloWeightsOverride == null && drawModelOverride == null)
+  const drawScaleOverride = opts?.drawScaleOverride;
+  let picksData: any = (alphaOverride == null && eloWeightsOverride == null && drawModelOverride == null && drawScaleOverride == null)
     ? await loadFrozenPicksForHitRate(db, date, engine, entries)
     : null;
   if (!picksData) {
-    picksData = await computePicksFromEntries(db, date, meeting, entries, engine, alphaOverride, eloWeightsOverride, drawModelOverride);
+    picksData = await computePicksFromEntries(db, date, meeting, entries, engine, alphaOverride, eloWeightsOverride, drawModelOverride, drawScaleOverride);
   }
   // ── 模型四揀複式 box-bet payouts (mirror tools/tg_notify build_extras) ──
   // Official dividends scraped LIVE from the HKJC results page (fetchHkjcBoxDivs)
@@ -2483,8 +2484,11 @@ analyzeRoutes.get('/factors', (c) => {
         alphaOverride?: number,
         eloWeightsOverride?: EloWeights,
         drawModelOverride?: DrawModel,
+        drawScaleOverride?: number,
       ): Promise<any> {
         const DRAW_MODEL: DrawModel = drawModelOverride ?? await getDrawModel(db);
+        const DRAW_SCALE: number = (typeof drawScaleOverride === 'number' && Number.isFinite(drawScaleOverride) && drawScaleOverride > 0)
+          ? Math.min(200, drawScaleOverride) : 1;
         const effectiveAlpha = (typeof alphaOverride === 'number' && Number.isFinite(alphaOverride) && alphaOverride >= 0 && alphaOverride <= 1)
           ? alphaOverride : await getEnsembleAlpha(db);
         const EW: EloWeights = normalizeEloWeights(eloWeightsOverride) ?? await getEloWeights(db);
@@ -2562,7 +2566,7 @@ analyzeRoutes.get('/factors', (c) => {
             const fJT = jtMap.get(`${jSnapshotId ?? ''}:${tSnapshotId ?? ''}`) ?? { bonus: 0, conf: 0, note: '騎練配對資料不全' };
             const factorBreakdown = { recency: { bonus: recency, conf: daysSince != null ? 1 : 0, note: daysSince != null ? `距上次 ${daysSince} 天` : '無上次紀錄' }, distance: fDist, going: fGoing, draw: fDraw, weight: fWeight, condition: fCond, injury: fInjury, jtCombo: fJT };
             // R5 ablation (88d): production keeps only draw + weight (see reports/decision-log.md).
-            const factorBonus = fDraw.bonus + fWeight.bonus;
+            const factorBonus = fDraw.bonus * DRAW_SCALE + fWeight.bonus;
             const base = eloComposite != null ? (eloComposite - 1500) / 200 : 0;
             const finalScore = eloComposite != null ? eloComposite + factorBonus : null;
             return { horseId, horseNumber: e.horse_number, nameCh: e.name_ch, nameEn: e.name_en, jockeyCh: e.jockey_name, trainerCh: e.trainer_name, draw: e.draw, declaredWeight: e.declared_weight, rating: e.rating, horseElo: hElo != null ? Math.round(hElo*10)/10 : null, jockeyElo: jElo != null ? Math.round(jElo*10)/10 : null, trainerElo: tElo != null ? Math.round(tElo*10)/10 : null, eloComposite: eloComposite != null ? Math.round(eloComposite*10)/10 : null, eloEngine: hRead?.engine ?? engine, horseConfidence: hRead?.confidence != null ? Math.round(hRead.confidence*100)/100 : null, horseFrozen: hRead?.isFrozen ?? false, horseRetired: hRead?.isRetired ?? false, factorBonus: Math.round(factorBonus*10)/10, factorBreakdown, finalScore: finalScore != null ? Math.round(finalScore*10)/10 : null, daysSinceLast: daysSince, _score: base + factorBonus / 100 };
@@ -3648,12 +3652,16 @@ analyzeRoutes.get('/factors', (c) => {
           const dates: string[] = ((datesQ.results as any[]) || []).map((m: any) => m.date as string);
           const wanted = (c.req.query('variants') || 'v1,v2').split(',').map((x) => x.trim()).filter((x) => x === 'v1' || x === 'v2') as DrawModel[];
           const variants: DrawModel[] = wanted.length ? [...new Set(wanted)] : ['v1', 'v2'];
+          const scales: number[] = [...new Set((c.req.query('scales') || '1').split(',')
+            .map((x) => parseFloat(x.trim())).filter((x) => Number.isFinite(x) && x > 0 && x <= 200))];
+          if (!scales.length) scales.push(1);
           const perVariant: Record<string, any> = {};
-          for (const dm of variants) {
+          for (const dm of variants) for (const sc of scales) {
+            const key = sc === 1 ? dm : dm + 'x' + sc;
             let races = 0, top1 = 0, top3Int = 0, top4Int = 0, top4Elig = 0, trio = 0, first4 = 0;
             for (const d of dates) {
               try {
-                const r = await computeHitRateStats(db, d, engine, alpha, { eloWeightsOverride: eloW, drawModelOverride: dm });
+                const r = await computeHitRateStats(db, d, engine, alpha, { eloWeightsOverride: eloW, drawModelOverride: dm, drawScaleOverride: sc });
                 if ('error' in r) continue;
                 const sm: any = r.summary;
                 if (!sm.racesEvaluated) continue;
@@ -3666,8 +3674,8 @@ analyzeRoutes.get('/factors', (c) => {
                 first4 += sm.first4Hits || 0;
               } catch { /* skip */ }
             }
-            perVariant[dm] = {
-              drawModel: dm, races,
+            perVariant[key] = {
+              drawModel: dm, drawScale: sc, races,
               top4SumIntersect: top4Int, top4Eligible: top4Elig, top3SumIntersect: top3Int, top1Hits: top1,
               top4AvgIntersect: top4Elig ? Math.round(top4Int / top4Elig * 1000) / 1000 : null,
               top3AvgIntersect: races ? Math.round(top3Int / races * 1000) / 1000 : null,
@@ -3696,7 +3704,7 @@ analyzeRoutes.get('/factors', (c) => {
           return c.json({
             from: rangeFrom, to: rangeTo, meetingsEvaluated: dates.length,
             ensembleAlpha: alpha, eloWeights: eloW,
-            variants, perVariant, winner,
+            variants, scales, perVariant, winner,
             currentDrawModel: await getDrawModel(db), applied, applyDenied,
             generatedAt: new Date().toISOString(),
           });
