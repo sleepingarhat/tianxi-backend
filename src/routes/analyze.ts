@@ -848,6 +848,15 @@ async function loadFrozenPicksForHitRate(
       }));
     const lgbHits = picks.filter((p: any) => p.scoreSource === 'lgb' || p.lgbScore != null).length;
     const anyLgb = lgbHits > 0;
+    // Accountability: the frozen rows carry the ensemble alpha actually used at
+    // bet time inside score_source (e.g. "tx-oracle-v3 (ensemble α=0.88)").
+    // Surface it so 預測與賽果 can label the archived version per race instead of
+    // implying the current production alpha was used historically.
+    let frozenAlpha: number | null = null;
+    for (const p of picks) {
+      const mm = /\u03b1\s*=\s*([0-9.]+)/.exec(String((p as any).scoreSource ?? ''));
+      if (mm) { const v = Number(mm[1]); if (Number.isFinite(v)) { frozenAlpha = v; break; } }
+    }
     const meta = metaByRace.get(rn) ?? { distance: null, going: null };
     return {
       raceNumber: rn,
@@ -857,7 +866,10 @@ async function loadFrozenPicksForHitRate(
       picks,
       // Race-level scoreSource kept compatible with summary aggregation
       // (includes('tx-oracle') → ensemble; startsWith('elo') → elo-only).
-      scoreSource: anyLgb ? `tx-oracle-v3 (frozen, lgb=${lgbHits})` : 'elo (frozen)',
+      scoreSource: anyLgb
+        ? `tx-oracle-v3 (frozen, lgb=${lgbHits}${frozenAlpha != null ? `, \u03b1=${frozenAlpha.toFixed(2)}` : ''})`
+        : 'elo (frozen)',
+      ensembleAlpha: frozenAlpha,
       lgbModelVersion: picks.find((p: any) => p.lgbModelVersion)?.lgbModelVersion ?? null,
       lgbCoverage: { hits: lgbHits, total: picks.length, applied: anyLgb },
     };
@@ -1058,6 +1070,7 @@ export async function computeHitRateStats(db: D1Database, date: string, engine: 
           scoreSource: p.scoreSource ?? null,
         })),
         scoreSource: (race as any).scoreSource ?? null,
+        ensembleAlpha: (race as any).ensembleAlpha ?? null,
         lgbModelVersion: (race as any).lgbModelVersion ?? null,
         lgbCoverage: (race as any).lgbCoverage ?? null,
         // New: top-4 picks (rank 1-4) with per-pick reason text + hit flag
