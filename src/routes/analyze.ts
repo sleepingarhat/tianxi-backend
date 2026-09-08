@@ -886,7 +886,7 @@ async function loadFrozenPicksForHitRate(
   return { races };
 }
 
-export async function computeHitRateStats(db: D1Database, date: string, engine: EloEngine, alphaOverride?: number, opts?: { boxPayouts?: boolean; eloWeightsOverride?: EloWeights }): Promise<
+export async function computeHitRateStats(db: D1Database, date: string, engine: EloEngine, alphaOverride?: number, opts?: { boxPayouts?: boolean; eloWeightsOverride?: EloWeights; drawModelOverride?: DrawModel }): Promise<
   | { error: string; status: number }
   | { meeting: any; races: any[]; summary: any }
 > {
@@ -896,7 +896,7 @@ export async function computeHitRateStats(db: D1Database, date: string, engine: 
     `SELECT r.race_number, rr.horse_number, rr.horse_id, rr.draw, rr.actual_weight,
             rr.actual_weight AS declared_weight, rr.jockey_id, rr.trainer_id,
             r.distance, r.going, r.class AS race_class,
-            NULL AS track, NULL AS course,
+            r.track, r.course,
             h.name_ch, h.name_en,
             j.name_ch AS jockey_name, t.name_ch AS trainer_name
      FROM race_results rr
@@ -932,11 +932,12 @@ export async function computeHitRateStats(db: D1Database, date: string, engine: 
   // backtest (alphaOverride != null) and as a fallback when no complete frozen
   // log exists (e.g. meetings predating prediction_log).
   const eloWeightsOverride = opts?.eloWeightsOverride;
-  let picksData: any = (alphaOverride == null && eloWeightsOverride == null)
+  const drawModelOverride = opts?.drawModelOverride;
+  let picksData: any = (alphaOverride == null && eloWeightsOverride == null && drawModelOverride == null)
     ? await loadFrozenPicksForHitRate(db, date, engine, entries)
     : null;
   if (!picksData) {
-    picksData = await computePicksFromEntries(db, date, meeting, entries, engine, alphaOverride, eloWeightsOverride);
+    picksData = await computePicksFromEntries(db, date, meeting, entries, engine, alphaOverride, eloWeightsOverride, drawModelOverride);
   }
   // ── 模型四揀複式 box-bet payouts (mirror tools/tg_notify build_extras) ──
   // Official dividends scraped LIVE from the HKJC results page (fetchHkjcBoxDivs)
@@ -1292,6 +1293,25 @@ export async function getEloWeights(db: D1Database): Promise<EloWeights> {
     }
   } catch { /* ignore */ }
   return { ...ELO_WEIGHTS };
+}
+
+// 檔位效應模型版本：v1 = 場地+路程固定 0.25 基準；v2 = 場地+賽道(rail)+路程分層 + 場數期望 + 收縮。
+export type DrawModel = 'v1' | 'v2';
+export async function getDrawModel(db: D1Database): Promise<DrawModel> {
+  try {
+    const row = await db.prepare(`SELECT value FROM app_settings WHERE key = 'draw_model'`).first<{ value: string }>().catch(() => null);
+    if (row?.value === 'v2') return 'v2';
+  } catch { /* ignore */ }
+  return 'v1';
+}
+
+// 由 races.course（例：草地 - "C+3" 賽道 / 全天候跑道）取出跑道鍵。
+export function railKey(course: string | null | undefined): string {
+  const c = String(course || '').trim();
+  if (!c) return 'NA';
+  if (c.includes('全天候')) return 'AWT';
+  const m = c.match(/"([^"]+)"/) || c.match(/[""]([^""]+)[""]/);
+  return m ? m[1]!.toUpperCase() : 'NA';
 }
 
 // ELO engine version selector (v1.2 = time-weighted multi-axis, user-endorsed 2026-04-28).
@@ -2170,6 +2190,72 @@ analyzeRoutes.get('/factors', (c) => {
     return map;
   }
 
+  // 檔位效應 v2：場地 × 賽道(rail) × 路程分層；期望上位率用每場實際馬匹數（3/場數）而非固定 0.25；
+  // 樣本細時以經驗貝葉斯向「同場地同路程」再向中性 1.0 收縮，避免細格雜訊。
+  async function batchDrawBiasV2(db: D1Database, entries: any[], venue: string, asOf: string): Promise<Map<string, FactorResult>> {
+    const map = new Map<string, FactorResult>();
+    const buckets = [...new Set(entries.map(e => distBucket(e.distance)).filter(Boolean) as number[])];
+    const K_BASE = 15, K_RAIL = 12, SCALE = 25;
+    for (const bucket of buckets) {
+      try {
+        const { results } = await db.prepare(
+          `WITH f AS (
+             SELECT rr.race_id AS rid, COUNT(*) AS n FROM race_results rr
+             WHERE rr.finishing_position > 0 AND rr.finishing_position < 99 GROUP BY rr.race_id
+           )
+           SELECT rr.draw AS draw, r.course AS course,
+                  COUNT(*) AS starts,
+                  SUM(CASE WHEN rr.finishing_position BETWEEN 1 AND 3 THEN 1 ELSE 0 END) AS top3,
+                  SUM(3.0 / f.n) AS exp3
+           FROM race_results rr
+           JOIN races r ON r.id = rr.race_id
+           JOIN race_meetings rm ON rm.id = r.meeting_id
+           JOIN f ON f.rid = rr.race_id
+           WHERE rm.venue = ? AND rm.date < ? AND r.distance BETWEEN ? AND ?
+             AND rr.draw IS NOT NULL AND rr.draw > 0
+             AND rr.finishing_position > 0 AND rr.finishing_position < 99
+           GROUP BY rr.draw, r.course`
+        ).bind(venue, asOf, bucket - 100, bucket + 100).all<any>();
+        const base = new Map<number, { starts: number; top3: number; exp3: number }>();
+        const rail = new Map<string, { starts: number; top3: number; exp3: number; draw: number; rk: string }>();
+        for (const row of (results ?? [])) {
+          const d = Number(row.draw); if (!Number.isFinite(d) || d <= 0) continue;
+          const st = Number(row.starts) || 0, t3 = Number(row.top3) || 0, e3 = Number(row.exp3) || 0;
+          const b = base.get(d) ?? { starts: 0, top3: 0, exp3: 0 };
+          b.starts += st; b.top3 += t3; b.exp3 += e3; base.set(d, b);
+          const rk = railKey(row.course);
+          const key = `${d}|${rk}`;
+          const r = rail.get(key) ?? { starts: 0, top3: 0, exp3: 0, draw: d, rk };
+          r.starts += st; r.top3 += t3; r.exp3 += e3; rail.set(key, r);
+        }
+        const baseLift = new Map<number, number>();
+        for (const [d, b] of base) {
+          if (b.starts < 20 || !(b.exp3 > 0)) continue;
+          baseLift.set(d, (b.top3 + K_BASE) / (b.exp3 + K_BASE));
+        }
+        for (const [d, lift] of baseLift) {
+          const b = base.get(d)!;
+          map.set(`${d}:${venue}:${bucket}`, {
+            bonus: Math.max(-10, Math.min(10, (lift - 1) * SCALE)),
+            conf: Math.min(1, b.starts / 80),
+            note: `檔${d} ${venue}/${bucket}m 上位指數 ${lift.toFixed(2)}（${b.starts} 戰）`,
+          });
+        }
+        for (const r of rail.values()) {
+          if (r.starts < 12 || !(r.exp3 > 0)) continue;
+          const prior = baseLift.get(r.draw) ?? 1;
+          const lift = (r.top3 + K_RAIL * prior) / (r.exp3 + K_RAIL);
+          map.set(`${r.draw}:${venue}:${bucket}:${r.rk}`, {
+            bonus: Math.max(-10, Math.min(10, (lift - 1) * SCALE)),
+            conf: Math.min(1, r.starts / 60),
+            note: `檔${r.draw} ${venue}/${bucket}m/${r.rk} 賽道上位指數 ${lift.toFixed(2)}（${r.starts} 戰）`,
+          });
+        }
+      } catch { /* skip */ }
+    }
+    return map;
+  }
+
   async function batchConditionFit(db: D1Database, horseIds: string[], asOf: string): Promise<Map<string, FactorResult>> {
     const map = new Map<string, FactorResult>();
     if (!horseIds.length) return map;
@@ -2396,7 +2482,9 @@ analyzeRoutes.get('/factors', (c) => {
         engine: EloEngine,
         alphaOverride?: number,
         eloWeightsOverride?: EloWeights,
+        drawModelOverride?: DrawModel,
       ): Promise<any> {
+        const DRAW_MODEL: DrawModel = drawModelOverride ?? await getDrawModel(db);
         const effectiveAlpha = (typeof alphaOverride === 'number' && Number.isFinite(alphaOverride) && alphaOverride >= 0 && alphaOverride <= 1)
           ? alphaOverride : await getEnsembleAlpha(db);
         const EW: EloWeights = normalizeEloWeights(eloWeightsOverride) ?? await getEloWeights(db);
@@ -2416,7 +2504,7 @@ analyzeRoutes.get('/factors', (c) => {
           batchLastRaceDate(db, allHorseIds, targetDate),
           batchDistanceFit(db, allHorseIds, targetDate),
           batchGoingFit(db, allHorseIds, targetDate),
-          batchDrawBias(db, entries, meeting.venue, targetDate),
+          (DRAW_MODEL === 'v2' ? batchDrawBiasV2 : batchDrawBias)(db, entries, meeting.venue, targetDate),
           batchConditionFit(db, allHorseIds, targetDate),
           batchInjuryFlag(db, allHorseIds, targetDate),
           batchWeightDelta(db, allHorseIds, entries, targetDate),
@@ -2466,7 +2554,8 @@ analyzeRoutes.get('/factors', (c) => {
             const recency = recencyBonus(daysSince);
             const fDist = distMap.get(`${horseId}:${distBucket(raceDistance)}`) ?? { bonus: 0, conf: 0, note: '無距離往績' };
             const fGoing = goingMap.get(`${horseId}:${raceGoing ?? ''}`) ?? { bonus: 0, conf: 0, note: '無場地往績' };
-            const fDraw = drawMap.get(`${e.draw}:${meeting.venue}:${distBucket(raceDistance)}`) ?? { bonus: 0, conf: 0, note: '檔位資料不全' };
+            const _dKey = `${e.draw}:${meeting.venue}:${distBucket(raceDistance)}`;
+            const fDraw = drawMap.get(`${_dKey}:${railKey(raceCourse)}`) ?? drawMap.get(_dKey) ?? { bonus: 0, conf: 0, note: '檔位資料不全' };
             const fWeight = wtMap.get(horseId) ?? { bonus: 0, conf: 0, note: '無體重往績' };
             const fCond = condMap.get(horseId) ?? { bonus: 0, conf: 0, note: '無晨操記錄' };
             const fInjury = injMap.get(horseId) ?? { bonus: 0, conf: 0, note: '無傷病記錄' };
@@ -2599,7 +2688,7 @@ analyzeRoutes.get('/factors', (c) => {
           batchLastRaceDate(db, allHorseIds, targetDate),
           batchDistanceFit(db, allHorseIds, targetDate),
           batchGoingFit(db, allHorseIds, targetDate),
-          batchDrawBias(db, entries, meeting.venue, targetDate),
+          (await getDrawModel(db)) === 'v2' ? batchDrawBiasV2(db, entries, meeting.venue, targetDate) : batchDrawBias(db, entries, meeting.venue, targetDate),
           batchConditionFit(db, allHorseIds, targetDate),
           batchInjuryFlag(db, allHorseIds, targetDate),
           batchWeightDelta(db, allHorseIds, entries, targetDate),
@@ -2672,7 +2761,8 @@ analyzeRoutes.get('/factors', (c) => {
             const recency = recencyBonus(daysSince);
             const fDist = distMap.get(`${horseId}:${distBucket(raceDistance)}`) ?? { bonus: 0, conf: 0, note: '無距離往績' };
             const fGoing = goingMap.get(`${horseId}:${raceGoing ?? ''}`) ?? { bonus: 0, conf: 0, note: '無場地往績' };
-            const fDraw = drawMap.get(`${e.draw}:${meeting.venue}:${distBucket(raceDistance)}`) ?? { bonus: 0, conf: 0, note: '檔位資料不全' };
+            const _dKey = `${e.draw}:${meeting.venue}:${distBucket(raceDistance)}`;
+            const fDraw = drawMap.get(`${_dKey}:${railKey(raceCourse)}`) ?? drawMap.get(_dKey) ?? { bonus: 0, conf: 0, note: '檔位資料不全' };
             const fWeight = wtMap.get(horseId) ?? { bonus: 0, conf: 0, note: '無體重往績' };
             const fCond = condMap.get(horseId) ?? { bonus: 0, conf: 0, note: '無晨操記錄' };
             const fInjury = injMap.get(horseId) ?? { bonus: 0, conf: 0, note: '無傷病記錄' };
@@ -3531,6 +3621,90 @@ analyzeRoutes.get('/factors', (c) => {
       // ELO 三軸權重 grid search（馬／騎師／練馬師）。α 固定用現行生產值，
       // 逐個權重組合重算過去 N 日賽事，主指標＝四揀平均命中匹數。
       // ?apply=1 將最佳組合寫入 app_settings(key='elo_weights')。
+      // GET /api/analyze/draw-tune?from=&to=&days=&apply=1
+      // 檔位效應 A/B：v1（現行：場地+路程，固定 0.25 基準）vs v2（加賽道分層 + 場數期望 + 收縮）。
+      analyzeRoutes.get('/draw-tune', async (c) => {
+        try {
+          if (!(await hasAdminAccess(c, ADMIN_AUTH_POLICY.SESSION_OR_BEARER))) return privateRouteUnavailable(c);
+          const db = c.env.DB;
+          const days = Math.max(7, Math.min(365, parseInt(c.req.query('days') || '90', 10) || 90));
+          const apply = c.req.query('apply') === '1';
+          const engine: EloEngine = c.req.query('engine') === 'v11' ? 'v11' : 'v12';
+          const alpha = await getEnsembleAlpha(db);
+          const eloW = await getEloWeights(db);
+          const today = new Date().toISOString().substring(0, 10);
+          const cutoff = new Date(Date.now() - days * 86400000).toISOString().substring(0, 10);
+          const dre = /^\d{4}-\d{2}-\d{2}$/;
+          const qFrom = (c.req.query('from') || '').substring(0, 10);
+          const qTo = (c.req.query('to') || '').substring(0, 10);
+          const rangeFrom = dre.test(qFrom) ? qFrom : cutoff;
+          const rangeTo = dre.test(qTo) ? qTo : today;
+          const datesQ = await db.prepare(
+            "SELECT DISTINCT rm.date AS date FROM race_meetings rm " +
+            "JOIN races r ON r.meeting_id = rm.id JOIN race_results rr ON rr.race_id = r.id " +
+            "WHERE rm.date >= ? AND rm.date < ? AND rm.venue IN ('ST','HV') AND rr.finishing_position IS NOT NULL " +
+            "ORDER BY rm.date DESC"
+          ).bind(rangeFrom, rangeTo).all<any>().catch(() => ({ results: [] as any[] }));
+          const dates: string[] = ((datesQ.results as any[]) || []).map((m: any) => m.date as string);
+          const wanted = (c.req.query('variants') || 'v1,v2').split(',').map((x) => x.trim()).filter((x) => x === 'v1' || x === 'v2') as DrawModel[];
+          const variants: DrawModel[] = wanted.length ? [...new Set(wanted)] : ['v1', 'v2'];
+          const perVariant: Record<string, any> = {};
+          for (const dm of variants) {
+            let races = 0, top1 = 0, top3Int = 0, top4Int = 0, top4Elig = 0, trio = 0, first4 = 0;
+            for (const d of dates) {
+              try {
+                const r = await computeHitRateStats(db, d, engine, alpha, { eloWeightsOverride: eloW, drawModelOverride: dm });
+                if ('error' in r) continue;
+                const sm: any = r.summary;
+                if (!sm.racesEvaluated) continue;
+                races += sm.racesEvaluated;
+                top1 += sm.top1Hits || 0;
+                top3Int += sm.top3SumIntersect || 0;
+                top4Int += sm.top4SumIntersect || 0;
+                top4Elig += sm.top4Eligible || 0;
+                trio += sm.trioHits || 0;
+                first4 += sm.first4Hits || 0;
+              } catch { /* skip */ }
+            }
+            perVariant[dm] = {
+              drawModel: dm, races,
+              top4SumIntersect: top4Int, top4Eligible: top4Elig, top3SumIntersect: top3Int, top1Hits: top1,
+              top4AvgIntersect: top4Elig ? Math.round(top4Int / top4Elig * 1000) / 1000 : null,
+              top3AvgIntersect: races ? Math.round(top3Int / races * 1000) / 1000 : null,
+              top1HitRate: races ? Math.round(top1 / races * 1000) / 10 : null,
+              trioHits: trio, first4Hits: first4,
+            };
+          }
+          let winner: string | null = null; let best = -1;
+          for (const k of Object.keys(perVariant)) {
+            const r = perVariant[k];
+            const score = (r.top4AvgIntersect ?? 0) * 1000 + (r.top3AvgIntersect ?? 0) * 10 + (r.top1HitRate ?? 0) / 1000;
+            if (score > best) { best = score; winner = k; }
+          }
+          let applied = false, applyDenied = false;
+          if (apply && winner) {
+            const ok = await hasAdminAccess(c, ADMIN_AUTH_POLICY.BEARER_ONLY);
+            if (!ok) applyDenied = true;
+            else {
+              await db.prepare(
+                `INSERT INTO app_settings (key, value, updated_at) VALUES ('draw_model', ?, datetime('now'))
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
+              ).bind(winner).run().catch(() => {});
+              applied = true;
+            }
+          }
+          return c.json({
+            from: rangeFrom, to: rangeTo, meetingsEvaluated: dates.length,
+            ensembleAlpha: alpha, eloWeights: eloW,
+            variants, perVariant, winner,
+            currentDrawModel: await getDrawModel(db), applied, applyDenied,
+            generatedAt: new Date().toISOString(),
+          });
+        } catch {
+          return c.json({ error: 'draw-tune failed' }, 500);
+        }
+      });
+
       analyzeRoutes.get('/elo-tune', async (c) => {
         try {
           if (!(await hasAdminAccess(c, ADMIN_AUTH_POLICY.SESSION_OR_BEARER))) return privateRouteUnavailable(c);
