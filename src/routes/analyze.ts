@@ -3334,7 +3334,7 @@ analyzeRoutes.get('/factors', (c) => {
             }
             const rRate = (n: number, d: number) => d ? Math.round(n / d * 1000) / 10 : null;
             const payload: any = {
-              windowDays: days, from: rangeFrom, to: rangeTo,
+              windowDays: days, from: cutoff, to: today,
               meetingsFound: meetingDates.length,
               meetingsEvaluated: perMeeting.length,
               racesEvaluated: totalRaces,
@@ -3452,11 +3452,6 @@ analyzeRoutes.get('/factors', (c) => {
           const engine: EloEngine = c.req.query('engine') === 'v11' ? 'v11' : 'v12';
           const today = new Date().toISOString().substring(0, 10);
           const cutoff = new Date(Date.now() - days * 86400000).toISOString().substring(0, 10);
-          const dre = /^\d{4}-\d{2}-\d{2}$/;
-          const qFrom = (c.req.query('from') || '').substring(0, 10);
-          const qTo = (c.req.query('to') || '').substring(0, 10);
-          const rangeFrom = dre.test(qFrom) ? qFrom : cutoff;
-          const rangeTo = dre.test(qTo) ? qTo : today;
           const datesQ = await db.prepare(
             "SELECT DISTINCT rm.date AS date FROM race_meetings rm " +
             "JOIN races r ON r.meeting_id = rm.id JOIN race_results rr ON rr.race_id = r.id " +
@@ -3546,6 +3541,11 @@ analyzeRoutes.get('/factors', (c) => {
           const alpha = await getEnsembleAlpha(db);
           const today = new Date().toISOString().substring(0, 10);
           const cutoff = new Date(Date.now() - days * 86400000).toISOString().substring(0, 10);
+          const dre = /^\d{4}-\d{2}-\d{2}$/;
+          const qFrom = (c.req.query('from') || '').substring(0, 10);
+          const qTo = (c.req.query('to') || '').substring(0, 10);
+          const rangeFrom = dre.test(qFrom) ? qFrom : cutoff;
+          const rangeTo = dre.test(qTo) ? qTo : today;
           const datesQ = await db.prepare(
             "SELECT DISTINCT rm.date AS date FROM race_meetings rm " +
             "JOIN races r ON r.meeting_id = rm.id JOIN race_results rr ON rr.race_id = r.id " +
@@ -3634,7 +3634,7 @@ analyzeRoutes.get('/factors', (c) => {
           }
           const currentWeights = await getEloWeights(db);
           return c.json({
-            windowDays: days, from: cutoff, to: today,
+            windowDays: days, from: rangeFrom, to: rangeTo,
             meetingsEvaluated: dates.length,
             ensembleAlpha: alpha,
             combos: combos.map(key), perCombo,
