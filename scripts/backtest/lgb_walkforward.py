@@ -67,6 +67,14 @@ FEATURE_COLS = [
       # but NO robust hit-rate lift → NOT promoted to predict_upcoming.py. Columns
       # still emitted by dump-features.ts (leak-safe, free) — re-add the two names
       # here to re-test. (4th pure-feature non-win after ①試閘 / ③場內相對 / ⑤gear.)
+      # Stage 14 (NEW 2026-09-07 ⑧ layoff/comeback): the 2026-09-06 season opener
+      # had 109/120 runners first-up >55d (mean 72d) and top4-intersect fell to
+      # 1.5 (vs 2.33 on 2026-07-15). days_since_last alone gave the model no way
+      # to learn per-horse comeback ability or whole-field first-up discounting.
+      # Candidate stage: validate with a walk-forward A/B (--exclude the eight
+      # names below as the control) BEFORE promoting to predict_upcoming.py.
+      "layoff_band", "is_layoff55", "cb_starts", "cb_top3", "season_starts",
+      "is_season_debut", "field_layoff_frac", "layoff_x_form",
       "is_sprint", "is_middle", "is_distance",
       "draw_x_sprint", "paceclash_x_distance",
       # Stage 10 (NEW v3.2 ④ pedigree): leak-safe target-encoded breeding signal.
