@@ -886,7 +886,7 @@ async function loadFrozenPicksForHitRate(
   return { races };
 }
 
-export async function computeHitRateStats(db: D1Database, date: string, engine: EloEngine, alphaOverride?: number, opts?: { boxPayouts?: boolean }): Promise<
+export async function computeHitRateStats(db: D1Database, date: string, engine: EloEngine, alphaOverride?: number, opts?: { boxPayouts?: boolean; eloWeightsOverride?: EloWeights }): Promise<
   | { error: string; status: number }
   | { meeting: any; races: any[]; summary: any }
 > {
@@ -931,11 +931,12 @@ export async function computeHitRateStats(db: D1Database, date: string, engine: 
   // lookup race_id can shift. Recompute is kept ONLY for the α grid-search
   // backtest (alphaOverride != null) and as a fallback when no complete frozen
   // log exists (e.g. meetings predating prediction_log).
-  let picksData: any = (alphaOverride == null)
+  const eloWeightsOverride = opts?.eloWeightsOverride;
+  let picksData: any = (alphaOverride == null && eloWeightsOverride == null)
     ? await loadFrozenPicksForHitRate(db, date, engine, entries)
     : null;
   if (!picksData) {
-    picksData = await computePicksFromEntries(db, date, meeting, entries, engine, alphaOverride);
+    picksData = await computePicksFromEntries(db, date, meeting, entries, engine, alphaOverride, eloWeightsOverride);
   }
   // ── 模型四揀複式 box-bet payouts (mirror tools/tg_notify build_extras) ──
   // Official dividends scraped LIVE from the HKJC results page (fetchHkjcBoxDivs)
@@ -1261,6 +1262,37 @@ analyzeRoutes.post('/', async (c) => {
 
 // Weight split confirmed by user 2026-04-28.
 const ELO_WEIGHTS = { horse: 0.7, jockey: 0.2, trainer: 0.1 } as const;
+
+// ── ELO 三軸權重（可調）─────────────────────────────────────────────
+// 生產值存 app_settings(key='elo_weights') JSON，未設定時回落上面預設。
+// 由 /api/analyze/elo-tune grid search 回測後 ?apply=1 寫入。
+export type EloWeights = { horse: number; jockey: number; trainer: number };
+function normalizeEloWeights(w: any): EloWeights | null {
+  const h = Number(w?.horse), j = Number(w?.jockey), t = Number(w?.trainer);
+  if (![h, j, t].every((v) => Number.isFinite(v) && v >= 0)) return null;
+  const sum = h + j + t;
+  if (!(sum > 0)) return null;
+  return { horse: h / sum, jockey: j / sum, trainer: t / sum };
+}
+export async function getEloWeights(db: D1Database): Promise<EloWeights> {
+  try {
+    await db.prepare(
+      `CREATE TABLE IF NOT EXISTS app_settings (
+         key TEXT PRIMARY KEY,
+         value TEXT NOT NULL,
+         updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+       )`
+    ).run().catch(() => {});
+    const row = await db.prepare(
+      `SELECT value FROM app_settings WHERE key = 'elo_weights'`
+    ).first<{ value: string }>().catch(() => null);
+    if (row?.value) {
+      const parsed = normalizeEloWeights(JSON.parse(row.value));
+      if (parsed) return parsed;
+    }
+  } catch { /* ignore */ }
+  return { ...ELO_WEIGHTS };
+}
 
 // ELO engine version selector (v1.2 = time-weighted multi-axis, user-endorsed 2026-04-28).
 // Rows in snapshot tables co-exist; v1.2 rows have id prefix 'v12:', v1.1 rows don't.
@@ -2363,9 +2395,11 @@ analyzeRoutes.get('/factors', (c) => {
         entries: any[],
         engine: EloEngine,
         alphaOverride?: number,
+        eloWeightsOverride?: EloWeights,
       ): Promise<any> {
         const effectiveAlpha = (typeof alphaOverride === 'number' && Number.isFinite(alphaOverride) && alphaOverride >= 0 && alphaOverride <= 1)
           ? alphaOverride : await getEnsembleAlpha(db);
+        const EW: EloWeights = normalizeEloWeights(eloWeightsOverride) ?? await getEloWeights(db);
         const prefixId = (raw: string | null | undefined, kind: 'horse' | 'jockey' | 'trainer'): string | null => {
           if (!raw) return null;
           const p = kind + '_';
@@ -2422,10 +2456,10 @@ analyzeRoutes.get('/factors', (c) => {
             const tRead = tSnapshotId ? (trainerEloMap.get(tSnapshotId) ?? null) : null;
             const hElo = hRead?.rating ?? null; const jElo = jRead?.rating ?? null; const tElo = tRead?.rating ?? null;
             const parts: number[] = [];
-            if (hElo != null) parts.push(hElo * ELO_WEIGHTS.horse);
-            if (jElo != null) parts.push(jElo * ELO_WEIGHTS.jockey);
-            if (tElo != null) parts.push(tElo * ELO_WEIGHTS.trainer);
-            const wSum = (hElo != null ? ELO_WEIGHTS.horse : 0) + (jElo != null ? ELO_WEIGHTS.jockey : 0) + (tElo != null ? ELO_WEIGHTS.trainer : 0);
+            if (hElo != null) parts.push(hElo * EW.horse);
+            if (jElo != null) parts.push(jElo * EW.jockey);
+            if (tElo != null) parts.push(tElo * EW.trainer);
+            const wSum = (hElo != null ? EW.horse : 0) + (jElo != null ? EW.jockey : 0) + (tElo != null ? EW.trainer : 0);
             const eloComposite = wSum > 0 ? parts.reduce((a, b) => a + b, 0) / wSum : null;
             const lastDate = recencyMap.get(horseId) ?? null;
             const daysSince = lastDate ? Math.round((new Date(targetDate).getTime() - new Date(lastDate).getTime()) / 86400000) : null;
@@ -2459,7 +2493,7 @@ analyzeRoutes.get('/factors', (c) => {
         });
         attachRaceQuality(racePredictions);
         const eloReady = racePredictions.some((r) => r.picks?.some((p: any) => p.eloComposite != null));
-        return { date: targetDate, venue: meeting.venue, trackCondition: meeting.track_condition, eloEngine: engine, eloWeights: ELO_WEIGHTS, eloReady, races: racePredictions, lgbModelVersion: helperLgbModelVersion, lgbCoverage: { rows: lgbScoreByRaceHorse.size }, generatedAt: new Date().toISOString() };
+        return { date: targetDate, venue: meeting.venue, trackCondition: meeting.track_condition, eloEngine: engine, eloWeights: EW, eloReady, races: racePredictions, lgbModelVersion: helperLgbModelVersion, lgbCoverage: { rows: lgbScoreByRaceHorse.size }, generatedAt: new Date().toISOString() };
       }
 
       // GET /api/analyze/today-picks — 即日排位全因子預測 (batch-query version; ~20 D1 queries)
@@ -2588,6 +2622,7 @@ analyzeRoutes.get('/factors', (c) => {
         const { map: lgbScoreByRaceHorse, modelVersion: todayPicksLgbModelVersion } =
           await loadLgbScoresForMeeting(db, raceNumbers, racesDBMap, targetDate, meeting.venue);
         const todayPicksAlpha = await getEnsembleAlpha(db);
+        const EW: EloWeights = await getEloWeights(db);
         const liveWinOddsByRace = await fetchLatestWinOddsByRace(db, targetDate, meeting.venue).catch(() => new Map<number, { odds: Map<string, number>; snapshotAt: string }>());
 
         const racePredictions = raceNumbers.map(raceNum => {
@@ -2625,12 +2660,12 @@ analyzeRoutes.get('/factors', (c) => {
             // Phase A: down-weight horse ELO when low-confidence (seed) so jockey+trainer carry more.
             // snapshot w/o explicit conf → 1.0; rating-seed → 0.4; class-seed → 0.2.
             const horseConfFactor = eloSource === 'snapshot' ? (hRead?.confidence ?? 1) : (seedConfidence ?? 0);
-            const effHorseW = ELO_WEIGHTS.horse * horseConfFactor;
+            const effHorseW = EW.horse * horseConfFactor;
             const parts: number[] = [];
             if (hElo != null) parts.push(hElo * effHorseW);
-            if (jElo != null) parts.push(jElo * ELO_WEIGHTS.jockey);
-            if (tElo != null) parts.push(tElo * ELO_WEIGHTS.trainer);
-            const wSum = (hElo != null ? effHorseW : 0) + (jElo != null ? ELO_WEIGHTS.jockey : 0) + (tElo != null ? ELO_WEIGHTS.trainer : 0);
+            if (jElo != null) parts.push(jElo * EW.jockey);
+            if (tElo != null) parts.push(tElo * EW.trainer);
+            const wSum = (hElo != null ? effHorseW : 0) + (jElo != null ? EW.jockey : 0) + (tElo != null ? EW.trainer : 0);
             const eloComposite = wSum > 0 ? parts.reduce((a, b) => a + b, 0) / wSum : null;
             const lastDate = recencyMap.get(horseId) ?? null;
             const daysSince = lastDate ? Math.round((new Date(targetDate!).getTime() - new Date(lastDate).getTime()) / 86400000) : null;
@@ -2668,7 +2703,7 @@ analyzeRoutes.get('/factors', (c) => {
         const computeMs = Date.now() - t0;
         const payload: Record<string, unknown> = {
           date: targetDate, venue: meeting.venue, trackCondition: meeting.track_condition,
-          eloEngine: engine, eloWeights: ELO_WEIGHTS, eloReady, races: racePredictions,
+          eloEngine: engine, eloWeights: EW, eloReady, races: racePredictions,
           seedSummary: { ratingSeeded: seedRatingCount, classSeeded: seedClassCount, totalSeeded: seedRatingCount + seedClassCount },
           lgbModelVersion: todayPicksLgbModelVersion,
           lgbCoverage: { rows: lgbScoreByRaceHorse.size },
@@ -3489,6 +3524,116 @@ analyzeRoutes.get('/factors', (c) => {
           });
         } catch {
           return c.json({ error: 'ensemble-tune failed' }, 500);
+        }
+      });
+
+      // GET /api/analyze/elo-tune?days=90&apply=0
+      // ELO 三軸權重 grid search（馬／騎師／練馬師）。α 固定用現行生產值，
+      // 逐個權重組合重算過去 N 日賽事，主指標＝四揀平均命中匹數。
+      // ?apply=1 將最佳組合寫入 app_settings(key='elo_weights')。
+      analyzeRoutes.get('/elo-tune', async (c) => {
+        try {
+          if (!(await hasAdminAccess(c, ADMIN_AUTH_POLICY.SESSION_OR_BEARER))) return privateRouteUnavailable(c);
+          const db = c.env.DB;
+          const days = Math.max(7, Math.min(365, parseInt(c.req.query('days') || '90', 10) || 90));
+          const apply = c.req.query('apply') === '1';
+          const engine: EloEngine = c.req.query('engine') === 'v11' ? 'v11' : 'v12';
+          const alpha = await getEnsembleAlpha(db);
+          const today = new Date().toISOString().substring(0, 10);
+          const cutoff = new Date(Date.now() - days * 86400000).toISOString().substring(0, 10);
+          const datesQ = await db.prepare(
+            "SELECT DISTINCT rm.date AS date FROM race_meetings rm " +
+            "JOIN races r ON r.meeting_id = rm.id JOIN race_results rr ON rr.race_id = r.id " +
+            "WHERE rm.date >= ? AND rm.date < ? AND rm.venue IN ('ST','HV') AND rr.finishing_position IS NOT NULL " +
+            "ORDER BY rm.date DESC"
+          ).bind(cutoff, today).all<any>().catch(() => ({ results: [] as any[] }));
+          const dates: string[] = ((datesQ.results as any[]) || []).map((m: any) => m.date as string);
+
+          // 可選 ?grid=0.7-0.2-0.1,0.6-0.3-0.1 自訂；預設掃描馬 0.50–0.85。
+          const parseGrid = (raw: string | undefined): EloWeights[] => {
+            if (!raw) return [];
+            const out: EloWeights[] = [];
+            for (const part of raw.split(',')) {
+              const [h, j, t] = part.split('-').map((v) => Number(v));
+              const w = normalizeEloWeights({ horse: h, jockey: j, trainer: t });
+              if (w) out.push(w);
+            }
+            return out;
+          };
+          const custom = parseGrid(c.req.query('grid') || undefined);
+          const combos: EloWeights[] = custom.length ? custom : [
+            { horse: 0.50, jockey: 0.35, trainer: 0.15 },
+            { horse: 0.55, jockey: 0.30, trainer: 0.15 },
+            { horse: 0.60, jockey: 0.25, trainer: 0.15 },
+            { horse: 0.60, jockey: 0.30, trainer: 0.10 },
+            { horse: 0.65, jockey: 0.25, trainer: 0.10 },
+            { horse: 0.70, jockey: 0.20, trainer: 0.10 },
+            { horse: 0.70, jockey: 0.25, trainer: 0.05 },
+            { horse: 0.75, jockey: 0.15, trainer: 0.10 },
+            { horse: 0.80, jockey: 0.15, trainer: 0.05 },
+            { horse: 0.85, jockey: 0.10, trainer: 0.05 },
+          ];
+
+          const key = (w: EloWeights) => `${w.horse.toFixed(2)}-${w.jockey.toFixed(2)}-${w.trainer.toFixed(2)}`;
+          const perCombo: Record<string, any> = {};
+          for (const w of combos) {
+            let races = 0, top1 = 0, top3Int = 0, top4Int = 0, top4Elig = 0, trio = 0, first4 = 0;
+            for (const d of dates) {
+              try {
+                const r = await computeHitRateStats(db, d, engine, alpha, { eloWeightsOverride: w });
+                if ('error' in r) continue;
+                const sm: any = r.summary;
+                if (!sm.racesEvaluated) continue;
+                races += sm.racesEvaluated;
+                top1 += sm.top1Hits || 0;
+                top3Int += sm.top3SumIntersect || 0;
+                top4Int += sm.top4SumIntersect || 0;
+                top4Elig += sm.top4Eligible || 0;
+                trio += sm.trioHits || 0;
+                first4 += sm.first4Hits || 0;
+              } catch { /* skip */ }
+            }
+            perCombo[key(w)] = {
+              weights: { horse: Math.round(w.horse * 100) / 100, jockey: Math.round(w.jockey * 100) / 100, trainer: Math.round(w.trainer * 100) / 100 },
+              races,
+              top4AvgIntersect: top4Elig ? Math.round(top4Int / top4Elig * 1000) / 1000 : null,
+              top3AvgIntersect: races ? Math.round(top3Int / races * 1000) / 1000 : null,
+              top1HitRate: races ? Math.round(top1 / races * 1000) / 10 : null,
+              trioHits: trio,
+              first4Hits: first4,
+            };
+          }
+          // 主指標＝四揀平均命中匹數；同分先睇前三平均，再睇 Top1。
+          let winner: { key: string; weights: EloWeights } | null = null;
+          let best = -1;
+          for (const k of Object.keys(perCombo)) {
+            const r = perCombo[k];
+            const score = (r.top4AvgIntersect ?? 0) * 1000 + (r.top3AvgIntersect ?? 0) * 10 + (r.top1HitRate ?? 0) / 1000;
+            if (score > best) { best = score; winner = { key: k, weights: r.weights }; }
+          }
+          let applied = false, applyDenied = false;
+          if (apply && winner) {
+            const ok = await hasAdminAccess(c, ADMIN_AUTH_POLICY.BEARER_ONLY);
+            if (!ok) applyDenied = true;
+            else {
+              await db.prepare(
+                `INSERT INTO app_settings (key, value, updated_at) VALUES ('elo_weights', ?, datetime('now'))
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
+              ).bind(JSON.stringify(winner.weights)).run().catch(() => {});
+              applied = true;
+            }
+          }
+          const currentWeights = await getEloWeights(db);
+          return c.json({
+            windowDays: days, from: cutoff, to: today,
+            meetingsEvaluated: dates.length,
+            ensembleAlpha: alpha,
+            combos: combos.map(key), perCombo,
+            winner, currentWeights, applied, applyDenied,
+            generatedAt: new Date().toISOString(),
+          });
+        } catch {
+          return c.json({ error: 'elo-tune failed' }, 500);
         }
       });
   
