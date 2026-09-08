@@ -3334,7 +3334,7 @@ analyzeRoutes.get('/factors', (c) => {
             }
             const rRate = (n: number, d: number) => d ? Math.round(n / d * 1000) / 10 : null;
             const payload: any = {
-              windowDays: days, from: cutoff, to: today,
+              windowDays: days, from: rangeFrom, to: rangeTo,
               meetingsFound: meetingDates.length,
               meetingsEvaluated: perMeeting.length,
               racesEvaluated: totalRaces,
@@ -3452,6 +3452,11 @@ analyzeRoutes.get('/factors', (c) => {
           const engine: EloEngine = c.req.query('engine') === 'v11' ? 'v11' : 'v12';
           const today = new Date().toISOString().substring(0, 10);
           const cutoff = new Date(Date.now() - days * 86400000).toISOString().substring(0, 10);
+          const dre = /^\d{4}-\d{2}-\d{2}$/;
+          const qFrom = (c.req.query('from') || '').substring(0, 10);
+          const qTo = (c.req.query('to') || '').substring(0, 10);
+          const rangeFrom = dre.test(qFrom) ? qFrom : cutoff;
+          const rangeTo = dre.test(qTo) ? qTo : today;
           const datesQ = await db.prepare(
             "SELECT DISTINCT rm.date AS date FROM race_meetings rm " +
             "JOIN races r ON r.meeting_id = rm.id JOIN race_results rr ON rr.race_id = r.id " +
@@ -3546,7 +3551,7 @@ analyzeRoutes.get('/factors', (c) => {
             "JOIN races r ON r.meeting_id = rm.id JOIN race_results rr ON rr.race_id = r.id " +
             "WHERE rm.date >= ? AND rm.date < ? AND rm.venue IN ('ST','HV') AND rr.finishing_position IS NOT NULL " +
             "ORDER BY rm.date DESC"
-          ).bind(cutoff, today).all<any>().catch(() => ({ results: [] as any[] }));
+          ).bind(rangeFrom, rangeTo).all<any>().catch(() => ({ results: [] as any[] }));
           const dates: string[] = ((datesQ.results as any[]) || []).map((m: any) => m.date as string);
 
           // 可選 ?grid=0.7-0.2-0.1,0.6-0.3-0.1 自訂；預設掃描馬 0.50–0.85。
@@ -3596,6 +3601,10 @@ analyzeRoutes.get('/factors', (c) => {
             perCombo[key(w)] = {
               weights: { horse: Math.round(w.horse * 100) / 100, jockey: Math.round(w.jockey * 100) / 100, trainer: Math.round(w.trainer * 100) / 100 },
               races,
+              top4SumIntersect: top4Int,
+              top4Eligible: top4Elig,
+              top3SumIntersect: top3Int,
+              top1Hits: top1,
               top4AvgIntersect: top4Elig ? Math.round(top4Int / top4Elig * 1000) / 1000 : null,
               top3AvgIntersect: races ? Math.round(top3Int / races * 1000) / 1000 : null,
               top1HitRate: races ? Math.round(top1 / races * 1000) / 10 : null,
