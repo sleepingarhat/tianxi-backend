@@ -240,7 +240,7 @@ function projectResultHorse(value: unknown, actual = false): JsonRecord | null {
   if (!isRecord(value)) return null;
   const projected = copyScalars(value, actual
     ? ['position', 'horseNumber', 'nameCh', 'winOdds', 'hit']
-    : ['rank', 'horseNumber', 'nameCh', 'hit']);
+    : ['rank', 'horseNumber', 'nameCh', 'hit', 'draw', 'scoreSource']);
   const horseId = safeHorseId(value.horseId);
   if (horseId) projected.horseId = horseId;
   return projected;
@@ -274,6 +274,10 @@ function projectHitRateRace(value: unknown): JsonRecord | null {
     'trioHit',
     'tierceHit',
     'first4Hit',
+    // Accountability labels for 預測與賽果: which model version + ensemble alpha
+    // was actually frozen pre-race for this race.
+    'scoreSource',
+    'ensembleAlpha',
   ]);
   projected.predictedTop4 = Array.isArray(value.predictedTop4)
     ? value.predictedTop4.map((item) => projectResultHorse(item)).filter(Boolean)
