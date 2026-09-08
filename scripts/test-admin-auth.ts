@@ -612,6 +612,7 @@ async function main(): Promise<void> {
     { name: 'strategy P&L admin fields', method: 'GET', path: '/api/analyze/strategy-pnl', policy: ADMIN_AUTH_POLICY.SESSION_OR_BEARER, access: 'dual' },
     { name: 'ensemble tuning', method: 'GET', path: '/api/analyze/ensemble-tune', policy: ADMIN_AUTH_POLICY.SESSION_OR_BEARER, access: 'private' },
     { name: 'elo weight tuning', method: 'GET', path: '/api/analyze/elo-tune', policy: ADMIN_AUTH_POLICY.SESSION_OR_BEARER, access: 'private' },
+    { name: 'draw bias model A/B', method: 'GET', path: '/api/analyze/draw-tune', policy: ADMIN_AUTH_POLICY.SESSION_OR_BEARER, access: 'private' },
   ];
   const maintenanceEndpoints: EndpointCase[] = [
     { name: 'season override', method: 'POST', path: '/admin/api/set-season-mode', policy: ADMIN_AUTH_POLICY.BEARER_ONLY, access: 'private' },
