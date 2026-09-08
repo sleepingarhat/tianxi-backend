@@ -187,6 +187,54 @@
       JOIN race_meetings rm ON rm.id = r.meeting_id
      WHERE rr.horse_id = ? AND rm.date < ?`);
 
+  // ── Stage 14 (NEW): layoff / comeback (休賽日數・復出) ─────────────────
+  // Motivation: the 2026-09-06 season opener had 109/120 runners returning from
+  // >55 days off (mean 72d). days_since_last alone is a raw scalar; the model had
+  // no way to learn "how THIS horse performs when returning from a long break",
+  // nor that a whole field is simultaneously first-up. All leak-safe (as-of date).
+  //
+  // Prior starts of this horse whose own gap from its previous start was > 55d,
+  // together with how often it hit top3 on those comeback runs.
+  const qComebackHistory = db.prepare(`
+    WITH runs AS (
+      SELECT rm.date AS d, rr.finishing_position AS pos,
+             LAG(rm.date) OVER (ORDER BY rm.date) AS prev_d
+        FROM race_results rr
+        JOIN races r ON r.id = rr.race_id
+        JOIN race_meetings rm ON rm.id = r.meeting_id
+       WHERE rr.horse_id = ? AND rm.date < ?
+    )
+    SELECT COUNT(*) AS starts,
+           SUM(CASE WHEN pos BETWEEN 1 AND 3 THEN 1 ELSE 0 END) AS top3
+      FROM runs
+     WHERE prev_d IS NOT NULL
+       AND CAST(julianday(d) - julianday(prev_d) AS INTEGER) > 55`);
+
+  // Starts already made by this horse in the CURRENT HK season (season = Sep 1 →
+  // Aug 31). 0 ⇒ this is its season debut, the single strongest opener signal.
+  const qSeasonStarts = db.prepare(`
+    SELECT COUNT(*) AS starts
+      FROM race_results rr
+      JOIN races r ON r.id = rr.race_id
+      JOIN race_meetings rm ON rm.id = r.meeting_id
+     WHERE rr.horse_id = ? AND rm.date < ? AND rm.date >= ?`);
+
+  // Season start boundary (Sep 1) for an ISO race date.
+  function seasonStart(iso: string): string {
+    const y = Number(iso.slice(0, 4));
+    const m = Number(iso.slice(5, 7));
+    return (m >= 9 ? y : y - 1) + '-09-01';
+  }
+  // Coarse layoff band: 0 ≤14d, 1 ≤28d, 2 ≤55d, 3 ≤90d, 4 >90d, -1 no history.
+  function layoffBand(d: number | null): number {
+    if (d == null) return -1;
+    if (d <= 14) return 0;
+    if (d <= 28) return 1;
+    if (d <= 55) return 2;
+    if (d <= 90) return 3;
+    return 4;
+  }
+
   // ── Stage 10 (NEW v3.2 ④): pedigree target-encoded progeny performance ──
   // Leak-safe: progeny races strictly BEFORE the current race date. Keyed by
   // race_results.horse_id (prefixed 'horse_'+code) via the horse_pedigree table
@@ -785,6 +833,15 @@
       // last 8 starts; cmt_n = history depth (0 = no history); the three fraction
       // cols use the -1 sentinel for no history). A受阻 + B走大疊 + C出閘失準.
       'cmt_n','cmt_trouble','cmt_wide','cmt_badstart',
+      // Stage 14 (NEW): layoff / comeback. layoff_band = coarse gap band;
+      // is_layoff55 = returning from >55d; cb_starts/cb_top3 = this horse's own
+      // record on past comeback runs; season_starts/is_season_debut = position in
+      // the current HK season; field_layoff_frac = share of THIS field that is
+      // first-up >55d (race-level, constant per row) — lets the model discount its
+      // own form signal when the whole field is unraced; layoff_x_form couples the
+      // gap band with recency-weighted form.
+      'layoff_band','is_layoff55','cb_starts','cb_top3','season_starts',
+      'is_season_debut','field_layoff_frac','layoff_x_form',
       'finishing_position','is_top1','is_top3',
     ];
   writeFileSync(OUT, HEADER.join(',') + '\n');
@@ -799,6 +856,7 @@
   let buf: string[] = [];
   let written = 0;
   let gearChangedN = 0, gearBlinkersN = 0;  // ⑤ coverage guard (silent-regression detector)
+  let layoff55N = 0, seasonDebutN = 0; // Stage 14 coverage counters
   let sectSpdN = 0;  // ⑥ coverage guard: rows with real (non-sentinel) sectional-speed z
   let cmtHistN = 0, cmtTroubleN = 0;  // ⑦ coverage guard: rows with comment history / trouble flag
   function flush() { if (buf.length) { appendFileSync(OUT, buf.join('')); buf = []; } }
@@ -847,6 +905,20 @@
     const isSprint = dist > 0 && dist <= 1200 ? 1 : 0;
     const isMiddle = dist >= 1400 && dist <= 1600 ? 1 : 0;
     const isDistance = dist >= 1800 ? 1 : 0;
+
+    // Stage 14: per-runner layoff scalars, plus the race-level first-up share.
+    const layoffDaysByHorse = new Map<string, number | null>();
+    for (const r of runners) {
+      const lrPre = qLastRaceDate.get(r.horse_id, meta.date) as { last_date: string | null } | undefined;
+      layoffDaysByHorse.set(r.horse_id, lrPre?.last_date ? daysBetween(lrPre.last_date, meta.date) : null);
+    }
+    const fieldLayoffFrac = runners.length
+      ? runners.filter((r) => {
+          const d = layoffDaysByHorse.get(r.horse_id);
+          return d == null || d > 55; // no history counts as unraced too
+        }).length / runners.length
+      : 0;
+    const seasonFrom = seasonStart(meta.date);
 
     for (const r of runners) {
       const hElo = readElo('horse', r.horse_id, meta.date);
@@ -989,6 +1061,21 @@
       if (gearF.changed) gearChangedN++;
       if (gearF.blinkers) gearBlinkersN++;
 
+      // Stage 14 (NEW): layoff / comeback features
+      const layoffBandV = layoffBand(daysSince);
+      const isLayoff55 = daysSince == null || daysSince > 55 ? 1 : 0;
+      const cbRow = qComebackHistory.get(r.horse_id, meta.date) as { starts: number; top3: number | null } | undefined;
+      const cbStarts = cbRow?.starts ?? 0;
+      // smoothRate keeps a 1-start comeback record from reading as 0% / 100%.
+      const cbTop3 = cbStarts > 0 ? smoothRate(cbStarts, cbRow?.top3 ?? 0) : -1;
+      const seasonStarts = ((qSeasonStarts.get(r.horse_id, meta.date, seasonFrom) as { starts: number } | undefined)?.starts) ?? 0;
+      const isSeasonDebut = seasonStarts === 0 ? 1 : 0;
+      // Interaction: form is only trustworthy when the gap is short. -1 form
+      // sentinel (no history) is passed through as 0 = "no usable interaction".
+      const layoffXForm = formTop3RateW == null ? 0 : formTop3RateW * (layoffBandV < 0 ? 0 : 4 - layoffBandV);
+      if (isLayoff55) layoff55N++;
+      if (isSeasonDebut) seasonDebutN++;
+
       const row = [
           meta.id, meta.date, meta.venue, meta.race_number, meta.distance, meta.going, fieldSize,
           r.horse_id, r.jockey_id, r.trainer_id, r.draw, r.actual_weight, r.win_odds,
@@ -1010,6 +1097,8 @@
           sireTop3, sireDistTop3, damsireTop3,
           gearF.firstN, gearF.offN, gearF.changed, gearF.blinkers,
           cmt.n, cmt.trouble, cmt.wide, cmt.badstart,
+          layoffBandV, isLayoff55, cbStarts, cbTop3, seasonStarts,
+          isSeasonDebut, Math.round(fieldLayoffFrac * 1000) / 1000, layoffXForm,
           r.finishing_position,
           r.horse_id === top1Id ? 1 : 0,
           top3Set.has(r.horse_id) ? 1 : 0,
@@ -1034,6 +1123,9 @@
     if (!UPCOMING_MODE && sectSpdN === 0) {
       console.error('[dump-features] WARN: sectional-speed z ALL sentinel on historical dump → horse_sectional_times.section_time missing (sparse-checkout/import regression?)');
     }
+    const lo55Pct = (100 * layoff55N / written).toFixed(1);
+    const sdPct = (100 * seasonDebutN / written).toFixed(1);
+    console.error(`[dump-features] Stage14 layoff coverage: >55d first-up=${layoff55N} (${lo55Pct}%) · season debut=${seasonDebutN} (${sdPct}%)`);
     const cmtHistPct = (100 * cmtHistN / written).toFixed(1);
     const cmtTrbPct = (100 * cmtTroubleN / written).toFixed(1);
     console.error(`[dump-features] ⑦ hard-luck coverage: comment history present=${cmtHistN} (${cmtHistPct}%) · trouble-flagged=${cmtTroubleN} (${cmtTrbPct}%)`);
