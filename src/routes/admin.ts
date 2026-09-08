@@ -2051,6 +2051,7 @@ function renderPanel(preloaded: Record<string, any>): string {
       <div class="mast-actions">
         <a class="mast-link" href="/api/analyze/ensemble-tune?days=30" target="_blank">P4 · α grid search</a>
         <a class="mast-link" href="/api/analyze/ensemble-tune?days=30&apply=1" target="_blank">α grid search + apply</a>
+        <a class="mast-link" href="/api/analyze/elo-tune?days=90" target="_blank">P5 · ELO 三軸權重掃描</a>
       </div>
     </div>
   </header>
