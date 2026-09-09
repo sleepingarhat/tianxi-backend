@@ -298,10 +298,32 @@ def main() -> int:
         val_part = train[val_mask].copy()
         n_val_races = val_part['race_id'].nunique()
         if n_val_races < 20:
-            print(f'[predict] validation too small ({n_val_races} races) → fallback to legacy mode', flush=True)
-            use_val = False
-            train_part = train
-            val_part = None
+            # 2026-09-09 fix: a fixed calendar window collapses across the HK
+            # off-season (mid-Jul → early Sep). The last 30 days then hold a
+            # single race day (10 races) and we silently dropped to legacy mode,
+            # which killed the health diagnostics and slammed α to 0.
+            # Expand the window by RACE DAYS until we have >=20 val races.
+            print(f'[predict] validation too small ({n_val_races} races) in last '
+                  f'{args.val_days}d → expanding window by race days', flush=True)
+            dates = sorted(train['race_date'].unique(), reverse=True)
+            picked = []
+            for d in dates:
+                picked.append(d)
+                cand = train[train['race_date'].isin(picked)]
+                if cand['race_id'].nunique() >= 20 and len(picked) >= 3:
+                    break
+            cand = train[train['race_date'].isin(picked)]
+            n_val_races = cand['race_id'].nunique()
+            if n_val_races >= 20 and cand['race_id'].nunique() < train['race_id'].nunique():
+                val_part = cand.copy()
+                train_part = train[~train['race_date'].isin(picked)].copy()
+                print(f'[predict] expanded validation: {len(picked)} race days, '
+                      f'{n_val_races} races (oldest={min(picked)})', flush=True)
+            else:
+                print(f'[predict] still too small ({n_val_races} races) → legacy mode', flush=True)
+                use_val = False
+                train_part = train
+                val_part = None
     else:
         train_part = train
 
@@ -563,6 +585,20 @@ def main() -> int:
             reasons = reasons + [cov_reason]
         elif cov_reason:
             print(f'[gate] coverage note: {cov_reason}', flush=True)
+        # 2026-09-09 fix: distinguish "LGB proven useless" from "diagnostics
+        # unavailable". In legacy/no-val mode the gates cannot judge the model
+        # at all — writing α=0 there silently degraded prod to pure ELO on a
+        # live race day. No verdict → hold the current α and go red instead.
+        indeterminate = (not passed) and int(diag.get('val_races') or 0) == 0
+        if indeterminate:
+            print(f'[gate] INDETERMINATE (no validation set — diagnostics '
+                  f'unavailable): reasons: {"; ".join(reasons)}', flush=True)
+            print('[gate] α left UNCHANGED (no automatic pure-ELO fallback on a '
+                  'non-verdict). Investigate the validation split.', flush=True)
+            base = args.admin_url.rsplit('/', 1)[0]
+            post_admin(f'{base}/refresh-race-day-report', args.token,
+                       'refresh-race-day-report')
+            return 5
         target = args.alpha_pass if passed else 0.0
         if passed:
             print(f'[gate] ALL Plan A health gates PASS → ensemble_alpha={target} '
