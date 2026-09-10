@@ -1296,11 +1296,13 @@ export async function getEloWeights(db: D1Database): Promise<EloWeights> {
   return { ...ELO_WEIGHTS };
 }
 
-// 檔位效應模型版本：v1 = 場地+路程固定 0.25 基準；v2 = 場地+賽道(rail)+路程分層 + 場數期望 + 收縮。
-export type DrawModel = 'v1' | 'v2';
+// 檔位效應模型版本：v1 = 場地+路程固定 0.25 基準；v2 = 場地+賽道(rail)+路程分層 + 場數期望 + 收縮；
+// v3 = v2 再加三個分層（場地狀況 going／出賽匹數 field size／班次 class），各層向 base 經驗貝葉斯收縮，取用時以信心加權合成。
+export type DrawModel = 'v1' | 'v2' | 'v3';
 export async function getDrawModel(db: D1Database): Promise<DrawModel> {
   try {
     const row = await db.prepare(`SELECT value FROM app_settings WHERE key = 'draw_model'`).first<{ value: string }>().catch(() => null);
+    if (row?.value === 'v3') return 'v3';
     if (row?.value === 'v2') return 'v2';
   } catch { /* ignore */ }
   return 'v1';
@@ -1313,6 +1315,41 @@ export function railKey(course: string | null | undefined): string {
   if (c.includes('全天候')) return 'AWT';
   const m = c.match(/"([^"]+)"/) || c.match(/[""]([^""]+)[""]/);
   return m ? m[1]!.toUpperCase() : 'NA';
+}
+
+// 場地狀況分層鍵：快／好／黏／軟／濕（全天候）。
+export function goingKey(going: string | null | undefined): string {
+  const g = String(going || '').trim();
+  if (!g) return 'NA';
+  if (g.includes('濕')) return 'WET';
+  if (g.includes('軟')) return 'SOFT';
+  if (g.includes('黏')) return 'YLD';
+  if (g.includes('快')) return 'FAST';
+  if (g.includes('好')) return 'GOOD';
+  return 'NA';
+}
+
+// 出賽匹數分層鍵：細場 ≤8、中場 9-11、大場 12+。
+export function fieldKey(n: number | null | undefined): string {
+  const v = Number(n);
+  if (!Number.isFinite(v) || v <= 0) return 'NA';
+  if (v <= 8) return 'S';
+  if (v <= 11) return 'M';
+  return 'L';
+}
+
+// 班次分層鍵：第一至第五班／新馬／分級賽。
+export function classKey(cls: string | null | undefined): string {
+  const c = String(cls || '').trim();
+  if (!c) return 'NA';
+  if (/(第一級|第二級|第三級|G1|G2|G3|Group)/i.test(c)) return 'GRP';
+  if (c.includes('新馬')) return 'GRIFFIN';
+  const m = c.match(/第([一二三四五1-5])班/);
+  if (m) {
+    const map: Record<string, string> = { 一: '1', 二: '2', 三: '3', 四: '4', 五: '5' };
+    return 'C' + (map[m[1]!] ?? m[1]!);
+  }
+  return 'NA';
 }
 
 // ELO engine version selector (v1.2 = time-weighted multi-axis, user-endorsed 2026-04-28).
@@ -2257,6 +2294,121 @@ analyzeRoutes.get('/factors', (c) => {
     return map;
   }
 
+  // 檔位效應 v3：在 v2（場地×賽道×路程）之上再加三個分層 —— 場地狀況(going)、出賽匹數(field size)、班次(class)。
+  async function batchDrawBiasV3(db: D1Database, entries: any[], venue: string, asOf: string): Promise<Map<string, FactorResult>> {
+    const map = new Map<string, FactorResult>();
+    const buckets = [...new Set(entries.map(e => distBucket(e.distance)).filter(Boolean) as number[])];
+    const K_BASE = 15, K_SUB = 12, SCALE = 25;
+    type Agg = { starts: number; top3: number; exp3: number };
+    const add = (m: Map<string, Agg>, k: string, st: number, t3: number, e3: number) => {
+      const a = m.get(k) ?? { starts: 0, top3: 0, exp3: 0 };
+      a.starts += st; a.top3 += t3; a.exp3 += e3; m.set(k, a);
+    };
+    for (const bucket of buckets) {
+      try {
+        const { results } = await db.prepare(
+          `WITH f AS (
+             SELECT rr.race_id AS rid, COUNT(*) AS n FROM race_results rr
+             WHERE rr.finishing_position > 0 AND rr.finishing_position < 99 GROUP BY rr.race_id
+           )
+           SELECT rr.draw AS draw, r.course AS course, r.going AS going, r.class AS cls, f.n AS field,
+                  COUNT(*) AS starts,
+                  SUM(CASE WHEN rr.finishing_position BETWEEN 1 AND 3 THEN 1 ELSE 0 END) AS top3,
+                  SUM(3.0 / f.n) AS exp3
+           FROM race_results rr
+           JOIN races r ON r.id = rr.race_id
+           JOIN race_meetings rm ON rm.id = r.meeting_id
+           JOIN f ON f.rid = rr.race_id
+           WHERE rm.venue = ? AND rm.date < ? AND r.distance BETWEEN ? AND ?
+             AND rr.draw IS NOT NULL AND rr.draw > 0
+             AND rr.finishing_position > 0 AND rr.finishing_position < 99
+           GROUP BY rr.draw, r.course, r.going, r.class, f.n`
+        ).bind(venue, asOf, bucket - 100, bucket + 100).all<any>();
+        const base = new Map<string, Agg>();
+        const layers: Record<'r' | 'g' | 'f' | 'c', Map<string, Agg>> = {
+          r: new Map(), g: new Map(), f: new Map(), c: new Map(),
+        };
+        for (const row of (results ?? [])) {
+          const d = Number(row.draw); if (!Number.isFinite(d) || d <= 0) continue;
+          const st = Number(row.starts) || 0, t3 = Number(row.top3) || 0, e3 = Number(row.exp3) || 0;
+          add(base, String(d), st, t3, e3);
+          const rk = railKey(row.course); if (rk !== 'NA') add(layers.r, `${d}|${rk}`, st, t3, e3);
+          const gk = goingKey(row.going); if (gk !== 'NA') add(layers.g, `${d}|${gk}`, st, t3, e3);
+          const fk = fieldKey(row.field); if (fk !== 'NA') add(layers.f, `${d}|${fk}`, st, t3, e3);
+          const ck = classKey(row.cls); if (ck !== 'NA') add(layers.c, `${d}|${ck}`, st, t3, e3);
+        }
+        const baseLift = new Map<string, number>();
+        for (const [d, b] of base) {
+          if (b.starts < 20 || !(b.exp3 > 0)) continue;
+          const lift = (b.top3 + K_BASE) / (b.exp3 + K_BASE);
+          baseLift.set(d, lift);
+          map.set(`${d}:${venue}:${bucket}`, {
+            bonus: Math.max(-10, Math.min(10, (lift - 1) * SCALE)),
+            conf: Math.min(1, b.starts / 80),
+            note: `檔${d} ${venue}/${bucket}m 上位指數 ${lift.toFixed(2)}（${b.starts} 戰）`,
+          });
+        }
+        const labels: Record<'r' | 'g' | 'f' | 'c', string> = { r: '賽道', g: '地質', f: '匹數', c: '班次' };
+        for (const tag of ['r', 'g', 'f', 'c'] as const) {
+          for (const [key, a] of layers[tag]) {
+            if (a.starts < 12 || !(a.exp3 > 0)) continue;
+            const [dStr, sub] = key.split('|') as [string, string];
+            const prior = baseLift.get(dStr) ?? 1;
+            const lift = (a.top3 + K_SUB * prior) / (a.exp3 + K_SUB);
+            map.set(`${dStr}:${venue}:${bucket}:${tag}:${sub}`, {
+              bonus: Math.max(-10, Math.min(10, (lift - 1) * SCALE)),
+              conf: Math.min(1, a.starts / 60),
+              note: `檔${dStr} ${venue}/${bucket}m/${labels[tag]}${sub} 上位指數 ${lift.toFixed(2)}（${a.starts} 戰）`,
+            });
+          }
+        }
+      } catch { /* skip */ }
+    }
+    return map;
+  }
+
+  // 依檔位模型版本取出檔位因子（v3 會合成賽道／地質／匹數／班次四層）。
+  function resolveDrawFactor(
+    model: DrawModel,
+    drawMap: Map<string, FactorResult>,
+    baseKey: string,
+    ctx: { course: string | null; going: string | null; fieldSize: number | null; raceClass: string | null },
+  ): FactorResult {
+    const fallback: FactorResult = { bonus: 0, conf: 0, note: '檔位資料不全' };
+    const baseHit = drawMap.get(baseKey);
+    if (model !== 'v3') {
+      return drawMap.get(`${baseKey}:${railKey(ctx.course)}`) ?? baseHit ?? fallback;
+    }
+    const subs: Array<[string, string]> = [
+      ['r', railKey(ctx.course)],
+      ['g', goingKey(ctx.going)],
+      ['f', fieldKey(ctx.fieldSize)],
+      ['c', classKey(ctx.raceClass)],
+    ];
+    let wSum = 0, bSum = 0; const notes: string[] = [];
+    for (const [tag, sub] of subs) {
+      if (sub === 'NA') continue;
+      const hit = drawMap.get(`${baseKey}:${tag}:${sub}`);
+      if (!hit) continue;
+      const w = Math.max(0.05, hit.conf ?? 0);
+      wSum += w; bSum += w * hit.bonus;
+      notes.push(hit.note);
+    }
+    if (baseHit) {
+      const w = Math.max(0.1, baseHit.conf ?? 0);
+      wSum += w; bSum += w * baseHit.bonus;
+      if (!notes.length) notes.push(baseHit.note);
+    }
+    if (!wSum) return fallback;
+    return {
+      bonus: Math.max(-10, Math.min(10, bSum / wSum)),
+      conf: Math.min(1, wSum / 2),
+      note: notes.slice(0, 3).join('；'),
+    };
+  }
+
+
+
   async function batchConditionFit(db: D1Database, horseIds: string[], asOf: string): Promise<Map<string, FactorResult>> {
     const map = new Map<string, FactorResult>();
     if (!horseIds.length) return map;
@@ -2508,7 +2660,7 @@ analyzeRoutes.get('/factors', (c) => {
           batchLastRaceDate(db, allHorseIds, targetDate),
           batchDistanceFit(db, allHorseIds, targetDate),
           batchGoingFit(db, allHorseIds, targetDate),
-          (DRAW_MODEL === 'v2' ? batchDrawBiasV2 : batchDrawBias)(db, entries, meeting.venue, targetDate),
+          (DRAW_MODEL === 'v3' ? batchDrawBiasV3 : DRAW_MODEL === 'v2' ? batchDrawBiasV2 : batchDrawBias)(db, entries, meeting.venue, targetDate),
           batchConditionFit(db, allHorseIds, targetDate),
           batchInjuryFlag(db, allHorseIds, targetDate),
           batchWeightDelta(db, allHorseIds, entries, targetDate),
@@ -2559,7 +2711,7 @@ analyzeRoutes.get('/factors', (c) => {
             const fDist = distMap.get(`${horseId}:${distBucket(raceDistance)}`) ?? { bonus: 0, conf: 0, note: '無距離往績' };
             const fGoing = goingMap.get(`${horseId}:${raceGoing ?? ''}`) ?? { bonus: 0, conf: 0, note: '無場地往績' };
             const _dKey = `${e.draw}:${meeting.venue}:${distBucket(raceDistance)}`;
-            const fDraw = drawMap.get(`${_dKey}:${railKey(raceCourse)}`) ?? drawMap.get(_dKey) ?? { bonus: 0, conf: 0, note: '檔位資料不全' };
+            const fDraw = resolveDrawFactor(DRAW_MODEL, drawMap, _dKey, { course: raceCourse, going: raceGoing, fieldSize: raceEntries.length, raceClass });
             const fWeight = wtMap.get(horseId) ?? { bonus: 0, conf: 0, note: '無體重往績' };
             const fCond = condMap.get(horseId) ?? { bonus: 0, conf: 0, note: '無晨操記錄' };
             const fInjury = injMap.get(horseId) ?? { bonus: 0, conf: 0, note: '無傷病記錄' };
@@ -2685,6 +2837,7 @@ analyzeRoutes.get('/factors', (c) => {
         const horseEloIds = allHorseIds;
         const allJockeyIds = [...new Set(entries.map(e => prefixId(e.jockey_id ?? e.jockey_name, 'jockey')).filter(Boolean) as string[])];
         const allTrainerIds = [...new Set(entries.map(e => prefixId(e.trainer_id ?? e.trainer_name, 'trainer')).filter(Boolean) as string[])];
+        const TP_DRAW_MODEL: DrawModel = await getDrawModel(db);
         const [horseEloMap, jockeyEloMap, trainerEloMap, recencyMap, distMap, goingMap, drawMap, condMap, injMap, wtMap, jtMap] = await Promise.all([
           batchEloReadings(db, 'horse', horseEloIds, targetDate, engine),
           batchEloReadings(db, 'jockey', allJockeyIds, targetDate, engine),
@@ -2692,7 +2845,7 @@ analyzeRoutes.get('/factors', (c) => {
           batchLastRaceDate(db, allHorseIds, targetDate),
           batchDistanceFit(db, allHorseIds, targetDate),
           batchGoingFit(db, allHorseIds, targetDate),
-          (await getDrawModel(db)) === 'v2' ? batchDrawBiasV2(db, entries, meeting.venue, targetDate) : batchDrawBias(db, entries, meeting.venue, targetDate),
+          (TP_DRAW_MODEL === 'v3' ? batchDrawBiasV3 : TP_DRAW_MODEL === 'v2' ? batchDrawBiasV2 : batchDrawBias)(db, entries, meeting.venue, targetDate),
           batchConditionFit(db, allHorseIds, targetDate),
           batchInjuryFlag(db, allHorseIds, targetDate),
           batchWeightDelta(db, allHorseIds, entries, targetDate),
@@ -2766,7 +2919,7 @@ analyzeRoutes.get('/factors', (c) => {
             const fDist = distMap.get(`${horseId}:${distBucket(raceDistance)}`) ?? { bonus: 0, conf: 0, note: '無距離往績' };
             const fGoing = goingMap.get(`${horseId}:${raceGoing ?? ''}`) ?? { bonus: 0, conf: 0, note: '無場地往績' };
             const _dKey = `${e.draw}:${meeting.venue}:${distBucket(raceDistance)}`;
-            const fDraw = drawMap.get(`${_dKey}:${railKey(raceCourse)}`) ?? drawMap.get(_dKey) ?? { bonus: 0, conf: 0, note: '檔位資料不全' };
+            const fDraw = resolveDrawFactor(TP_DRAW_MODEL, drawMap, _dKey, { course: raceCourse, going: raceGoing, fieldSize: raceEntries.length, raceClass });
             const fWeight = wtMap.get(horseId) ?? { bonus: 0, conf: 0, note: '無體重往績' };
             const fCond = condMap.get(horseId) ?? { bonus: 0, conf: 0, note: '無晨操記錄' };
             const fInjury = injMap.get(horseId) ?? { bonus: 0, conf: 0, note: '無傷病記錄' };
@@ -3650,8 +3803,8 @@ analyzeRoutes.get('/factors', (c) => {
             "ORDER BY rm.date DESC"
           ).bind(rangeFrom, rangeTo).all<any>().catch(() => ({ results: [] as any[] }));
           const dates: string[] = ((datesQ.results as any[]) || []).map((m: any) => m.date as string);
-          const wanted = (c.req.query('variants') || 'v1,v2').split(',').map((x) => x.trim()).filter((x) => x === 'v1' || x === 'v2') as DrawModel[];
-          const variants: DrawModel[] = wanted.length ? [...new Set(wanted)] : ['v1', 'v2'];
+          const wanted = (c.req.query('variants') || 'v1,v2,v3').split(',').map((x) => x.trim()).filter((x) => x === 'v1' || x === 'v2' || x === 'v3') as DrawModel[];
+          const variants: DrawModel[] = wanted.length ? [...new Set(wanted)] : ['v1', 'v2', 'v3'];
           const scales: number[] = [...new Set((c.req.query('scales') || '1').split(',')
             .map((x) => parseFloat(x.trim())).filter((x) => Number.isFinite(x) && x > 0 && x <= 200))];
           if (!scales.length) scales.push(1);
