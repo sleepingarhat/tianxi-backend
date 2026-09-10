@@ -5,6 +5,10 @@ import { fetchLatestWinOddsByRace, attachMarketBlend, MARKET_BLEND_BETA, normHor
 import { parseHkjcDividends, BOX_POOL_MAP } from '../lib/parse-dividends';
 import { computeRaceProbabilities, roundCoverage } from '../lib/pl-prob';
 import {
+  applyPlatt, fitPlatt, scoreSamples, parseCalibration,
+  type PlattParams, type Sample, type StoredCalibration,
+} from '../lib/calibration';
+import {
   projectExplainForPublic,
   projectHitRateForPublic,
   projectHitRateRollupForPublic,
@@ -1983,6 +1987,7 @@ async function computeComposite(
   withProb.sort((a, b) => b.pWin - a.pWin);
   // Assign rank
   withProb.forEach((p: any, i: number) => { p.rank = i + 1; });
+  applyProbCalibrationToPicks(withProb as any[], await getProbCalibration(db));
   return withProb;
 }
 
@@ -2621,6 +2626,61 @@ analyzeRoutes.get('/factors', (c) => {
       return 0.62;
     }
 
+    // ── Stage 2 (2026-09-10): probability calibration ────────────────────
+    // Platt scaling fitted on frozen prediction_log rows and stored in
+    // app_settings(key='prob_calibration'). Applied to pTop3 / pTop4 only —
+    // pWin is already well calibrated (ECE ~1.4%) and must keep summing to 1
+    // across the field, while pTop3 was over-confident in the high band.
+    // The mapping is strictly increasing so pick order never changes.
+    export async function getProbCalibration(db: D1Database): Promise<StoredCalibration | null> {
+      try {
+        await db.prepare(
+          `CREATE TABLE IF NOT EXISTS app_settings (
+             key TEXT PRIMARY KEY,
+             value TEXT NOT NULL,
+             updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+           )`
+        ).run().catch(() => {});
+        const row = await db.prepare(
+          `SELECT value FROM app_settings WHERE key = 'prob_calibration'`
+        ).first<{ value: string }>().catch(() => null);
+        return parseCalibration(row?.value);
+      } catch {
+        return null;
+      }
+    }
+
+    /** In-place: overwrite pTop3/pTop4 with calibrated values, keep raw copies. */
+    export function applyProbCalibrationToPicks(picks: any[], calib: StoredCalibration | null): boolean {
+      const t3 = calib?.top3 ?? null;
+      if (!t3 || !Array.isArray(picks) || !picks.length) return false;
+      for (const p of picks) {
+        if (p == null) continue;
+        if (p.pTop3 != null) {
+          p.pTop3Raw = p.pTop3;
+          const cal = applyPlatt(p.pTop3, t3);
+          p.pTop3 = Math.round(Math.max(p.pWin ?? 0, cal) * 1000) / 1000;
+        }
+        if (p.pTop4 != null) {
+          p.pTop4Raw = p.pTop4;
+          const cal4 = applyPlatt(p.pTop4, t3);
+          p.pTop4 = Math.round(Math.max(p.pTop3 ?? 0, cal4) * 1000) / 1000;
+        }
+        p.probCalibrated = true;
+      }
+      return true;
+    }
+
+    /** In-place over a list of race prediction objects. */
+    export function applyProbCalibration(races: any[], calib: StoredCalibration | null): boolean {
+      let applied = false;
+      for (const r of (races || [])) {
+        if (applyProbCalibrationToPicks(r?.picks ?? [], calib)) applied = true;
+      }
+      return applied;
+    }
+
+
     // Apply TX-Oracle v3 ensemble in-place on enriched picks (P0 + P1).
     // - When ANY runner has LGB: z-blend (α·lgb_z + (1-α)·elo_z) for the
     //   whole race. Missing-LGB runners impute lgb_z = 0 (race mean →
@@ -2822,8 +2882,10 @@ analyzeRoutes.get('/factors', (c) => {
           return { raceId, lgbLookupRaceId, raceNumber: raceNum, title: raceTitle, class: raceClass, distance: raceDistance, going: raceGoing, track: raceTrack, course: raceCourse, picks, scoreSource: raceHasLgb ? `tx-oracle-v3 (lgb=${lgbHits}/${_txTotal}, α=${effectiveAlpha.toFixed(2)})` : 'elo+factor', lgbCoverage: { hits: lgbHits, total: _txTotal, applied: raceHasLgb }, lgbModelVersion: lgbModelVerForRace, ensembleAlpha: effectiveAlpha, expectedBoxCoverage: roundCoverage(_prob.coverage), probabilityModel: _prob.model };
         });
         attachRaceQuality(racePredictions);
+        const _calib = await getProbCalibration(db);
+        applyProbCalibration(racePredictions, _calib);
         const eloReady = racePredictions.some((r) => r.picks?.some((p: any) => p.eloComposite != null));
-        return { date: targetDate, venue: meeting.venue, trackCondition: meeting.track_condition, eloEngine: engine, eloWeights: EW, eloReady, races: racePredictions, lgbModelVersion: helperLgbModelVersion, lgbCoverage: { rows: lgbScoreByRaceHorse.size }, generatedAt: new Date().toISOString() };
+        return { date: targetDate, venue: meeting.venue, trackCondition: meeting.track_condition, eloEngine: engine, eloWeights: EW, eloReady, races: racePredictions, lgbModelVersion: helperLgbModelVersion, lgbCoverage: { rows: lgbScoreByRaceHorse.size }, probCalibration: _calib ? { version: _calib.version, top3: _calib.top3, fittedAt: _calib.fittedAt } : null, generatedAt: new Date().toISOString() };
       }
 
       // GET /api/analyze/today-picks — 即日排位全因子預測 (batch-query version; ~20 D1 queries)
@@ -3031,6 +3093,8 @@ analyzeRoutes.get('/factors', (c) => {
           return { raceId, lgbLookupRaceId, raceNumber: raceNum, title: raceTitle, class: raceClass, distance: raceDistance, going: raceGoing, track: raceTrack, course: raceCourse, picks, scoreSource: raceHasLgb ? `tx-oracle-v3 (lgb=${lgbHits}/${_txTotal2}, α=${todayPicksAlpha.toFixed(2)})` : 'elo+factor', lgbCoverage: { hits: lgbHits, total: _txTotal2, applied: raceHasLgb }, lgbModelVersion: lgbModelVerForRace, ensembleAlpha: todayPicksAlpha, marketReady: _mb.marketReady, oddsSnapshotAt: _mbOdds?.snapshotAt ?? null, marketBeta: MARKET_BLEND_BETA, expectedBoxCoverage: roundCoverage(_prob.coverage), probabilityModel: _prob.model };
         });
         attachRaceQuality(racePredictions);
+        const _calibToday = await getProbCalibration(db);
+        applyProbCalibration(racePredictions, _calibToday);
         const eloReady = racePredictions.some((r) => r.picks?.some((p: any) => p.eloComposite != null));
         const computeMs = Date.now() - t0;
         const payload: Record<string, unknown> = {
@@ -3039,6 +3103,7 @@ analyzeRoutes.get('/factors', (c) => {
           seedSummary: { ratingSeeded: seedRatingCount, classSeeded: seedClassCount, totalSeeded: seedRatingCount + seedClassCount },
           lgbModelVersion: todayPicksLgbModelVersion,
           lgbCoverage: { rows: lgbScoreByRaceHorse.size },
+          probCalibration: _calibToday ? { version: _calibToday.version, top3: _calibToday.top3, fittedAt: _calibToday.fittedAt } : null,
           computeMs, generatedAt: new Date().toISOString(),
         };
         // Phase A: write each prediction to prediction_log for back-test (idempotent).
@@ -3602,6 +3667,94 @@ analyzeRoutes.get('/factors', (c) => {
             return c.json({ error: 'prediction-accuracy failed' }, 500);
           }
         });
+
+        // GET /api/analyze/calibration — 讀取現行機率校準
+        // GET /api/analyze/calibration?days=365&fit=1[&apply=1] — 重新擬合（管理員）
+        // Time-split: 舊 70% 擬合、最新 30% 驗證；只有 holdout 分數改善才建議套用。
+        analyzeRoutes.get('/calibration', async (c) => {
+          try {
+            const db = c.env.DB;
+            const current = await getProbCalibration(db);
+            const fit = c.req.query('fit') === '1';
+            const apply = c.req.query('apply') === '1';
+            if (!fit && !apply) return c.json({ current, applied: !!current?.top3 });
+            if (!(await hasAdminAccess(c, ADMIN_AUTH_POLICY.SESSION_OR_BEARER))) return privateRouteUnavailable(c);
+
+            const days = Math.max(30, Math.min(730, parseInt(c.req.query('days') || '365', 10) || 365));
+            await ensurePredictionLogTable(db);
+            const sinceDate = new Date(Date.now() - days * 86400000).toISOString().substring(0, 10);
+            const { results } = await db.prepare(
+              `SELECT date, p_win, p_top3, is_hit_top1, is_hit_top3
+                 FROM prediction_log
+                WHERE date >= ? AND actual_finish IS NOT NULL
+                  AND (variant IS NULL OR variant = 'baseline')
+                ORDER BY date ASC`
+            ).bind(sinceDate).all<any>().catch(() => ({ results: [] as any[] }));
+            const rows = (results ?? []).filter((r: any) => r.p_top3 != null && r.is_hit_top3 != null);
+            if (rows.length < 200) {
+              return c.json({ error: 'insufficient samples', samples: rows.length, current }, 200);
+            }
+            // Undo the currently stored mapping so we always fit on raw model
+            // probabilities (prediction_log stores what was served).
+            const t3prev = current?.top3 ?? null;
+            const rawTop3 = (p: number): number => {
+              if (!t3prev) return p;
+              const q = Math.min(1 - 1e-4, Math.max(1e-4, p));
+              const z = Math.log(q / (1 - q));
+              const raw = (z - t3prev.b) / (t3prev.a || 1);
+              return 1 / (1 + Math.exp(-raw));
+            };
+            const all: Sample[] = rows.map((r: any) => ({ p: rawTop3(Number(r.p_top3)), y: r.is_hit_top3 ? 1 : 0 }));
+            const cut = Math.floor(all.length * 0.7);
+            const trainRows = all.slice(0, cut);
+            const holdRows = all.slice(cut);
+            const trainFit = fitPlatt(trainRows);
+            const fullFit = fitPlatt(all);
+            if (!trainFit || !fullFit) return c.json({ error: 'fit failed', samples: all.length, current }, 200);
+            const before = scoreSamples(holdRows);
+            const after = scoreSamples(holdRows.map((s) => ({ p: applyPlatt(s.p, trainFit), y: s.y })));
+            // Gate: proper scores (Brier + log-loss) must improve on the
+            // holdout, and binned ECE must not get materially worse (the bin
+            // counts are small on a 30% holdout, so ECE is the noisy metric).
+            const improved =
+              before.brier != null && after.brier != null &&
+              before.logLoss != null && after.logLoss != null &&
+              before.ece != null && after.ece != null &&
+              after.brier <= before.brier + 1e-6 &&
+              after.logLoss <= before.logLoss + 1e-6 &&
+              after.ece <= before.ece * 1.1;
+
+            let stored: StoredCalibration | null = current;
+            if (apply && improved) {
+              stored = {
+                version: (current?.version ?? 0) + 1,
+                top3: fullFit as PlattParams,
+                win: null,
+                fittedAt: new Date().toISOString(),
+                days,
+                samples: all.length,
+                holdout: { before, after },
+              };
+              await db.prepare(
+                `INSERT INTO app_settings (key, value, updated_at) VALUES ('prob_calibration', ?, datetime('now'))
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
+              ).bind(JSON.stringify(stored)).run();
+            }
+            return c.json({
+              days, samples: all.length,
+              train: trainRows.length, holdout: holdRows.length,
+              trainFit, fullFit,
+              holdoutBefore: before, holdoutAfter: after,
+              improved,
+              applied: apply && improved,
+              current: stored,
+            });
+          } catch (e) {
+            console.warn('calibration failed', e);
+            return c.json({ error: 'calibration failed' }, 500);
+          }
+        });
+
 
         // GET /api/analyze/hit-rate-rollup?days=30 — 滾動窗口整體命中率彙總
       analyzeRoutes.get('/hit-rate-rollup', async (c) => {
