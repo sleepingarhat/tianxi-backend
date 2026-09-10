@@ -581,7 +581,59 @@ async function raceDayReportIsSettled(db: D1Database, value: any): Promise<boole
     return { updated, races: seenRaces.size };
   }
 
-  // Rolling N-day hit-rate / Brier / log-loss summary by variant.
+  // Rolling N-day hit-rate / Brier / log-loss / calibration summary by variant.
+  // Calibration (reliability) bins compare the engine's stated win probability
+  // against the observed win frequency in that probability band. ECE is the
+  // sample-weighted mean absolute gap; slope/intercept come from a simple
+  // linear fit of observed vs stated, so 1.0 / 0.0 means well calibrated.
+  const CALIB_EDGES = [0, 0.02, 0.05, 0.08, 0.12, 0.18, 0.25, 0.35, 0.5, 1];
+  function calibBinIndex(p: number): number {
+    for (let i = 0; i < CALIB_EDGES.length - 1; i++) {
+      if (p >= CALIB_EDGES[i]! && p < CALIB_EDGES[i + 1]!) return i;
+    }
+    return CALIB_EDGES.length - 2;
+  }
+  function emptyCalibBins() {
+    return CALIB_EDGES.slice(0, -1).map((lo, i) => ({
+      lo, hi: CALIB_EDGES[i + 1]!, n: 0, predSum: 0, wins: 0,
+    }));
+  }
+  function finishCalib(bins: ReturnType<typeof emptyCalibBins>) {
+    const total = bins.reduce((a, b) => a + b.n, 0);
+    let ece = 0, sxy = 0, sxx = 0, sx = 0, sy = 0, n = 0;
+    const out = bins.map((b) => {
+      const predAvg = b.n ? b.predSum / b.n : null;
+      const actual = b.n ? b.wins / b.n : null;
+      if (b.n && predAvg != null && actual != null) {
+        ece += (b.n / total) * Math.abs(actual - predAvg);
+        sx += predAvg * b.n; sy += actual * b.n;
+        sxy += predAvg * actual * b.n; sxx += predAvg * predAvg * b.n; n += b.n;
+      }
+      return {
+        lo: Math.round(b.lo * 1000) / 10,
+        hi: Math.round(b.hi * 1000) / 10,
+        n: b.n,
+        predictedPct: predAvg != null ? Math.round(predAvg * 1000) / 10 : null,
+        actualPct: actual != null ? Math.round(actual * 1000) / 10 : null,
+      };
+    });
+    let slope: number | null = null, intercept: number | null = null;
+    if (n > 0) {
+      const den = sxx - (sx * sx) / n;
+      if (Math.abs(den) > 1e-9) {
+        slope = (sxy - (sx * sy) / n) / den;
+        intercept = (sy - slope * sx) / n;
+      }
+    }
+    return {
+      bins: out,
+      samples: total,
+      ece: total ? Math.round(ece * 10000) / 10000 : null,
+      slope: slope != null ? Math.round(slope * 1000) / 1000 : null,
+      intercept: intercept != null ? Math.round(intercept * 10000) / 10000 : null,
+    };
+  }
+
   export async function summarizePredictionAccuracy(db: D1Database, days: number = 30): Promise<any> {
     await ensurePredictionLogTable(db);
     const sinceDate = new Date(Date.now() - days * 86400000).toISOString().substring(0, 10);
@@ -596,7 +648,13 @@ async function raceDayReportIsSettled(db: D1Database, value: any): Promise<boole
     const seenRaces = new Set<string>();
     for (const r of (results ?? [])) {
       const v = r.variant ?? 'baseline';
-      if (!byVariant[v]) byVariant[v] = { variant: v, races: 0, horses: 0, top1Picks: 0, top1Hits: 0, top3Picks3: 0, top3Hits: 0, brierWin: 0, brierWinN: 0, logLossWin: 0 };
+      if (!byVariant[v]) byVariant[v] = {
+        variant: v, races: 0, horses: 0, top1Picks: 0, top1Hits: 0, top3Picks3: 0, top3Hits: 0,
+        brierWin: 0, brierWinN: 0, logLossWin: 0,
+        brierTop3: 0, brierTop3N: 0, logLossTop3: 0,
+        calibWin: emptyCalibBins(), calibTop3: emptyCalibBins(),
+        baseWins: 0,
+      };
       const b = byVariant[v];
       const raceKey = `${r.date}|${r.race_number}|${v}`;
       if (!seenRaces.has(raceKey)) { seenRaces.add(raceKey); b.races++; }
@@ -608,18 +666,45 @@ async function raceDayReportIsSettled(db: D1Database, value: any): Promise<boole
         const p = Math.min(0.999, Math.max(0.001, r.p_win));
         b.brierWin += (p - y) * (p - y);
         b.brierWinN++;
+        b.baseWins += y;
         b.logLossWin += -(y * Math.log(p) + (1 - y) * Math.log(1 - p));
+        const bin = b.calibWin[calibBinIndex(p)];
+        bin.n++; bin.predSum += p; bin.wins += y;
+      }
+      if (r.p_top3 != null && r.is_hit_top3 != null) {
+        const y3 = r.is_hit_top3 ? 1 : 0;
+        const p3 = Math.min(0.999, Math.max(0.001, r.p_top3));
+        b.brierTop3 += (p3 - y3) * (p3 - y3);
+        b.brierTop3N++;
+        b.logLossTop3 += -(y3 * Math.log(p3) + (1 - y3) * Math.log(1 - p3));
+        const bin3 = b.calibTop3[calibBinIndex(p3)];
+        bin3.n++; bin3.predSum += p3; bin3.wins += y3;
       }
     }
-    const summary = Object.values(byVariant).map((b: any) => ({
-      variant: b.variant,
-      races: b.races,
-      horses: b.horses,
-      bankerHitRate: b.top1Picks ? Math.round((b.top1Hits / b.top1Picks) * 1000) / 10 : null,
-      top3PickHitRate: b.top3Picks3 ? Math.round((b.top3Hits / b.top3Picks3) * 1000) / 10 : null,
-      brierWin: b.brierWinN ? Math.round((b.brierWin / b.brierWinN) * 10000) / 10000 : null,
-      logLossWin: b.brierWinN ? Math.round((b.logLossWin / b.brierWinN) * 10000) / 10000 : null,
-    }));
+    const summary = Object.values(byVariant).map((b: any) => {
+      // Brier skill score vs the naive "everyone equally likely" baseline:
+      // positive means the engine's probabilities beat the base rate.
+      const baseRate = b.brierWinN ? b.baseWins / b.brierWinN : null;
+      const brierWin = b.brierWinN ? b.brierWin / b.brierWinN : null;
+      const brierRef = baseRate != null ? baseRate * (1 - baseRate) : null;
+      const skill = brierWin != null && brierRef != null && brierRef > 0
+        ? 1 - brierWin / brierRef : null;
+      return {
+        variant: b.variant,
+        races: b.races,
+        horses: b.horses,
+        bankerHitRate: b.top1Picks ? Math.round((b.top1Hits / b.top1Picks) * 1000) / 10 : null,
+        top3PickHitRate: b.top3Picks3 ? Math.round((b.top3Hits / b.top3Picks3) * 1000) / 10 : null,
+        brierWin: brierWin != null ? Math.round(brierWin * 10000) / 10000 : null,
+        logLossWin: b.brierWinN ? Math.round((b.logLossWin / b.brierWinN) * 10000) / 10000 : null,
+        brierTop3: b.brierTop3N ? Math.round((b.brierTop3 / b.brierTop3N) * 10000) / 10000 : null,
+        logLossTop3: b.brierTop3N ? Math.round((b.logLossTop3 / b.brierTop3N) * 10000) / 10000 : null,
+        baseWinRate: baseRate != null ? Math.round(baseRate * 1000) / 10 : null,
+        brierSkillScore: skill != null ? Math.round(skill * 1000) / 1000 : null,
+        calibrationWin: finishCalib(b.calibWin),
+        calibrationTop3: finishCalib(b.calibTop3),
+      };
+    });
     return { sinceDate, days, summary };
   }
 
@@ -3502,6 +3587,19 @@ analyzeRoutes.get('/factors', (c) => {
             return c.json({ table, filters: { entityId, since, until, idLike, axisKey, limit }, schema, facts, rows });
           } catch {
             return c.json({ error: 'd1-inspect failed' }, 500);
+          }
+        });
+
+        // GET /api/analyze/prediction-accuracy?days=90 — Brier／log-loss／可靠度校準
+        analyzeRoutes.get('/prediction-accuracy', async (c) => {
+          try {
+            const daysParam = c.req.query('days');
+            const days = Math.max(7, Math.min(730, parseInt(daysParam || '90', 10) || 90));
+            const payload = await summarizePredictionAccuracy(c.env.DB, days);
+            return c.json(payload);
+          } catch (e) {
+            console.warn('prediction-accuracy failed', e);
+            return c.json({ error: 'prediction-accuracy failed' }, 500);
           }
         });
 
