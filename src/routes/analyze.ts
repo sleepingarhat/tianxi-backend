@@ -712,7 +712,138 @@ async function raceDayReportIsSettled(db: D1Database, value: any): Promise<boole
     return { sinceDate, days, summary };
   }
 
-  
+  // === Stage: residual diagnostics =====================================
+  // 按班次／路程／場地狀況／賠率區間／馬場分組，找出系統性偏差（殘差）。
+  // 只讀 prediction_log（已對賬、actual_finish 非空）＋ races 場次資料。
+  function distanceBand(d: number | null | undefined): string {
+    const v = Number(d);
+    if (!Number.isFinite(v) || v <= 0) return '未知';
+    if (v <= 1200) return '≤1200米';
+    if (v <= 1400) return '1201-1400米';
+    if (v <= 1600) return '1401-1600米';
+    if (v <= 1800) return '1601-1800米';
+    return '>1800米';
+  }
+  function oddsBand(o: number | null | undefined): string {
+    const v = Number(o);
+    if (!Number.isFinite(v) || v <= 0) return '無賠率';
+    if (v <= 3) return '≤3.0 熱門';
+    if (v <= 6) return '3.1-6.0';
+    if (v <= 12) return '6.1-12';
+    if (v <= 25) return '12.1-25';
+    return '>25 大冷';
+  }
+  function classBand(s: string | null | undefined): string {
+    const v = String(s ?? '').trim();
+    if (!v) return '未知';
+    if (/Group|G1|G2|G3|級/i.test(v)) return '分級賽';
+    if (/Griffin|新馬/i.test(v)) return '新馬賽';
+    const m = v.match(/[1-5]/);
+    return m ? `第${({ '1': '一', '2': '二', '3': '三', '4': '四', '5': '五' } as Record<string, string>)[m[0]]}班` : v.substring(0, 12);
+  }
+
+  export async function summarizeResiduals(db: D1Database, days: number = 365): Promise<any> {
+    await ensurePredictionLogTable(db);
+    const sinceDate = new Date(Date.now() - days * 86400000).toISOString().substring(0, 10);
+    const { results } = await db.prepare(
+      `SELECT pl.date, pl.race_number, pl.p_win, pl.p_top3, pl.predicted_rank,
+              pl.actual_finish, pl.actual_win_odds,
+              r.distance, r.going, r.class AS race_class, rm.venue
+       FROM prediction_log pl
+       JOIN race_meetings rm ON rm.date = pl.date AND rm.venue IN ('ST','HV')
+       JOIN races r ON r.meeting_id = rm.id AND r.race_number = pl.race_number
+       WHERE pl.date >= ? AND pl.actual_finish IS NOT NULL AND pl.variant = 'baseline'`
+    ).bind(sinceDate).all<any>().catch(() => ({ results: [] as any[] }));
+    const rows = results ?? [];
+
+    type Acc = {
+      key: string; horses: number; races: Set<string>;
+      predSum: number; predN: number; wins: number;
+      brier: number; brierN: number;
+      top1Picks: number; top1Hits: number;
+      top4Pred: number; top4Hits: number;
+      predTop3Sum: number; predTop3N: number; top3Actual: number;
+    };
+    const dims: Record<string, Map<string, Acc>> = {
+      class: new Map(), distance: new Map(), going: new Map(), oddsBand: new Map(), venue: new Map(),
+    };
+    const newAcc = (key: string): Acc => ({
+      key, horses: 0, races: new Set(), predSum: 0, predN: 0, wins: 0, brier: 0, brierN: 0,
+      top1Picks: 0, top1Hits: 0, top4Pred: 0, top4Hits: 0, predTop3Sum: 0, predTop3N: 0, top3Actual: 0,
+    });
+    const push = (dim: string, key: string, r: any) => {
+      const map = dims[dim]!;
+      if (!map.has(key)) map.set(key, newAcc(key));
+      const a = map.get(key)!;
+      a.horses++;
+      a.races.add(`${r.date}|${r.race_number}`);
+      const win = Number(r.actual_finish) === 1 ? 1 : 0;
+      const top3 = Number(r.actual_finish) <= 3 && Number(r.actual_finish) > 0 ? 1 : 0;
+      if (r.p_win != null) {
+        const p = Math.min(0.999, Math.max(0.001, Number(r.p_win)));
+        a.predSum += p; a.predN++; a.wins += win;
+        a.brier += (p - win) * (p - win); a.brierN++;
+      }
+      if (r.p_top3 != null) {
+        a.predTop3Sum += Math.min(0.999, Math.max(0.001, Number(r.p_top3)));
+        a.predTop3N++; a.top3Actual += top3;
+      }
+      if (Number(r.predicted_rank) === 1) { a.top1Picks++; if (win) a.top1Hits++; }
+      if (Number(r.predicted_rank) <= 4 && Number(r.predicted_rank) > 0) {
+        a.top4Pred++;
+        if (Number(r.actual_finish) <= 4 && Number(r.actual_finish) > 0) a.top4Hits++;
+      }
+    };
+    for (const r of rows) {
+      push('class', classBand(r.race_class), r);
+      push('distance', distanceBand(r.distance), r);
+      push('going', String(r.going ?? '未知').trim() || '未知', r);
+      push('oddsBand', oddsBand(r.actual_win_odds), r);
+      push('venue', r.venue === 'ST' ? '沙田' : r.venue === 'HV' ? '跑馬地' : '未知', r);
+    }
+    const r1 = (v: number) => Math.round(v * 1000) / 10;
+    const finish = (map: Map<string, Acc>) =>
+      Array.from(map.values())
+        .filter((a) => a.horses >= 10)
+        .map((a) => {
+          const pred = a.predN ? a.predSum / a.predN : null;
+          const actual = a.predN ? a.wins / a.predN : null;
+          const predT3 = a.predTop3N ? a.predTop3Sum / a.predTop3N : null;
+          const actT3 = a.predTop3N ? a.top3Actual / a.predTop3N : null;
+          const races = a.races.size;
+          return {
+            key: a.key,
+            horses: a.horses,
+            races,
+            predWinPct: pred != null ? r1(pred) : null,
+            actualWinPct: actual != null ? r1(actual) : null,
+            // 正數＝引擎低估（實際好過預測）；負數＝高估
+            biasWinPp: pred != null && actual != null ? Math.round((actual - pred) * 1000) / 10 : null,
+            predTop3Pct: predT3 != null ? r1(predT3) : null,
+            actualTop3Pct: actT3 != null ? r1(actT3) : null,
+            biasTop3Pp: predT3 != null && actT3 != null ? Math.round((actT3 - predT3) * 1000) / 10 : null,
+            brierWin: a.brierN ? Math.round((a.brier / a.brierN) * 10000) / 10000 : null,
+            bankerHitRate: a.top1Picks ? r1(a.top1Hits / a.top1Picks) : null,
+            top4AvgIntersect: races ? Math.round((a.top4Hits / races) * 100) / 100 : null,
+          };
+        })
+        .sort((x, y) => y.horses - x.horses);
+    const groups = {
+      class: finish(dims['class']!),
+      distance: finish(dims['distance']!),
+      going: finish(dims['going']!),
+      oddsBand: finish(dims['oddsBand']!),
+      venue: finish(dims['venue']!),
+    };
+    // 最大偏差（用 |biasTop3Pp| 排序，樣本 ≥ 60 匹先計）
+    const flagged = Object.entries(groups).flatMap(([dim, list]) =>
+      list.filter((g) => g.horses >= 60 && g.biasTop3Pp != null && Math.abs(g.biasTop3Pp) >= 5)
+        .map((g) => ({ dim, key: g.key, horses: g.horses, biasTop3Pp: g.biasTop3Pp, biasWinPp: g.biasWinPp })),
+    ).sort((a, b) => Math.abs(b.biasTop3Pp!) - Math.abs(a.biasTop3Pp!));
+    return { sinceDate, days, horses: rows.length, groups, flagged };
+  }
+
+
 
   // === New-horse ELO seed (Stage 8 data-completeness fix) ==============
   // When horse_elo_snapshots has no row (first-time runner / newly-imported),
@@ -3667,6 +3798,19 @@ analyzeRoutes.get('/factors', (c) => {
             return c.json({ error: 'prediction-accuracy failed' }, 500);
           }
         });
+
+        // GET /api/analyze/residuals?days=365 — 殘差診斷：按班次／路程／場地／賠率／馬場找系統性偏差
+        analyzeRoutes.get('/residuals', async (c) => {
+          try {
+            const days = Math.max(30, Math.min(1095, parseInt(c.req.query('days') || '365', 10) || 365));
+            return c.json(await summarizeResiduals(c.env.DB, days));
+          } catch (e) {
+            console.warn('residuals failed', e);
+            return c.json({ error: 'residuals failed' }, 500);
+          }
+        });
+
+
 
         // GET /api/analyze/calibration — 讀取現行機率校準
         // GET /api/analyze/calibration?days=365&fit=1[&apply=1] — 重新擬合（管理員）
