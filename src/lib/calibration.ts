@@ -102,9 +102,37 @@ export function scoreSamples(samples: Sample[]) {
   };
 }
 
+/**
+ * Odds bands for segmented calibration (Stage 5, 2026-09-11).
+ *
+ * Residual diagnostics showed the top-3 probability error is not uniform: the
+ * engine under-states favourites (odds <= 3.0 actual 70.8% vs stated 51.7%)
+ * and over-states big longshots. A single Platt curve cannot fix both, so we
+ * fit one curve per market band. This changes stated probabilities ONLY — the
+ * pick order comes from the model score, never from pTop3, so the engine
+ * keeps its "no odds weighting in the ranking" principle.
+ */
+export const ODDS_BANDS: { key: string; label: string; max: number }[] = [
+  { key: 'fav', label: '≤3.0', max: 3.0 },
+  { key: 'mid', label: '3.1–6.0', max: 6.0 },
+  { key: 'mid2', label: '6.1–12.0', max: 12.0 },
+  { key: 'out', label: '12.1–25.0', max: 25.0 },
+  { key: 'long', label: '>25.0', max: Infinity },
+];
+
+/** Band key for a win-odds value; null when odds are unknown/invalid. */
+export function bandForOdds(odds: unknown): string | null {
+  const o = typeof odds === 'number' ? odds : Number(odds);
+  if (!Number.isFinite(o) || o <= 1) return null;
+  for (const b of ODDS_BANDS) if (o <= b.max) return b.key;
+  return 'long';
+}
+
 export type StoredCalibration = {
   version: number;
   top3: PlattParams | null;
+  /** Per-odds-band Platt params; falls back to `top3` when a band is absent. */
+  bands?: Record<string, PlattParams | null> | null;
   win: PlattParams | null;
   fittedAt: string;
   days: number;
