@@ -75,6 +75,12 @@ FEATURE_COLS = [
       # names below as the control) BEFORE promoting to predict_upcoming.py.
       "layoff_band", "is_layoff55", "cb_starts", "cb_top3", "season_starts",
       "is_season_debut", "field_layoff_frac", "layoff_x_form",
+      # Stage 15 (NEW 2026-09-11 ⑨ non-odds explanation of the favourite bias):
+      # class fit (horse's own record at today's class + its usual class level),
+      # jockey/trainer 180-day rolling strike rate, and draw-position × trip.
+      # Control arm = --exclude these ten names.
+      "hc_starts", "hc_top3", "class_hist_avg", "class_step",
+      "jq_starts", "jq_top3", "tq_starts", "tq_top3", "draw_pct", "draw_x_dist",
       "is_sprint", "is_middle", "is_distance",
       "draw_x_sprint", "paceclash_x_distance",
       # Stage 10 (NEW v3.2 ④ pedigree): leak-safe target-encoded breeding signal.
@@ -261,6 +267,9 @@ def main() -> int:
             "lgb_top2_hit": bool(bool(lgb_top2_set & actual_top2)),
             "lgb_top3_hit": bool(bool(lgb_top3_set & actual_top3)),
             "lgb_top4_hit": bool(bool(lgb_top4_set & actual_top4)),
+            # 主指標：四揀平均中匹數 = |predicted top4 ∩ actual top4|
+            "lgb_top4_intersect": int(len(lgb_top4_set & actual_top4)),
+            "lgb_top3_intersect": int(len(lgb_top3_set & actual_top3)),
             "elo_top1_hit": None if elo_top1 is None else bool(elo_top1 == actual_top1),
             "elo_top3_hit": None if elo_top1 is None else bool(elo_top1 in actual_top3),
             "market_top1_hit": None if market_top1 is None else bool(market_top1 == actual_top1),
@@ -287,6 +296,10 @@ def main() -> int:
             "lgb_top2_hit_rate":    rate("lgb_top2_hit"),
             "lgb_top3_hit_rate":    rate("lgb_top3_hit"),
             "lgb_top4_hit_rate":    rate("lgb_top4_hit"),
+            "lgb_top4_intersect_avg": (
+                sum(r["lgb_top4_intersect"] for r in per_race) / len(per_race) if per_race else None),
+            "lgb_top3_intersect_avg": (
+                sum(r["lgb_top3_intersect"] for r in per_race) / len(per_race) if per_race else None),
             "elo_top1_hit_rate":    rate("elo_top1_hit"),
             "elo_top3_hit_rate":    rate("elo_top3_hit"),
             "market_top1_hit_rate": rate("market_top1_hit"),
