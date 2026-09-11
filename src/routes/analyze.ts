@@ -6,6 +6,7 @@ import { parseHkjcDividends, BOX_POOL_MAP } from '../lib/parse-dividends';
 import { computeRaceProbabilities, roundCoverage } from '../lib/pl-prob';
 import {
   applyPlatt, fitPlatt, scoreSamples, parseCalibration,
+  ODDS_BANDS, bandForOdds,
   type PlattParams, type Sample, type StoredCalibration,
 } from '../lib/calibration';
 import {
@@ -2784,20 +2785,27 @@ analyzeRoutes.get('/factors', (c) => {
     /** In-place: overwrite pTop3/pTop4 with calibrated values, keep raw copies. */
     export function applyProbCalibrationToPicks(picks: any[], calib: StoredCalibration | null): boolean {
       const t3 = calib?.top3 ?? null;
-      if (!t3 || !Array.isArray(picks) || !picks.length) return false;
+      const bands = calib?.bands ?? null;
+      if ((!t3 && !bands) || !Array.isArray(picks) || !picks.length) return false;
       for (const p of picks) {
         if (p == null) continue;
+        // Segmented calibration: pick the curve for this runner's market band
+        // and fall back to the global curve when that band was not fitted.
+        const bk = bands ? bandForOdds(p.winOdds ?? p.win_odds ?? null) : null;
+        const params: PlattParams | null = (bk && bands?.[bk]) ? bands[bk]! : t3;
+        if (!params) continue;
         if (p.pTop3 != null) {
           p.pTop3Raw = p.pTop3;
-          const cal = applyPlatt(p.pTop3, t3);
+          const cal = applyPlatt(p.pTop3, params);
           p.pTop3 = Math.round(Math.max(p.pWin ?? 0, cal) * 1000) / 1000;
         }
         if (p.pTop4 != null) {
           p.pTop4Raw = p.pTop4;
-          const cal4 = applyPlatt(p.pTop4, t3);
+          const cal4 = applyPlatt(p.pTop4, params);
           p.pTop4 = Math.round(Math.max(p.pTop3 ?? 0, cal4) * 1000) / 1000;
         }
         p.probCalibrated = true;
+        p.probCalibBand = bk ?? 'global';
       }
       return true;
     }
@@ -3828,7 +3836,7 @@ analyzeRoutes.get('/factors', (c) => {
             await ensurePredictionLogTable(db);
             const sinceDate = new Date(Date.now() - days * 86400000).toISOString().substring(0, 10);
             const { results } = await db.prepare(
-              `SELECT date, p_win, p_top3, is_hit_top1, is_hit_top3
+              `SELECT date, p_win, p_top3, actual_win_odds, is_hit_top1, is_hit_top3
                  FROM prediction_log
                 WHERE date >= ? AND actual_finish IS NOT NULL
                   AND (variant IS NULL OR variant = 'baseline')
@@ -3849,6 +3857,7 @@ analyzeRoutes.get('/factors', (c) => {
               return 1 / (1 + Math.exp(-raw));
             };
             const all: Sample[] = rows.map((r: any) => ({ p: rawTop3(Number(r.p_top3)), y: r.is_hit_top3 ? 1 : 0 }));
+
             const cut = Math.floor(all.length * 0.7);
             const trainRows = all.slice(0, cut);
             const holdRows = all.slice(cut);
@@ -3860,6 +3869,60 @@ analyzeRoutes.get('/factors', (c) => {
             // Gate: proper scores (Brier + log-loss) must improve on the
             // holdout, and binned ECE must not get materially worse (the bin
             // counts are small on a 30% holdout, so ECE is the noisy metric).
+            // ── Stage 5: segmented (per odds band) calibration ─────────────
+            // Fit one Platt curve per market band with the same time split and
+            // holdout gate. Only bands that improve BOTH Brier and log-loss on
+            // their own holdout are kept. Ranking is untouched.
+            const wantBands = c.req.query('bands') === '1';
+            const bandRows: Record<string, Sample[]> = {};
+            if (wantBands) {
+              for (const r of rows as any[]) {
+                const bk = bandForOdds(r.actual_win_odds);
+                if (!bk) continue;
+                (bandRows[bk] ||= []).push({ p: rawTop3(Number(r.p_top3)), y: r.is_hit_top3 ? 1 : 0 });
+              }
+            }
+            const bandReport: any[] = [];
+            const bandParams: Record<string, PlattParams | null> = {};
+            if (wantBands) {
+              for (const band of ODDS_BANDS) {
+                const set = bandRows[band.key] ?? [];
+                if (set.length < 200) {
+                  bandReport.push({ band: band.key, label: band.label, samples: set.length, kept: false, reason: 'insufficient samples' });
+                  continue;
+                }
+                const bCut = Math.floor(set.length * 0.7);
+                const bTrain = fitPlatt(set.slice(0, bCut));
+                const bFull = fitPlatt(set);
+                if (!bTrain || !bFull) {
+                  bandReport.push({ band: band.key, label: band.label, samples: set.length, kept: false, reason: 'fit failed' });
+                  continue;
+                }
+                const bHold = set.slice(bCut);
+                const bBefore = scoreSamples(bHold);
+                const bAfter = scoreSamples(bHold.map((x) => ({ p: applyPlatt(x.p, bTrain), y: x.y })));
+                // A band curve must beat the GLOBAL curve on its own holdout —
+                // beating raw probabilities is not enough, the global curve is
+                // already live. Reject degenerate slopes (near-flat or blown
+                // up) which just print a constant probability.
+                const bGlobal = scoreSamples(bHold.map((x) => ({ p: applyPlatt(x.p, trainFit), y: x.y })));
+                const sane = bTrain.a >= 0.1 && bTrain.a <= 3 && bFull.a >= 0.1 && bFull.a <= 3 &&
+                  Math.abs(bTrain.b) <= 5 && Math.abs(bFull.b) <= 5;
+                const bOk = sane &&
+                  bGlobal.brier != null && bAfter.brier != null &&
+                  bGlobal.logLoss != null && bAfter.logLoss != null &&
+                  bAfter.brier <= bGlobal.brier - 1e-6 &&
+                  bAfter.logLoss <= bGlobal.logLoss - 1e-6;
+                if (bOk) bandParams[band.key] = bFull;
+                bandReport.push({
+                  band: band.key, label: band.label, samples: set.length,
+                  trainFit: bTrain, fullFit: bFull,
+                  holdoutBefore: bBefore, holdoutGlobal: bGlobal, holdoutAfter: bAfter, sane, kept: bOk,
+                });
+              }
+            }
+            const bandsKept = Object.keys(bandParams).length;
+
             const improved =
               before.brier != null && after.brier != null &&
               before.logLoss != null && after.logLoss != null &&
@@ -3869,15 +3932,17 @@ analyzeRoutes.get('/factors', (c) => {
               after.ece <= before.ece * 1.1;
 
             let stored: StoredCalibration | null = current;
-            if (apply && improved) {
+            if (apply && (improved || bandsKept > 0)) {
               stored = {
                 version: (current?.version ?? 0) + 1,
-                top3: fullFit as PlattParams,
+                top3: improved ? (fullFit as PlattParams) : (current?.top3 ?? null),
+                bands: bandsKept > 0 ? bandParams : (current?.bands ?? null),
                 win: null,
                 fittedAt: new Date().toISOString(),
                 days,
                 samples: all.length,
                 holdout: { before, after },
+                ...(bandsKept > 0 ? { bandHoldout: bandReport } as any : {}),
               };
               await db.prepare(
                 `INSERT INTO app_settings (key, value, updated_at) VALUES ('prob_calibration', ?, datetime('now'))
@@ -3890,7 +3955,9 @@ analyzeRoutes.get('/factors', (c) => {
               trainFit, fullFit,
               holdoutBefore: before, holdoutAfter: after,
               improved,
-              applied: apply && improved,
+              bands: wantBands ? bandReport : undefined,
+              bandsKept,
+              applied: apply && (improved || bandsKept > 0),
               current: stored,
             });
           } catch (e) {
