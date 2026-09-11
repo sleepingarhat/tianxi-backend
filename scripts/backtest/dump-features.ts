@@ -795,6 +795,45 @@
     return out;
   }
 
+  // ── Stage 15 (NEW 2026-09-11 ⑨ non-odds "why favourites are strong"): ────
+  // Residual diagnostics (365d, 2194 runners) showed the engine under-states
+  // favourites by ~19pp in top-3 terms. Rather than feeding odds into the
+  // ranking (which would break the no-market-weight principle), these columns
+  // try to explain the same信息 with leak-safe non-odds signals:
+  //   class fit   — horse's own record at TODAY's class + its usual class level
+  //   J/T quality — jockey / trainer rolling 180-day strike rate (form, not fame)
+  //   draw × dist — relative draw position interacted with trip length
+  const qHorseClassHistory = db.prepare(`
+    SELECT r.class AS cls, rr.finishing_position AS pos
+      FROM race_results rr
+      JOIN races r ON r.id = rr.race_id
+      JOIN race_meetings rm ON rm.id = r.meeting_id
+     WHERE rr.horse_id = ? AND rm.date < ?
+       AND rr.finishing_position > 0 AND rr.finishing_position < 99`);
+  const qJockeyRecent = db.prepare(`
+    SELECT COUNT(*) AS starts,
+           SUM(CASE WHEN rr.finishing_position BETWEEN 1 AND 3 THEN 1 ELSE 0 END) AS top3
+      FROM race_results rr
+      JOIN races r ON r.id = rr.race_id
+      JOIN race_meetings rm ON rm.id = r.meeting_id
+     WHERE rr.jockey_id = ? AND rm.date < ? AND rm.date >= ?
+       AND rr.finishing_position > 0 AND rr.finishing_position < 99`);
+  const qTrainerRecent = db.prepare(`
+    SELECT COUNT(*) AS starts,
+           SUM(CASE WHEN rr.finishing_position BETWEEN 1 AND 3 THEN 1 ELSE 0 END) AS top3
+      FROM race_results rr
+      JOIN races r ON r.id = rr.race_id
+      JOIN race_meetings rm ON rm.id = r.meeting_id
+     WHERE rr.trainer_id = ? AND rm.date < ? AND rm.date >= ?
+       AND rr.finishing_position > 0 AND rr.finishing_position < 99`);
+  const jqMemo = new Map<string, { starts: number; top3: number }>();
+  const tqMemo = new Map<string, { starts: number; top3: number }>();
+  function daysBefore(date: string, days: number): string {
+    const d = new Date(date + 'T00:00:00Z');
+    d.setUTCDate(d.getUTCDate() - days);
+    return d.toISOString().slice(0, 10);
+  }
+
   const HEADER = [
       'race_id','race_date','venue','race_no','distance','going','field_size',
       'horse_id','jockey_id','trainer_id','draw','actual_weight','win_odds',
@@ -842,6 +881,14 @@
       // gap band with recency-weighted form.
       'layoff_band','is_layoff55','cb_starts','cb_top3','season_starts',
       'is_season_debut','field_layoff_frac','layoff_x_form',
+      // Stage 15 (NEW 2026-09-11 ⑨): class fit + jockey/trainer rolling quality
+      // + draw×distance. hc_* = horse's record at today's class (smoothed);
+      // class_hist_avg = mean class number of its past starts (lower = better
+      // company), class_step = class_hist_avg - class_now_num (>0 = dropping in
+      // class today); jq_/tq_* = 180-day rolling strike rate; draw_pct =
+      // draw / field_size; draw_x_dist = draw_pct × distance/1000.
+      'hc_starts','hc_top3','class_hist_avg','class_step',
+      'jq_starts','jq_top3','tq_starts','tq_top3','draw_pct','draw_x_dist',
       'finishing_position','is_top1','is_top3',
     ];
   writeFileSync(OUT, HEADER.join(',') + '\n');
@@ -1076,6 +1123,46 @@
       if (isLayoff55) layoff55N++;
       if (isSeasonDebut) seasonDebutN++;
 
+      // Stage 15 (NEW): class fit + J/T rolling quality + draw × distance
+      let hcStarts = 0, hcTop3num = 0, clsSum = 0, clsN = 0;
+      for (const h of qHorseClassHistory.all(r.horse_id, meta.date) as { cls: string | null; pos: number }[]) {
+        const cn = classToNum(h.cls);
+        if (cn == null) continue;
+        clsSum += cn; clsN++;
+        if (classNowNum != null && cn === classNowNum) {
+          hcStarts++;
+          if (h.pos >= 1 && h.pos <= 3) hcTop3num++;
+        }
+      }
+      const hcTop3 = hcStarts > 0 ? smoothRate(hcStarts, hcTop3num) : -1;
+      const classHistAvg = clsN > 0 ? Math.round((clsSum / clsN) * 100) / 100 : -1;
+      const classStep = (clsN > 0 && classNowNum != null) ? Math.round((clsSum / clsN - classNowNum) * 100) / 100 : 0;
+      const q180 = daysBefore(meta.date, 180);
+      let jq = { starts: 0, top3: -1 };
+      if (r.jockey_id) {
+        const k = r.jockey_id + '|' + meta.date;
+        let v = jqMemo.get(k);
+        if (v === undefined) {
+          const a = qJockeyRecent.get(r.jockey_id, meta.date, q180) as { starts: number; top3: number | null };
+          v = { starts: a?.starts ?? 0, top3: (a?.starts ?? 0) > 0 ? smoothRate(a.starts, a.top3 ?? 0) : -1 };
+          jqMemo.set(k, v);
+        }
+        jq = v;
+      }
+      let tq = { starts: 0, top3: -1 };
+      if (r.trainer_id) {
+        const k = r.trainer_id + '|' + meta.date;
+        let v = tqMemo.get(k);
+        if (v === undefined) {
+          const a = qTrainerRecent.get(r.trainer_id, meta.date, q180) as { starts: number; top3: number | null };
+          v = { starts: a?.starts ?? 0, top3: (a?.starts ?? 0) > 0 ? smoothRate(a.starts, a.top3 ?? 0) : -1 };
+          tqMemo.set(k, v);
+        }
+        tq = v;
+      }
+      const drawPct = (r.draw != null && fieldSize > 0) ? Math.round((r.draw / fieldSize) * 1000) / 1000 : -1;
+      const drawXDist = drawPct >= 0 && dist > 0 ? Math.round(drawPct * (dist / 1000) * 1000) / 1000 : -1;
+
       const row = [
           meta.id, meta.date, meta.venue, meta.race_number, meta.distance, meta.going, fieldSize,
           r.horse_id, r.jockey_id, r.trainer_id, r.draw, r.actual_weight, r.win_odds,
@@ -1099,6 +1186,8 @@
           cmt.n, cmt.trouble, cmt.wide, cmt.badstart,
           layoffBandV, isLayoff55, cbStarts, cbTop3, seasonStarts,
           isSeasonDebut, Math.round(fieldLayoffFrac * 1000) / 1000, layoffXForm,
+          hcStarts, hcTop3, classHistAvg, classStep,
+          jq.starts, jq.top3, tq.starts, tq.top3, drawPct, drawXDist,
           r.finishing_position,
           r.horse_id === top1Id ? 1 : 0,
           top3Set.has(r.horse_id) ? 1 : 0,
