@@ -139,7 +139,7 @@ jobs:
           python scripts/backtest/predict_backfill.py \
             --features=features.csv \
             --dates="$DATES" \
-            --admin-url=https://tianxi.racing/admin/api/lgb-predictions \
+            --admin-url=https://tianxi-backend.tianxi-entertainment.workers.dev/admin/api/lgb-predictions \
             --token="$ADMIN_TOKEN" \
             --model-version="$MODEL_VER" \
             | tee backfill.log
