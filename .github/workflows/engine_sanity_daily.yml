@@ -88,7 +88,11 @@ jobs:
             'label': '休季中' if os.environ.get('SEASON') == 'off_season' else os.environ.get('SEASON') or '未知',
           }
           try:
-            with urllib.request.urlopen('https://tianxi-backend.tianxi-entertainment.workers.dev/api/season', timeout=20) as r:
+            req = urllib.request.Request(
+              'https://tianxi-backend.tianxi-entertainment.workers.dev/api/season',
+              headers={'User-Agent': 'tianxi-engine-sanity/1.0', 'Accept': 'application/json'},
+            )
+            with urllib.request.urlopen(req, timeout=20) as r:
               raw = json.loads(r.read().decode())
             season = {
               'status': raw.get('status') or season['status'],
@@ -166,5 +170,10 @@ jobs:
             echo "No change — skipping commit"
           else
             git commit -m "[sanity][skip ci] engine health $(TZ=Asia/Hong_Kong date +%Y-%m-%dT%H:%M)"
-            git push origin HEAD:main
+            # main may have moved while this job ran; rebase before pushing.
+            for attempt in 1 2 3; do
+              git pull --rebase --autostash origin main && git push origin HEAD:main && break
+              echo "push attempt $attempt failed; retrying"
+              sleep 5
+            done
           fi
