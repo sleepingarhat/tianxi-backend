@@ -105,9 +105,15 @@ jobs:
         id: featsig
         run: |
           FEAT_HASH=$(sha256sum tianxi-backend/scripts/backtest/dump-features.ts | cut -c1-12)
-          FKEY="lgb-feat-${{ steps.sig.outputs.key }}-${FEAT_HASH}"
-          echo "key=$FKEY" >> $GITHUB_OUTPUT
-          echo "Feature cache key: $FKEY"
+          DATA_SHA=$(cd hkjc-data && git rev-parse HEAD)
+          SCRIPTS_HASH=$(echo "${{ steps.sig.outputs.key }}" | awk -F- '{print $NF}')
+          # Feature-hash FIRST so restore-keys can fall back to yesterday's
+          # features.csv (same columns, same ingest scripts, older data) and we
+          # only dump the missing tail instead of ~2h of full history.
+          PREFIX="lgb-feat-${FEAT_HASH}-${SCRIPTS_HASH}-"
+          echo "prefix=$PREFIX" >> $GITHUB_OUTPUT
+          echo "key=${PREFIX}${DATA_SHA:0:12}" >> $GITHUB_OUTPUT
+          echo "Feature cache key: ${PREFIX}${DATA_SHA:0:12}"
 
       - name: Restore bulk-local.db cache
         id: db-cache
@@ -176,6 +182,8 @@ jobs:
         with:
           path: tianxi-backend/features.csv
           key: ${{ steps.featsig.outputs.key }}
+          restore-keys: |
+            ${{ steps.featsig.outputs.prefix }}
 
       - name: Dump training features (full history)
         # SPEED: the full-history dump (2016→yesterday, ~98k rows incl the
@@ -187,10 +195,45 @@ jobs:
         working-directory: tianxi-backend
         run: |
           YESTERDAY=$(date -u -d 'yesterday' +%Y-%m-%d)
-          npx tsx scripts/backtest/dump-features.ts \
-            --db=bulk-local.db \
-            --from=2016-09-01 --to=$YESTERDAY \
-            --out=features.csv
+          # INCREMENTAL PATH: an older features.csv restored via restore-keys
+          # (same feature logic + same ingest scripts, older data snapshot) only
+          # needs the days after its last race_date appended. Full dump is the
+          # fallback when there is no partial hit or the header changed.
+          INCREMENTAL=false
+          if [ -f features.csv ]; then
+            rm -f /tmp/feat-header.csv
+            npx tsx scripts/backtest/dump-features.ts \
+              --db=bulk-local.db --from=2099-01-01 --to=2099-01-02 \
+              --out=/tmp/feat-header.csv >/dev/null 2>&1 || true
+            EXPECTED_HEADER=$(head -1 /tmp/feat-header.csv 2>/dev/null || true)
+            CACHED_HEADER=$(head -1 features.csv)
+            LAST_DATE=$(tail -n +2 features.csv | cut -d, -f2 | sort | tail -1)
+            if [ -n "$EXPECTED_HEADER" ] && [ "$EXPECTED_HEADER" = "$CACHED_HEADER" ] && [ -n "$LAST_DATE" ]; then
+              FROM_INC=$(date -u -d "$LAST_DATE +1 day" +%Y-%m-%d)
+              if [ "$FROM_INC" \> "$YESTERDAY" ]; then
+                echo "cached features already cover through $LAST_DATE — nothing to append"
+                INCREMENTAL=true
+              else
+                echo "incremental dump $FROM_INC .. $YESTERDAY (cached through $LAST_DATE)"
+                npx tsx scripts/backtest/dump-features.ts \
+                  --db=bulk-local.db \
+                  --from=$FROM_INC --to=$YESTERDAY \
+                  --out=features-inc.csv
+                tail -n +2 features-inc.csv >> features.csv
+                rm -f features-inc.csv
+                INCREMENTAL=true
+              fi
+            else
+              echo "cached features unusable (header changed or empty) — full rebuild"
+              rm -f features.csv
+            fi
+          fi
+          if [ "$INCREMENTAL" != 'true' ]; then
+            npx tsx scripts/backtest/dump-features.ts \
+              --db=bulk-local.db \
+              --from=2016-09-01 --to=$YESTERDAY \
+              --out=features.csv
+          fi
           echo "training rows: $(wc -l < features.csv)"
 
       - name: Save features.csv cache
