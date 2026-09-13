@@ -280,8 +280,19 @@ jobs:
             --admin-url=https://tianxi-backend.tianxi-entertainment.workers.dev/admin/api/lgb-predictions \
             --token="$ADMIN_TOKEN" \
             --model-version="$MODEL_VER" \
+            --save-bundle=model-bundle \
             --auto-alpha \
             --alpha-pass=0.88
+
+      # 2026-09-13 韌性：把今次嘅生產模型（booster + τ/α + FEAT_COLS）凍結入
+      # cache，供 lgb_fast_predict.yml 喺重訓失敗／未跑完時「用昨日模型」頂住，
+      # 而唔係全站退回 ELO 基準（紅燈初稿）。
+      - name: Save model bundle cache (carry-over fallback)
+        if: always() && hashFiles('tianxi-backend/model-bundle/model.txt') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: tianxi-backend/model-bundle
+          key: lgb-model-v1-${{ github.run_id }}
 
       - name: Upload artifacts
         if: always()
