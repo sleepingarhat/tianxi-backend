@@ -31,7 +31,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           WORKER: https://tianxi-backend.tianxi-entertainment.workers.dev
-          ADMIN_TOKEN: ${{ secrets.TIANXI_ADMIN_TOKEN }}
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
         run: |
           python3 - <<'PY'
           import json, os, urllib.request, urllib.error
