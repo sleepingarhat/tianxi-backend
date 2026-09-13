@@ -4,6 +4,7 @@ import { generateAnalysisSummary } from '../services/ai';
 import { fetchLatestWinOddsByRace, attachMarketBlend, MARKET_BLEND_BETA, normHorseKey } from '../lib/market-blend';
 import { parseHkjcDividends, BOX_POOL_MAP } from '../lib/parse-dividends';
 import { computeRaceProbabilities, roundCoverage } from '../lib/pl-prob';
+import { hhmmFromPostTime, fetchPostTimeMap } from '../lib/race-time';
 import {
   applyPlatt, fitPlatt, scoreSamples, parseCalibration,
   ODDS_BANDS, bandForOdds,
@@ -2951,9 +2952,13 @@ analyzeRoutes.get('/factors', (c) => {
           batchJtComboFit(db, entries, targetDate),
         ]);
         const { results: racesFromDB } = await db.prepare(
-          `SELECT race_number, id, title, going FROM races WHERE meeting_id = ? ORDER BY race_number`
+          `SELECT race_number, id, title, going, start_time FROM races WHERE meeting_id = ? ORDER BY race_number`
         ).bind(meeting.id).all<any>().catch(() => ({ results: [] as any[] }));
         const racesDBMap = new Map((racesFromDB ?? []).map((r: any) => [r.race_number, r]));
+        // 2026-09-13：狀態燈需要開跑時間才能計「開跑前 30 分鐘鎖定」。
+        // entries_upcoming.post_time 係唯一權威來源（賽後仍保留），欠缺時退回
+        // races.start_time，兩者皆無則 startTime = null（前端顯示「仍會更新」）。
+        const ptMapForStatus = await fetchPostTimeMap(db, targetDate, meeting.venue).catch(() => new Map<number, string>());
         const raceMap = new Map<number, any[]>();
         for (const e of entries) { const rn = e.race_number ?? 0; if (!raceMap.has(rn)) raceMap.set(rn, []); raceMap.get(rn)!.push(e); }
         const raceNumbers = Array.from(raceMap.keys()).sort((a, b) => a - b);
@@ -3018,7 +3023,7 @@ analyzeRoutes.get('/factors', (c) => {
           picks.sort((a: any, b: any) => b.pWin - a.pWin);
           picks.forEach((p: any, i: number) => { p.rank = i + 1; });
           const _txTotal = (enriched as any[]).length;
-          return { raceId, lgbLookupRaceId, raceNumber: raceNum, title: raceTitle, class: raceClass, distance: raceDistance, going: raceGoing, track: raceTrack, course: raceCourse, picks, scoreSource: raceHasLgb ? `tx-oracle-v3 (lgb=${lgbHits}/${_txTotal}, α=${effectiveAlpha.toFixed(2)})` : 'elo+factor', lgbCoverage: { hits: lgbHits, total: _txTotal, applied: raceHasLgb }, lgbModelVersion: lgbModelVerForRace, ensembleAlpha: effectiveAlpha, expectedBoxCoverage: roundCoverage(_prob.coverage), probabilityModel: _prob.model };
+          return { raceId, lgbLookupRaceId, raceNumber: raceNum, startTime: hhmmFromPostTime(ptMapForStatus.get(raceNum)) ?? raceDB?.start_time ?? null, title: raceTitle, class: raceClass, distance: raceDistance, going: raceGoing, track: raceTrack, course: raceCourse, picks, scoreSource: raceHasLgb ? `tx-oracle-v3 (lgb=${lgbHits}/${_txTotal}, α=${effectiveAlpha.toFixed(2)})` : 'elo+factor', lgbCoverage: { hits: lgbHits, total: _txTotal, applied: raceHasLgb }, lgbModelVersion: lgbModelVerForRace, ensembleAlpha: effectiveAlpha, expectedBoxCoverage: roundCoverage(_prob.coverage), probabilityModel: _prob.model };
         });
         attachRaceQuality(racePredictions);
         const _calib = await getProbCalibration(db);
@@ -3138,9 +3143,13 @@ analyzeRoutes.get('/factors', (c) => {
           batchJtComboFit(db, entries, targetDate),
         ]);
         const { results: racesFromDB } = await db.prepare(
-          `SELECT race_number, id, title, going FROM races WHERE meeting_id = ? ORDER BY race_number`
+          `SELECT race_number, id, title, going, start_time FROM races WHERE meeting_id = ? ORDER BY race_number`
         ).bind(meeting.id).all<any>().catch(() => ({ results: [] as any[] }));
         const racesDBMap = new Map((racesFromDB ?? []).map((r: any) => [r.race_number, r]));
+        // 2026-09-13：狀態燈需要開跑時間才能計「開跑前 30 分鐘鎖定」。
+        // entries_upcoming.post_time 係唯一權威來源（賽後仍保留），欠缺時退回
+        // races.start_time，兩者皆無則 startTime = null（前端顯示「仍會更新」）。
+        const ptMapForStatus = await fetchPostTimeMap(db, targetDate, meeting.venue).catch(() => new Map<number, string>());
         const raceMap = new Map<number, any[]>();
         for (const e of entries) { const rn = e.race_number ?? 0; if (!raceMap.has(rn)) raceMap.set(rn, []); raceMap.get(rn)!.push(e); }
         const raceNumbers = Array.from(raceMap.keys()).sort((a, b) => a - b);
@@ -3229,7 +3238,7 @@ analyzeRoutes.get('/factors', (c) => {
           const _mbOdds = liveWinOddsByRace.get(raceNum) ?? null;
           const _mb = attachMarketBlend(picks, _mbOdds?.odds ?? null);
           const _txTotal2 = (enriched as any[]).length;
-          return { raceId, lgbLookupRaceId, raceNumber: raceNum, title: raceTitle, class: raceClass, distance: raceDistance, going: raceGoing, track: raceTrack, course: raceCourse, picks, scoreSource: raceHasLgb ? `tx-oracle-v3 (lgb=${lgbHits}/${_txTotal2}, α=${todayPicksAlpha.toFixed(2)})` : 'elo+factor', lgbCoverage: { hits: lgbHits, total: _txTotal2, applied: raceHasLgb }, lgbModelVersion: lgbModelVerForRace, ensembleAlpha: todayPicksAlpha, marketReady: _mb.marketReady, oddsSnapshotAt: _mbOdds?.snapshotAt ?? null, marketBeta: MARKET_BLEND_BETA, expectedBoxCoverage: roundCoverage(_prob.coverage), probabilityModel: _prob.model };
+          return { raceId, lgbLookupRaceId, raceNumber: raceNum, startTime: hhmmFromPostTime(ptMapForStatus.get(raceNum)) ?? raceDB?.start_time ?? null, title: raceTitle, class: raceClass, distance: raceDistance, going: raceGoing, track: raceTrack, course: raceCourse, picks, scoreSource: raceHasLgb ? `tx-oracle-v3 (lgb=${lgbHits}/${_txTotal2}, α=${todayPicksAlpha.toFixed(2)})` : 'elo+factor', lgbCoverage: { hits: lgbHits, total: _txTotal2, applied: raceHasLgb }, lgbModelVersion: lgbModelVerForRace, ensembleAlpha: todayPicksAlpha, marketReady: _mb.marketReady, oddsSnapshotAt: _mbOdds?.snapshotAt ?? null, marketBeta: MARKET_BLEND_BETA, expectedBoxCoverage: roundCoverage(_prob.coverage), probabilityModel: _prob.model };
         });
         attachRaceQuality(racePredictions);
         const _calibToday = await getProbCalibration(db);
