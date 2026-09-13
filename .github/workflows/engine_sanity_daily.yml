@@ -57,7 +57,7 @@ jobs:
           {
             echo "# TX-Oracle Engine Sanity Report"
             echo ""
-            echo "_Generated $NOW (HK today = $TODAY_HK) · season=$SEASON_"
+            echo "_Generated $NOW (HK today = $TODAY_HK) · season=${SEASON}_"
             echo ""
             echo "This file is written by \`engine_sanity_daily.yml\`."
             echo ""
