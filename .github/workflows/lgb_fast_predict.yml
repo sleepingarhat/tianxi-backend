@@ -1,0 +1,204 @@
+name: LGB Fast Predict (carry-over self-heal)
+
+# 2026-09-13 韌性層：「壞咗都照有貨」。
+#
+# lgb_predict_upcoming.yml 每晚重訓完會把生產模型（booster + τ_lgb/τ_elo/α +
+# FEAT_COLS）凍結入 cache key `lgb-model-v1-*`。本流程唔重訓，只做：
+#   1. 查今日 today-picks 覆蓋率；全部場次都有模型分數 → 即刻收工（唔浪費 CI）。
+#   2. 有場次零覆蓋 → 還原最近一份模型 bundle ＋最近一份 bulk-local.db，
+#      只 dump 今日出賽馬嘅特徵（分鐘級，唔係全史 2 小時），用舊模型評分後上傳。
+#
+# 效果：單一夜間重訓失敗唔會再令全站退回 ELO 基準（紅燈初稿）。上傳嘅
+# modelVersion 保留原本訓練日期並加 `+carry` 後綴，前端狀態燈據此顯示
+# 「用昨日模型」，唔會當成當日新鮮模型。
+#
+# 已鎖定（開跑前 30 分鐘）嘅場次由 prediction_log 凍結層保護，本流程覆寫
+# lgb_predictions 唔會改動已凍結嘅公開預測。
+
+on:
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Run even when coverage looks complete'
+        required: false
+        default: 'false'
+  schedule:
+    # 每 30 分鐘，香港時間 06:00–18:30（賽馬日日間）。gate 步驟會即刻短路
+    # 非賽馬日同已有完整覆蓋嘅情況，所以平日成本接近零。
+    - cron: '*/30 22-23,0-10 * * *'
+
+concurrency:
+  group: lgb-fast-predict
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      need: ${{ steps.chk.outputs.need }}
+    steps:
+      - id: chk
+        name: Coverage gate (今日有無場次零模型覆蓋)
+        env:
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+        run: |
+          set -u
+          NEED=false
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force }}" = "true" ]; then
+            echo "::notice::forced run"
+            echo "need=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          curl -sf --max-time 60 -H "Authorization: Bearer $ADMIN_TOKEN" \
+            "https://tianxi-backend.tianxi-entertainment.workers.dev/api/analyze/today-picks" \
+            -o picks.json || { echo "::notice::today-picks unreachable — 唔跑（fail-closed，避免無謂重覆上傳）"; echo "need=false" >> "$GITHUB_OUTPUT"; exit 0; }
+          NEED=$(python3 - <<'PY'
+import json
+try:
+    d = json.load(open('picks.json'))
+except Exception:
+    print('false'); raise SystemExit(0)
+races = d.get('races') or []
+if not races:
+    print('false'); raise SystemExit(0)
+missing = [r for r in races
+           if int(((r.get('lgbCoverage') or {}).get('hits')) or 0) == 0]
+print('true' if missing else 'false')
+PY
+)
+          python3 - <<'PY'
+import json
+try:
+    d = json.load(open('picks.json'))
+except Exception:
+    raise SystemExit(0)
+races = d.get('races') or []
+hit = sum(1 for r in races if int(((r.get('lgbCoverage') or {}).get('hits')) or 0) > 0)
+print(f'coverage: {hit}/{len(races)} races  modelVersion={d.get("lgbModelVersion")}')
+PY
+          echo "need=$NEED"
+          echo "need=$NEED" >> "$GITHUB_OUTPUT"
+
+  carry:
+    needs: gate
+    if: needs.gate.outputs.need == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout backend
+        uses: actions/checkout@v4
+        with:
+          path: tianxi-backend
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: tianxi-backend/package-lock.json
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install backend deps
+        working-directory: tianxi-backend
+        run: npm ci
+
+      - name: Install python deps
+        run: pip install --quiet lightgbm pandas numpy scikit-learn scipy
+
+      # 只還原：唔會 rebuild。呢個流程嘅意義就係「快」，寧願報警都唔做 2 小時工。
+      - name: Restore most recent bulk-local.db
+        id: db-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: tianxi-backend/bulk-local.db
+          key: lgb-db-carry-miss
+          restore-keys: |
+            lgb-db-
+
+      - name: Restore most recent model bundle
+        id: model-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: tianxi-backend/model-bundle
+          key: lgb-model-carry-miss
+          restore-keys: |
+            lgb-model-v1-
+
+      - name: Guard — bundle and DB must both exist
+        working-directory: tianxi-backend
+        run: |
+          set -eu
+          OK=true
+          [ -f bulk-local.db ] || { echo "::error::冇 bulk-local.db cache 可還原 —— 等 lgb_predict_upcoming.yml 起底"; OK=false; }
+          [ -f model-bundle/model.txt ] || { echo "::error::冇模型 bundle 可還原 —— 需要至少成功跑過一次 lgb_predict_upcoming.yml"; OK=false; }
+          [ "$OK" = true ] || exit 1
+          cat model-bundle/meta.json | head -20
+          ls -lh bulk-local.db
+
+      - name: Fetch upcoming entries
+        env:
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+        working-directory: tianxi-backend
+        run: |
+          set -eu
+          FROM=$(date -u +%Y-%m-%d)
+          TO=$(date -u -d "+2 day" +%Y-%m-%d)
+          curl -fsSL -H "Authorization: Bearer $ADMIN_TOKEN" \
+            "https://tianxi-backend.tianxi-entertainment.workers.dev/admin/api/entries-upcoming-export?from=$FROM&to=$TO" \
+            -o upcoming-entries.json
+          echo "Entry count: $(jq '.count' upcoming-entries.json)"
+
+      - name: Dump features for upcoming entries
+        working-directory: tianxi-backend
+        run: |
+          npx tsx scripts/backtest/dump-features.ts \
+            --db=bulk-local.db \
+            --upcoming-json=upcoming-entries.json \
+            --out=upcoming-features.csv
+          echo "upcoming feature rows: $(wc -l < upcoming-features.csv)"
+
+      # 唔帶 --auto-alpha：α 由 bundle 帶落，唔可以用舊模型嘅表現去改動線上 α。
+      - name: Score with carried-over model
+        env:
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+        working-directory: tianxi-backend
+        run: |
+          python scripts/backtest/predict_upcoming.py \
+            --load-bundle=model-bundle \
+            --upcoming=upcoming-features.csv \
+            --admin-url=https://tianxi-backend.tianxi-entertainment.workers.dev/admin/api/lgb-predictions \
+            --token="$ADMIN_TOKEN"
+
+      - name: Verify coverage after carry
+        env:
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+        run: |
+          set -eu
+          sleep 5
+          curl -sf --max-time 60 -H "Authorization: Bearer $ADMIN_TOKEN" \
+            "https://tianxi-backend.tianxi-entertainment.workers.dev/api/analyze/today-picks?nocache=1" \
+            -o after.json || { echo "::warning::驗證讀取失敗"; exit 0; }
+          python3 - <<'PY'
+import json
+d = json.load(open('after.json'))
+races = d.get('races') or []
+hit = sum(1 for r in races if int(((r.get('lgbCoverage') or {}).get('hits')) or 0) > 0)
+print(f'after carry: {hit}/{len(races)} races covered, modelVersion={d.get("lgbModelVersion")}')
+if races and hit == 0:
+    raise SystemExit('::error::carry 後仍然零覆蓋 —— 檢查 race_id 對齊同 lgb_predictions 寫入')
+PY
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lgb-fast-predict
+          path: |
+            tianxi-backend/upcoming-entries.json
+            tianxi-backend/upcoming-features.csv
+            tianxi-backend/model-bundle/meta.json
+          if-no-files-found: warn
+          retention-days: 7
