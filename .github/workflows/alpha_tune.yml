@@ -53,7 +53,7 @@ jobs:
           APPLY_FLAG=""
           if [ "$APPLY" = "true" ]; then APPLY_FLAG="--apply"; fi
           python3 scripts/backtest/alpha_tune.py \
-            --base-url=https://tianxi.racing \
+            --base-url=https://tianxi-backend.tianxi-entertainment.workers.dev \
             --token="$ADMIN_TOKEN" \
             --days="$DAYS" \
             --alphas="$ALPHAS" \
