@@ -1,0 +1,159 @@
+name: Automation Watchdog — daily pipeline + coverage alarm
+
+# Why this exists: on 2026-09-10 the daily LGB predict workflow started failing
+# (admin API host went 404 after the tianxi.racing cutover) and nobody noticed
+# for four days — the site silently fell back to Elo baseline ("初稿" red light).
+# This watchdog fails loudly and opens/updates a GitHub issue when either
+#   (a) a critical workflow's latest run is failing or stale, or
+#   (b) today is a race day but today's picks carry zero LGB coverage.
+# Fail-open on network errors only; never fail-open on an explicit bad signal.
+
+on:
+  schedule:
+    # 05:10 UTC (13:10 HKT, after the 04:00 UTC retrain) and 23:10 UTC.
+    - cron: '10 5 * * *'
+    - cron: '10 23 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+  issues: write
+
+jobs:
+  watchdog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check pipelines and today's model coverage
+        id: chk
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          WORKER: https://tianxi-backend.tianxi-entertainment.workers.dev
+          ADMIN_TOKEN: ${{ secrets.TIANXI_ADMIN_TOKEN }}
+        run: |
+          python3 - <<'PY'
+          import json, os, urllib.request, urllib.error
+          from datetime import datetime, timezone, timedelta
+
+          GH = os.environ['GH_TOKEN']; REPO = os.environ['REPO']
+          WORKER = os.environ['WORKER'].rstrip('/')
+          TOKEN = os.environ.get('ADMIN_TOKEN') or ''
+          HKT = timezone(timedelta(hours=8))
+          now = datetime.now(timezone.utc)
+          problems, notes = [], []
+
+          def get(url, headers=None, timeout=30):
+              req = urllib.request.Request(url, headers=headers or {})
+              with urllib.request.urlopen(req, timeout=timeout) as r:
+                  return json.loads(r.read().decode())
+
+          # ── 1. critical workflows: latest run must be success and fresh ──
+          # name -> max age in hours before we call it stale
+          CRITICAL = {
+              'deploy.yml': None,                 # push-driven, freshness not checked
+              'lgb_predict_upcoming.yml': 30,
+              'capy_racecard.yml': 30,
+              'capy_results.yml': 30,
+              'engine_sanity_daily.yml': 30,
+          }
+          for wf, max_age in CRITICAL.items():
+              try:
+                  data = get(
+                      f'https://api.github.com/repos/{REPO}/actions/workflows/{wf}/runs?per_page=5',
+                      {'Authorization': f'Bearer {GH}', 'Accept': 'application/vnd.github+json'},
+                  )
+              except Exception as e:
+                  notes.append(f'{wf}: 查詢失敗（fail-open）：{e}')
+                  continue
+              runs = [r for r in data.get('workflow_runs', []) if r.get('status') == 'completed']
+              if not runs:
+                  notes.append(f'{wf}: 未有已完成紀錄')
+                  continue
+              last = runs[0]
+              if last.get('conclusion') != 'success':
+                  problems.append(
+                      f"{wf}: 最近一次執行 {last.get('conclusion')}"
+                      f"（{last.get('updated_at')}）{last.get('html_url')}"
+                  )
+                  continue
+              if max_age:
+                  age = (now - datetime.fromisoformat(last['updated_at'].replace('Z', '+00:00'))).total_seconds() / 3600
+                  if age > max_age:
+                      problems.append(f'{wf}: 最近一次成功已過 {age:.1f} 小時（上限 {max_age}）')
+
+          # ── 2. today's picks must carry LGB coverage on a race day ──
+          try:
+              headers = {'Accept': 'application/json'}
+              if TOKEN:
+                  headers['Authorization'] = f'Bearer {TOKEN}'
+              picks = get(f'{WORKER}/api/analyze/today-picks', headers)
+          except Exception as e:
+              notes.append(f'today-picks 查詢失敗（fail-open）：{e}')
+              picks = None
+
+          if isinstance(picks, dict):
+              races = picks.get('races') or []
+              if not races:
+                  notes.append('今日無場次（休賽日／未出排位）')
+              else:
+                  covered = 0
+                  for r in races:
+                      cov = r.get('lgbCoverage') or {}
+                      if (cov.get('hits') or 0) > 0:
+                          covered += 1
+                  ratio = covered / len(races)
+                  notes.append(f'今日模型覆蓋：{covered}/{len(races)} 場（{ratio:.0%}）')
+                  if covered == 0:
+                      problems.append(
+                          f'今日 {len(races)} 場全部零模型覆蓋 —— 全站會退回 Elo 基準（紅燈初稿）。'
+                          '檢查 lgb_predict_upcoming.yml 同 lgb_predictions 表。'
+                      )
+                  elif ratio < 0.5:
+                      problems.append(f'今日模型覆蓋只有 {covered}/{len(races)} 場（少於一半）。')
+
+          report_lines = ['## 自動化監測'] + [f'- {p}' for p in problems]
+          if notes:
+              report_lines += ['', '### 備註'] + [f'- {n}' for n in notes]
+          report = '\n'.join(report_lines)
+          print(report)
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
+              f.write(report + '\n')
+
+          # ── 3. open / update / close the alarm issue ──
+          TITLE = '[watchdog] 自動化管線異常'
+          def api(method, path, body=None):
+              req = urllib.request.Request(
+                  f'https://api.github.com/repos/{REPO}{path}',
+                  data=json.dumps(body).encode() if body is not None else None,
+                  headers={
+                      'Authorization': f'Bearer {GH}',
+                      'Accept': 'application/vnd.github+json',
+                      'Content-Type': 'application/json',
+                  },
+                  method=method,
+              )
+              with urllib.request.urlopen(req, timeout=30) as r:
+                  return json.loads(r.read().decode() or 'null')
+
+          try:
+              open_issues = api('GET', '/issues?state=open&per_page=100') or []
+              existing = next((i for i in open_issues if i.get('title') == TITLE), None)
+              stamp = datetime.now(HKT).strftime('%Y-%m-%d %H:%M HKT')
+              if problems:
+                  body = f'偵測時間：{stamp}\n\n{report}'
+                  if existing:
+                      api('POST', f"/issues/{existing['number']}/comments", {'body': body})
+                  else:
+                      api('POST', '/issues', {'title': TITLE, 'body': body})
+              elif existing:
+                  api('POST', f"/issues/{existing['number']}/comments",
+                      {'body': f'{stamp}：全部檢查通過，自動關閉。\n\n{report}'})
+                  api('PATCH', f"/issues/{existing['number']}", {'state': 'closed'})
+          except Exception as e:
+              print('issue update failed (non-fatal):', e)
+
+          if problems:
+              raise SystemExit(1)
+          PY
