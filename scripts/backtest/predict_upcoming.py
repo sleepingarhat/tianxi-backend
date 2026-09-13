@@ -237,12 +237,127 @@ def check_coverage(upc) -> tuple:
         return (True, f'coverage check skipped ({type(e).__name__})')
 
 
+# ══════════════════════════════════════════════════════════════════════
+# 上一版模型後備（carry-over bundle）
+# A bundle is a directory: model.txt (LightGBM text dump) + meta.json.
+# meta.json pins the FEATURE LIST alongside τ/α — loading refuses to score if
+# dump-features.ts has since changed columns, because a silent column shift
+# would be far worse than the ELO fallback it replaces.
+# ══════════════════════════════════════════════════════════════════════
+
+BUNDLE_SCHEMA = 1
+
+
+def save_bundle(dir_path: str, booster, model_version: str,
+                tau_lgb: float, tau_elo: float, alpha: float, diag: dict) -> None:
+    import os, datetime
+    os.makedirs(dir_path, exist_ok=True)
+    booster.save_model(os.path.join(dir_path, 'model.txt'))
+    meta = {
+        'schema': BUNDLE_SCHEMA,
+        'modelVersion': model_version,
+        'trainedOn': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d'),
+        'featCols': list(FEAT_COLS),
+        'tauLgb': float(tau_lgb),
+        'tauElo': float(tau_elo),
+        'alpha': float(alpha),
+        'bestIteration': int(diag.get('best_iteration') or 0),
+    }
+    with open(os.path.join(dir_path, 'meta.json'), 'w', encoding='utf-8') as fh:
+        json.dump(meta, fh, indent=2)
+    print(f'[predict] saved carry-over bundle to {dir_path} '
+          f'(trainedOn={meta["trainedOn"]}, α={alpha:.3f})', flush=True)
+
+
+def post_predictions(admin_url: str, token: str, payload: dict, dry: bool) -> int:
+    if dry:
+        print(json.dumps(payload, indent=2)[:3000])
+        return 0
+    data = json.dumps(payload).encode('utf-8')
+    req = urllib.request.Request(
+        admin_url, data=data, method='POST',
+        headers={'Authorization': f'Bearer {token}',
+                 'Content-Type': 'application/json',
+                 'User-Agent': 'tianxi-lgb-predict/2.0 (+github-actions)',
+                 'Accept': 'application/json'},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            body = resp.read().decode('utf-8')
+            print(f'[predict] POST {resp.status}: {body}', flush=True)
+            return 0 if resp.status < 300 else 2
+    except urllib.error.HTTPError as e:
+        print(f'[predict] POST failed: {e.code} {e.reason} — '
+              f'{e.read().decode("utf-8", "ignore")}', flush=True)
+        return 3
+
+
+def run_carry(args) -> int:
+    """Score upcoming entries with a previously frozen bundle. No training."""
+    import os
+    mdir = args.load_bundle
+    mpath, jpath = os.path.join(mdir, 'model.txt'), os.path.join(mdir, 'meta.json')
+    if not (os.path.exists(mpath) and os.path.exists(jpath)):
+        print(f'[carry] FATAL: no bundle at {mdir} (need model.txt + meta.json)', flush=True)
+        return 4
+    with open(jpath, encoding='utf-8') as fh:
+        meta = json.load(fh)
+    if int(meta.get('schema') or 0) != BUNDLE_SCHEMA:
+        print(f'[carry] FATAL: bundle schema {meta.get("schema")} != {BUNDLE_SCHEMA}', flush=True)
+        return 4
+    if list(meta.get('featCols') or []) != list(FEAT_COLS):
+        print('[carry] FATAL: bundle feature list differs from current FEAT_COLS — '
+              'refusing to score (a silent column shift is worse than the ELO fallback)',
+              flush=True)
+        return 4
+
+    upc = pd.read_csv(args.upcoming)
+    print(f'[carry] upcoming rows={len(upc)} races={upc["race_id"].nunique()}', flush=True)
+    if len(upc) == 0:
+        print('[carry] no upcoming entries; exiting cleanly', flush=True)
+        return 0
+
+    booster = lgb.Booster(model_file=mpath)
+    tau_lgb = float(meta['tauLgb'])
+    tau_elo = float(meta['tauElo'])
+    alpha = float(meta['alpha'])
+    trained_on = str(meta.get('trainedOn') or '')
+    print(f'[carry] bundle trainedOn={trained_on} version={meta.get("modelVersion")} '
+          f'τ_lgb={tau_lgb:.3f} τ_elo={tau_elo:.3f} α={alpha:.3f}', flush=True)
+
+    scores = booster.predict(upc[FEAT_COLS].fillna(-1.0).to_numpy())
+    rids = upc['race_id'].to_numpy()
+    baseline = standardize_per_race(upc['baseline_score'].fillna(0).to_numpy(), rids)
+    p_blended = (alpha * per_race_softmax(scores, rids, tau_lgb)
+                 + (1.0 - alpha) * per_race_softmax(baseline, rids, tau_elo))
+    upc['lgb_score'] = np.log(np.maximum(p_blended, 1e-12))
+    upc['p_win'] = p_blended
+
+    # Keep the ORIGINAL training date in the version string and mark it carried
+    # over, so the status light shows 用昨日模型 instead of pretending it is fresh.
+    version = f'{meta.get("modelVersion") or "lgb-ensemble"}+carry'
+    payload = {
+        'predictions': [
+            {'raceId': str(r['race_id']), 'horseId': str(r['horse_id']),
+             'lgbScore': float(r['lgb_score']), 'pWin': float(r['p_win'])}
+            for _, r in upc.iterrows()
+        ],
+        'modelVersion': version,
+        'diagnostics': {'carryOver': True, 'trainedOn': trained_on,
+                        'tau_lgb': tau_lgb, 'tau_elo': tau_elo, 'alpha': alpha},
+    }
+    print(f'[carry] payload: {len(payload["predictions"])} predictions across '
+          f'{upc["race_id"].nunique()} races, modelVersion={version}', flush=True)
+    return post_predictions(args.admin_url, args.token, payload, args.dry)
+
+
 def main() -> int:
     # Captured at run start; passed to set-alpha as &asof so a stale/parallel
     # run cannot clobber a newer α decision (later-initiated run wins).
     run_asof_ms = int(time.time() * 1000)
     ap = argparse.ArgumentParser()
-    ap.add_argument('--train', required=True)
+    ap.add_argument('--train', default='',
+                    help='Training features CSV. Not needed with --load-bundle.')
     ap.add_argument('--upcoming', required=True)
     ap.add_argument('--admin-url', required=True)
     ap.add_argument('--token', required=True)
@@ -274,7 +389,27 @@ def main() -> int:
     # bust the race-day report cache. URLs derived from --admin-url's base path.
     ap.add_argument('--auto-alpha', action='store_true')
     ap.add_argument('--alpha-pass', type=float, default=0.62)
+    # ── 2026-09-13 資料韌性：上一版模型後備（壞咗都照有貨）────────────────
+    # --save-bundle: after the production refit, freeze booster + τ_lgb/τ_elo/α
+    #   + FEAT_COLS + trainedOn into a directory the CI caches.
+    # --load-bundle: skip ALL training and score today's upcoming entries with
+    #   that frozen bundle. Used by lgb_fast_predict.yml when the nightly
+    #   retrain failed or has not finished — the site then serves yesterday's
+    #   MODEL against TODAY's as-of features instead of collapsing to the raw
+    #   ELO baseline (red 初稿). The posted modelVersion keeps the bundle's own
+    #   training date and gains a '+carry' suffix so analyze.ts/the status light
+    #   can label it 用昨日模型.
+    ap.add_argument('--save-bundle', default='',
+                    help='Directory to write model.txt + meta.json after the production refit.')
+    ap.add_argument('--load-bundle', default='',
+                    help='Directory holding model.txt + meta.json; skips training entirely.')
     args = ap.parse_args()
+
+    if args.load_bundle:
+        return run_carry(args)
+    if not args.train:
+        print('[predict] --train is required unless --load-bundle is given', flush=True)
+        return 2
 
     print(f'[predict] loading train={args.train}, upcoming={args.upcoming}', flush=True)
     train = pd.read_csv(args.train)
@@ -508,6 +643,14 @@ def main() -> int:
             params, lgb.Dataset(Xfull, label=yfull, group=grp_full),
             num_boost_round=int(best_iter),
         )
+
+    # ── Freeze the production model for the carry-over fallback ─────────
+    if args.save_bundle:
+        try:
+            save_bundle(args.save_bundle, booster, args.model_version,
+                        tau_lgb, tau_elo, alpha, diag)
+        except Exception as e:  # never fail the live run over the fallback copy
+            print(f'[predict] WARNING: could not save bundle: {e}', flush=True)
 
     # ── Predict upcoming ────────────────────────────────────────────────
     Xu = upc[FEAT_COLS].fillna(-1.0).to_numpy()
