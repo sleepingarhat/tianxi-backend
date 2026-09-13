@@ -210,7 +210,7 @@ jobs:
           TO=$(date -u -d "+${DAYS_AHEAD} day" +%Y-%m-%d)
           echo "Fetching entries $FROM .. $TO"
           curl -fsSL -H "Authorization: Bearer $ADMIN_TOKEN" \
-            "https://tianxi.racing/admin/api/entries-upcoming-export?from=$FROM&to=$TO" \
+            "https://tianxi-backend.tianxi-entertainment.workers.dev/admin/api/entries-upcoming-export?from=$FROM&to=$TO" \
             -o upcoming-entries.json
           echo "Entry count: $(jq '.count' upcoming-entries.json)"
           jq '.entries[0]' upcoming-entries.json || true
@@ -234,7 +234,7 @@ jobs:
           python scripts/backtest/predict_upcoming.py \
             --train=features.csv \
             --upcoming=upcoming-features.csv \
-            --admin-url=https://tianxi.racing/admin/api/lgb-predictions \
+            --admin-url=https://tianxi-backend.tianxi-entertainment.workers.dev/admin/api/lgb-predictions \
             --token="$ADMIN_TOKEN" \
             --model-version="$MODEL_VER" \
             --auto-alpha \
