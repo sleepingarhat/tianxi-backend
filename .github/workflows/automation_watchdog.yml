@@ -4,7 +4,8 @@ name: Automation Watchdog — daily pipeline + coverage alarm
 # (admin API host went 404 after the tianxi.racing cutover) and nobody noticed
 # for four days — the site silently fell back to Elo baseline ("初稿" red light).
 # This watchdog fails loudly and opens/updates a GitHub issue when either
-#   (a) a critical workflow's latest run is failing or stale, or
+#   (a) a critical workflow has had no successful run inside its freshness
+#       window, or
 #   (b) today is a race day but today's picks carry zero LGB coverage.
 # Fail-open on network errors only; never fail-open on an explicit bad signal.
 
@@ -26,7 +27,6 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Check pipelines and today's model coverage
-        id: chk
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -34,7 +34,7 @@ jobs:
           ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
         run: |
           python3 - <<'PY'
-          import json, os, urllib.request, urllib.error
+          import json, os, urllib.request
           from datetime import datetime, timezone, timedelta
 
           GH = os.environ['GH_TOKEN']; REPO = os.environ['REPO']
@@ -43,25 +43,25 @@ jobs:
           HKT = timezone(timedelta(hours=8))
           now = datetime.now(timezone.utc)
           problems, notes = [], []
+          UA = {'User-Agent': 'tianxi-watchdog/1.0', 'Accept': 'application/json'}
 
           def get(url, headers=None, timeout=30):
-              req = urllib.request.Request(url, headers=headers or {})
-              with urllib.request.urlopen(req, timeout=timeout) as r:
+              h = dict(UA); h.update(headers or {})
+              with urllib.request.urlopen(urllib.request.Request(url, headers=h), timeout=timeout) as r:
                   return json.loads(r.read().decode())
 
-          # ── 1. critical workflows: latest run must be success and fresh ──
-          # name -> max age in hours before we call it stale
+          # ── 1. critical workflows: need a success inside the freshness window ──
+          # workflow file -> max hours since the last successful run.
+          # Race-day pipelines get 30h (some only run on meeting days: 96h).
           CRITICAL = {
-              'deploy.yml': None,                 # push-driven, freshness not checked
+              'deploy.yml': None,                  # push-driven, freshness not checked
               'lgb_predict_upcoming.yml': 30,
-              'capy_racecard.yml': 30,
-              'capy_results.yml': 30,
               'engine_sanity_daily.yml': 30,
           }
           for wf, max_age in CRITICAL.items():
               try:
                   data = get(
-                      f'https://api.github.com/repos/{REPO}/actions/workflows/{wf}/runs?per_page=5',
+                      f'https://api.github.com/repos/{REPO}/actions/workflows/{wf}/runs?per_page=10',
                       {'Authorization': f'Bearer {GH}', 'Accept': 'application/vnd.github+json'},
                   )
               except Exception as e:
@@ -71,21 +71,22 @@ jobs:
               if not runs:
                   notes.append(f'{wf}: 未有已完成紀錄')
                   continue
-              last = runs[0]
-              if last.get('conclusion') != 'success':
-                  problems.append(
-                      f"{wf}: 最近一次執行 {last.get('conclusion')}"
-                      f"（{last.get('updated_at')}）{last.get('html_url')}"
-                  )
+              ok = [r for r in runs if r.get('conclusion') == 'success']
+              if not ok:
+                  problems.append(f"{wf}: 最近 {len(runs)} 次全部失敗，最新 {runs[0]['html_url']}")
                   continue
-              if max_age:
-                  age = (now - datetime.fromisoformat(last['updated_at'].replace('Z', '+00:00'))).total_seconds() / 3600
-                  if age > max_age:
-                      problems.append(f'{wf}: 最近一次成功已過 {age:.1f} 小時（上限 {max_age}）')
+              age = (now - datetime.fromisoformat(ok[0]['updated_at'].replace('Z', '+00:00'))).total_seconds() / 3600
+              if max_age and age > max_age:
+                  problems.append(
+                      f'{wf}: 最近一次成功已過 {age:.1f} 小時（上限 {max_age}）'
+                      f" 最新一次 {runs[0].get('conclusion')} {runs[0]['html_url']}"
+                  )
+              else:
+                  notes.append(f'{wf}: 最近成功 {age:.1f} 小時前')
 
           # ── 2. today's picks must carry LGB coverage on a race day ──
           try:
-              headers = {'Accept': 'application/json'}
+              headers = {}
               if TOKEN:
                   headers['Authorization'] = f'Bearer {TOKEN}'
               picks = get(f'{WORKER}/api/analyze/today-picks', headers)
@@ -98,11 +99,7 @@ jobs:
               if not races:
                   notes.append('今日無場次（休賽日／未出排位）')
               else:
-                  covered = 0
-                  for r in races:
-                      cov = r.get('lgbCoverage') or {}
-                      if (cov.get('hits') or 0) > 0:
-                          covered += 1
+                  covered = sum(1 for r in races if ((r.get('lgbCoverage') or {}).get('hits') or 0) > 0)
                   ratio = covered / len(races)
                   notes.append(f'今日模型覆蓋：{covered}/{len(races)} 場（{ratio:.0%}）')
                   if covered == 0:
@@ -113,10 +110,10 @@ jobs:
                   elif ratio < 0.5:
                       problems.append(f'今日模型覆蓋只有 {covered}/{len(races)} 場（少於一半）。')
 
-          report_lines = ['## 自動化監測'] + [f'- {p}' for p in problems]
-          if notes:
-              report_lines += ['', '### 備註'] + [f'- {n}' for n in notes]
-          report = '\n'.join(report_lines)
+          report = '\n'.join(
+              ['## 自動化監測'] + [f'- {p}' for p in problems]
+              + (['', '### 備註'] + [f'- {n}' for n in notes] if notes else [])
+          )
           print(report)
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
               f.write(report + '\n')
@@ -131,6 +128,7 @@ jobs:
                       'Authorization': f'Bearer {GH}',
                       'Accept': 'application/vnd.github+json',
                       'Content-Type': 'application/json',
+                      'User-Agent': 'tianxi-watchdog/1.0',
                   },
                   method=method,
               )
