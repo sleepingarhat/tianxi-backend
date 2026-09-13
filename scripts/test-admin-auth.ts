@@ -660,7 +660,15 @@ async function main(): Promise<void> {
     'analyzeRoutes',
     '/api/analyze',
     analyzeEndpoints,
-    new Set(['GET /api/analyze/factors']),
+    new Set([
+      'GET /api/analyze/factors',
+      // Public engine transparency reads (aggregate only, no PII).
+      // /calibration gates its ?fit=1/?apply=1 write path with
+      // ADMIN_AUTH_POLICY.SESSION_OR_BEARER inside the handler.
+      'GET /api/analyze/prediction-accuracy',
+      'GET /api/analyze/residuals',
+      'GET /api/analyze/calibration',
+    ]),
     true,
   );
   assertRoutesMatchManifest(
