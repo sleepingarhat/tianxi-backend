@@ -30,8 +30,8 @@ const CONSTRAINTS_AUDITED_HKT = '2026-09-02 18:20 HKT';
 /** 已批鎖點規格 vs 程式實際落地（唔一致就寫明，唔准當一致） */
 export const LOCK_POLICY = {
   specified: 'T−1.5h（第一場開跑前 1.5 小時鎖死全日四擇）',
-  implemented: '該賽日第一場賽果入庫後凍結（dateHasSettledResults）',
-  aligned: false,
+  implemented: 'T−1.5h：第一場開跑時間減 90 分鐘觸發凍結（lock-window，fixture post_time 驅動；賽果入庫只作更嚴後備）',
+  aligned: true,
   publicRule: '未凍結一律標「初版」；只有 frozen=true 先算最終版，戰績只計最終版。',
 } as const;
 
@@ -153,7 +153,7 @@ export async function buildEngineHealth(db: Env['DB']): Promise<EngineHealth> {
   set(
     'public_freeze',
     LOCK_POLICY.aligned ? 'PASS' : 'WATCH',
-    `規格 ${LOCK_POLICY.specified}；程式現時 ${LOCK_POLICY.implemented}。兩者未對齊，開跑到入庫呢段公開四擇仍會跟 live 漂移，故公開頁一律標「初版」直到 frozen=true。`,
+    `規格 ${LOCK_POLICY.specified}；程式現時 ${LOCK_POLICY.implemented}。鎖後只准 join 名次，唔再寫預測欄；未到鎖點一律標「初版」，戰績只計最終版。`,
   );
 
   const counts = {
@@ -182,7 +182,7 @@ export async function buildEngineHealth(db: Env['DB']): Promise<EngineHealth> {
     overall,
     summary:
       '結構閘通過，臨場盤不入 LGB。季節、live 曲線、健康檔三項即時讀 DB。' +
-      (LOCK_POLICY.aligned ? '' : ' 鎖點規格（T−1.5h）同程式落地（第一場賽果入庫）未對齊，未凍結一律標初版。'),
+      (LOCK_POLICY.aligned ? ' 鎖點已對齊 T−1.5h：首場開跑前 90 分鐘鎖死全日四擇。' : ' 鎖點規格（T−1.5h）同程式落地未對齊，未凍結一律標初版。'),
     counts,
     constraintsLive: ENGINE_CONSTRAINTS,
     constraintsAuditedHKT: CONSTRAINTS_AUDITED_HKT,
