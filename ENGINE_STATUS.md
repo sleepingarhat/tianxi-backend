@@ -17,13 +17,13 @@ _Generated 2026-09-02 18:20 HKT_
 | PASS | 休季自動暫停 | `/api/season` |
 | PASS | Elo v12 後備 | 馬 0.7／騎 0.2／練 0.1 |
 | PASS | 公開戰績 | hit-rate API |
-| PASS | 公開預測凍結 | 完場後日用 prediction_log；HTTP overlay + hit-rate SSOT |
+| WATCH | 公開預測凍結 | 規格 T−1.5h 鎖全日；程式現時係第一場賽果入庫後凍。未對齊，未凍結一律標初版 |
 | PASS | min_data_in_leaf=80 | 已改生產預設 |
 | PASS | max_depth=4 · bagging 0.7 | 已改生產預設 |
 | PASS | live／backfill 約束對齊 | 同一套正規化 |
-| WATCH | 當日 diagnostics | 開季後寫 best_iter／τ／α |
-| WATCH | live 訓練曲線 | 休季無新曲線 |
+| 即時 | 當日 diagnostics | 由最近凍結賽日 prediction_log 讀 LGB 匹數／α |
+| 即時 | live 訓練曲線 | 賽季旗同曲線一律讀 DB，唔再用寫死常數 |
 
-公開 API：`GET https://tianxi.racing/api/analyze/engine-health`  
+公開 API：`GET https://tianxi-backend.tianxi-entertainment.workers.dev/api/analyze/engine-health`（主站代理：`GET https://tianxi.racing/api/public/engine-health`；`?format=html` 出人讀版）  
 監控頁：`/admin/engine-health`  
 用戶端：https://tianxi.racing/engine/ · 儀表板 · 選馬頁
