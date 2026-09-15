@@ -72,4 +72,5 @@ zone_name = "tianxi.racing"
     "0 3 * * *",   # 11:00 HKT daily — refresh report ~1.5h before ST first race
     "0 4 * * *",   # 12:00 HKT daily — second pre-race refresh
     "0 10 * * *",  # 18:00 HKT daily — refresh report 1h before HV first race
+    "*/5 * * * *", # every 5 min — T−1.5h lock tick only (light; no heavy jobs)
   ]
