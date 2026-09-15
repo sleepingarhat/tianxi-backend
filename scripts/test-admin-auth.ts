@@ -669,6 +669,8 @@ async function main(): Promise<void> {
       // /calibration gates its ?fit=1/?apply=1 write path with
       // ADMIN_AUTH_POLICY.SESSION_OR_BEARER inside the handler.
       'GET /api/analyze/prediction-accuracy',
+      // 凍結對帳表：aggregate-only reconciliation over locked prediction_log.
+      'GET /api/analyze/freeze-ledger',
       'GET /api/analyze/residuals',
       'GET /api/analyze/calibration',
     ]),
