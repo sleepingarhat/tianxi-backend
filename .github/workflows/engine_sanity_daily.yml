@@ -77,8 +77,29 @@ jobs:
           done
 
           python3 <<'PY'
-          import json, os, urllib.request
+          import json, os, sys, urllib.request
           from datetime import datetime, timezone, timedelta
+          HKT = timezone(timedelta(hours=8))
+          now = datetime.now(HKT).strftime('%Y-%m-%d %H:%M HKT')
+
+          # 首選：直接抄 Worker 即時健康 API（單一真相，季節同 live 曲線都係 DB 出）。
+          try:
+            req = urllib.request.Request(
+              'https://tianxi-backend.tianxi-entertainment.workers.dev/api/analyze/engine-health',
+              headers={'User-Agent': 'tianxi-engine-sanity/1.0', 'Accept': 'application/json'},
+            )
+            with urllib.request.urlopen(req, timeout=25) as r:
+              live = json.loads(r.read().decode())
+            if live.get('checks'):
+              with open('reports/ENGINE_HEALTH.json', 'w') as f:
+                json.dump(live, f, ensure_ascii=False, indent=2)
+                f.write('\n')
+              print('wrote reports/ENGINE_HEALTH.json from live API', live.get('generatedHKT'), live.get('overall'))
+              sys.exit(0)
+          except Exception as e:
+            print('live health fetch failed, falling back to local snapshot', e)
+
+
           HKT = timezone(timedelta(hours=8))
           now = datetime.now(HKT).strftime('%Y-%m-%d %H:%M HKT')
           season = {
@@ -155,7 +176,7 @@ jobs:
             echo "## Engine gates (structural + season/live stamp)"
             echo ""
             echo "Snapshot: \`reports/ENGINE_HEALTH.json\` · public site copies this via tianxi-site \`engine-health-sync.yml\`."
-            echo "Public JSON after Pages deploy: https://tianxi.racing/engine/health.json"
+            echo "Live health API: https://tianxi-backend.tianxi-entertainment.workers.dev/api/analyze/engine-health · site proxy: https://tianxi.racing/api/public/engine-health"
           } >> "$OUT"
           cat "$OUT"
 
