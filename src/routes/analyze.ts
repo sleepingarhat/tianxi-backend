@@ -21,6 +21,7 @@ import {
 } from '../lib/public-today-picks';
 import { freezeMeetingPayload } from '../lib/prediction-lock-db';
 import { countPredictionLogRows, getMeetingLockState, LOCK_LEAD_MINUTES } from '../lib/lock-window';
+import { computeFreezeLedger } from '../lib/freeze-ledger';
 
 import {
   ADMIN_AUTH_POLICY,
@@ -3649,6 +3650,24 @@ analyzeRoutes.get('/factors', (c) => {
           return c.json({ ...result, source });
         } catch {
           return c.json({ error: 'picks-by-date failed' }, 500);
+        }
+      });
+
+      // GET /api/analyze/freeze-ledger?dates=2026-09-06,2026-09-09&since=2026-09-01
+      // 凍結對帳表：只讀已鎖 prediction_log。禁回測、禁 live 重算、唔改模型。
+      analyzeRoutes.get('/freeze-ledger', async (c) => {
+        try {
+          const datesRaw = c.req.query('dates');
+          const dates = datesRaw
+            ? datesRaw.split(',').map((s) => s.trim()).filter((s) => /^\d{4}-\d{2}-\d{2}$/.test(s))
+            : undefined;
+          const since = c.req.query('since') ?? undefined;
+          const payload = await computeFreezeLedger(c.env.DB, { dates, since });
+          return c.json(payload, 200, {
+            'Cache-Control': 'public, max-age=120, s-maxage=300',
+          });
+        } catch (e: any) {
+          return c.json({ error: 'freeze-ledger failed', detail: e?.message ?? String(e) }, 500);
         }
       });
 
