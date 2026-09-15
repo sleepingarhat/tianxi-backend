@@ -19,6 +19,8 @@ import {
   projectTodayPicksForPublic,
   projectTopPicksForPublic,
 } from '../lib/public-today-picks';
+import { freezeMeetingPayload } from '../lib/prediction-lock-db';
+
 import {
   ADMIN_AUTH_POLICY,
   hasAdminAccess,
@@ -3278,11 +3280,16 @@ analyzeRoutes.get('/factors', (c) => {
             );
           }
           if (admin) return c.json(result);
-          return c.json(
-            await raceDayReportIsSettled(c.env.DB, result)
-              ? projectTodayPicksForPublic(result)
-              : projectTodayPicksForFree(result),
-          );
+          const settled = await raceDayReportIsSettled(c.env.DB, result);
+          const projected = settled
+            ? projectTodayPicksForPublic(result)
+            : projectTodayPicksForFree(result);
+          // 版本標示 SSOT：未鎖一律 draft（初版），只有讀到凍結快照先 final（最終版）。
+          const frozen = await freezeMeetingPayload(c.env.DB, result).then((p: any) => p?.frozen === true).catch(() => false);
+          projected.frozen = frozen;
+          projected.edition = frozen ? 'final' : 'draft';
+          return c.json(projected);
+
         } catch {
           return c.json({ error: 'today-picks unavailable' }, 500);
         }
