@@ -621,6 +621,8 @@ async function main(): Promise<void> {
     { name: 'report refresh', method: 'POST', path: '/admin/api/refresh-race-day-report', policy: ADMIN_AUTH_POLICY.SESSION_OR_BEARER, access: 'private' },
     { name: 'odds prune', method: 'POST', path: '/admin/api/prune-odds', policy: ADMIN_AUTH_POLICY.SESSION_OR_BEARER, access: 'private' },
     { name: 'odds archive', method: 'POST', path: '/admin/api/archive-odds', policy: ADMIN_AUTH_POLICY.SESSION_OR_BEARER, access: 'private' },
+    { name: 'engine health console', method: 'GET', path: '/admin/engine-health', policy: ADMIN_AUTH_POLICY.SESSION_OR_BEARER, access: 'private' },
+
     { name: 'strategy P&L warmup', method: 'POST', path: '/admin/api/warm-strategy-pnl', policy: ADMIN_AUTH_POLICY.SESSION_OR_BEARER, access: 'private' },
   ];
   const adminEndpoints = discoverProtectedAdminEndpoints();
