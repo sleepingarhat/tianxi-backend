@@ -1,4 +1,22 @@
 import { applyFrozenOrder, auditTop4Pairs } from './prediction-lock';
+import { getMeetingLockState } from './lock-window';
+
+/**
+ * APPROVED FREEZE SPEC (T−1.5h): the published Top-4 must come from the frozen
+ * prediction_log from 90 minutes before the first race onward — not only after
+ * results land. `dateHasSettledResults` stays as the stricter backstop.
+ */
+export async function dateIsLocked(
+  db: D1Database,
+  date: string | null | undefined,
+  venue?: string | null,
+): Promise<boolean> {
+  if (!date) return false;
+  const settled = await dateHasSettledResults(db, date, venue);
+  if (settled) return true;
+  const lock = await getMeetingLockState(db, date, venue, { settled });
+  return lock.locked;
+}
 
 type EloEngine = 'v11' | 'v12';
 
@@ -80,7 +98,7 @@ export async function freezeTopPicksPayload(
   engine: string = 'v12',
 ): Promise<any> {
   if (!payload?.date) return payload;
-  if (!(await dateHasSettledResults(db, payload.date, payload.venue))) {
+  if (!(await dateIsLocked(db, payload.date, payload.venue))) {
     payload.frozen = false;
     payload.freezeSource = 'live-recompute';
     return payload;
@@ -107,7 +125,7 @@ export async function freezeMeetingPayload(
   engine: string = 'v12',
 ): Promise<any> {
   if (!payload?.date || !Array.isArray(payload?.races)) return payload;
-  if (!(await dateHasSettledResults(db, payload.date, payload.venue))) {
+  if (!(await dateIsLocked(db, payload.date, payload.venue))) {
     payload.frozen = false;
     return payload;
   }
@@ -197,7 +215,7 @@ export async function freezeExplainPayload(
       return payload;
     }
   }
-  if (!(await dateHasSettledResults(db, date, venue))) {
+  if (!(await dateIsLocked(db, date, venue))) {
     payload.frozen = false;
     return payload;
   }
