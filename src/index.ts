@@ -18,6 +18,7 @@ import { adminGateRoutes } from './routes/admin-gate';
 import { opsRoutes } from './routes/ops';
 import { membershipRoutes, proPage } from './routes/membership';
 import { getSeasonStatus } from './lib/season';
+import { countPredictionLogRows, findMeetingForLockTick, getMeetingLockState, LOCK_LEAD_MINUTES } from './lib/lock-window';
 import { buildEngineHealth, engineHealthHtml } from './lib/engine-health';
 
 import { ADMIN_AUTH_POLICY, buildAdminBearerHeaders, hasAdminAccess } from './lib/admin-auth';
@@ -240,6 +241,42 @@ app.onError((err, c) => {
     } catch (e: any) { return { ok: false, error: e?.message ?? String(e) }; }
   }
 
+  // ── T−1.5h LOCK TICK ─────────────────────────────────────────────────
+  // Approved spec: the day's Top-4 freezes 90 minutes before the first race.
+  // This light tick (every 5 minutes) makes sure a frozen prediction_log
+  // snapshot exists AT the lock instant; from then on writePredictionLog
+  // refuses every further prediction write, so the public payload can no
+  // longer drift with live LGB. Never triggered by results.
+  async function lockMeetingIfDue(env: Env): Promise<{ ok: boolean; date?: string; lockAt?: string | null; action: string; rows?: number; error?: string }> {
+    try {
+      const meeting = await findMeetingForLockTick(env.DB);
+      if (!meeting) return { ok: true, action: 'no-fixture' };
+      const lock = await getMeetingLockState(env.DB, meeting.date, meeting.venue);
+      if (!lock.locked) return { ok: true, action: 'pre-lock', date: meeting.date, lockAt: lock.lockAt };
+      const rows = await countPredictionLogRows(env.DB, meeting.date);
+      if (rows > 0) return { ok: true, action: 'already-locked', date: meeting.date, lockAt: lock.lockAt, rows };
+      const out = await refreshRaceDayReport(env);
+      const after = await countPredictionLogRows(env.DB, meeting.date);
+      return { ok: out.ok, action: `locked-T-${LOCK_LEAD_MINUTES}m`, date: meeting.date, lockAt: lock.lockAt, rows: after, error: out.error };
+    } catch (e: any) {
+      return { ok: false, action: 'error', error: e?.message ?? String(e) };
+    }
+  }
+
+  app.get('/api/analyze/lock-state', async (c) => {
+    const meeting = await findMeetingForLockTick(c.env.DB);
+    if (!meeting) return c.json({ locked: false, source: 'no-fixture', lockLeadMinutes: LOCK_LEAD_MINUTES });
+    const lock = await getMeetingLockState(c.env.DB, meeting.date, meeting.venue);
+    const rows = await countPredictionLogRows(c.env.DB, meeting.date);
+    return c.json({ ...lock, frozenRows: rows, lockLeadMinutes: LOCK_LEAD_MINUTES, edition: lock.locked && rows > 0 ? 'final' : 'draft' });
+  });
+
+  app.post('/admin/api/lock-tick', async (c) => {
+    if (!(await hasAdminAccess(c, ADMIN_AUTH_POLICY.SESSION_OR_BEARER))) return c.json({ error: 'Not found' }, 404);
+    const out = await lockMeetingIfDue(c.env);
+    return c.json({ ...out, ranAt: new Date().toISOString() });
+  });
+
   app.post('/admin/api/refresh-race-day-report', async (c) => {
     if (!(await hasAdminAccess(c, ADMIN_AUTH_POLICY.SESSION_OR_BEARER))) return c.json({ error: 'Not found' }, 404);
     const out = await refreshRaceDayReport(c.env);
@@ -341,6 +378,10 @@ app.onError((err, c) => {
   export default {
     fetch: app.fetch,
     async scheduled(_event: any, env: Env, ctx: any): Promise<void> {
+      // T−1.5h lock tick runs on EVERY trigger (including the 5-minute tick).
+      ctx.waitUntil(lockMeetingIfDue(env).then((r) => console.log('[cron] lock tick', r)));
+      // The 5-minute tick does nothing else — heavy jobs stay on their own slots.
+      if (String(_event?.cron ?? '') === '*/5 * * * *') return;
       ctx.waitUntil(
         refreshHitRateCache(env)
           .then((r) => console.log('[cron] hit-rate refresh', r))
