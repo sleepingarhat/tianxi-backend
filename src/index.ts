@@ -18,6 +18,8 @@ import { adminGateRoutes } from './routes/admin-gate';
 import { opsRoutes } from './routes/ops';
 import { membershipRoutes, proPage } from './routes/membership';
 import { getSeasonStatus } from './lib/season';
+import { buildEngineHealth, engineHealthHtml } from './lib/engine-health';
+
 import { ADMIN_AUTH_POLICY, buildAdminBearerHeaders, hasAdminAccess } from './lib/admin-auth';
 import { auditPredictionLock, freezeExplainPayload, freezeMeetingPayload, freezeTopPicksPayload } from './lib/prediction-lock-db';
   import { computeHitRateStats, ensureHitRateCacheTable, writeHitRateCache, readHitRateCache, ensureRaceDayReportCacheTable, joinPredictionResults, ensurePredictionLogTable, hitRateEngineKey } from './routes/analyze';
@@ -123,7 +125,24 @@ analyzeRoutes.use('/explain', (c, next) =>
   ),
 );
 
+// 引擎健康：JSON 供監控／公開說明，?format=html 出人讀版。季節同 live 曲線即時讀 DB。
+app.get('/api/analyze/engine-health', async (c) => {
+  const health = await buildEngineHealth(c.env.DB);
+  if (c.req.query('format') === 'html') {
+    return c.html(engineHealthHtml(health), 200, { 'Cache-Control': 'no-store' });
+  }
+  return c.json(health, 200, { 'Cache-Control': 'public, max-age=60' });
+});
+app.get('/engine/health.json', async (c) => c.json(await buildEngineHealth(c.env.DB), 200, {
+  'Cache-Control': 'public, max-age=60',
+}));
+app.get('/admin/engine-health', async (c) => {
+  if (!(await hasAdminAccess(c, ADMIN_AUTH_POLICY.SESSION_OR_BEARER))) return c.json({ error: 'Not found' }, 404);
+  return c.html(engineHealthHtml(await buildEngineHealth(c.env.DB)), 200, { 'Cache-Control': 'no-store' });
+});
+
 app.route('/api/analyze', analyzeRoutes);
+
 app.route('/api/odds', oddsRoutes);
 app.route('/api/lounge', loungeRoutes);
 app.route('/api/silks', silksRoutes);
