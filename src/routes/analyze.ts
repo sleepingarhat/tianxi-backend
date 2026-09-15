@@ -20,6 +20,7 @@ import {
   projectTopPicksForPublic,
 } from '../lib/public-today-picks';
 import { freezeMeetingPayload } from '../lib/prediction-lock-db';
+import { countPredictionLogRows, getMeetingLockState, LOCK_LEAD_MINUTES } from '../lib/lock-window';
 
 import {
   ADMIN_AUTH_POLICY,
@@ -453,9 +454,32 @@ async function raceDayReportIsSettled(db: D1Database, value: any): Promise<boole
     }
   }
 
+  // ── T−1.5h WRITE GUARD ───────────────────────────────────────────────
+  // Approved spec: the full day's Top-4 locks 90 minutes before the FIRST
+  // race's post time. Once locked (or once results are in) prediction columns
+  // are immutable; the only remaining write is the result join.
+  // Before the lock instant we still allow refreshes (draft / 初版).
+  // Edge case: if the lock moment arrives and NO snapshot exists yet, we allow
+  // exactly one write so the day gets a frozen snapshot instead of nothing.
+  export async function predictionWritesAreFrozen(
+    db: D1Database,
+    date: string | null | undefined,
+    venue: string | null | undefined,
+    engine: string = 'v12',
+  ): Promise<{ frozen: boolean; reason: string; lockAt: string | null }> {
+    if (!date) return { frozen: false, reason: 'no-date', lockAt: null };
+    const settled = await dateHasSettledResults(db, date, venue);
+    const lock = await getMeetingLockState(db, date, venue, { settled });
+    if (settled) return { frozen: true, reason: 'settled', lockAt: lock.lockAt };
+    if (!lock.locked) return { frozen: false, reason: 'pre-lock', lockAt: lock.lockAt };
+    const rows = await countPredictionLogRows(db, date, engine);
+    if (rows > 0) return { frozen: true, reason: `locked-T-${LOCK_LEAD_MINUTES}m`, lockAt: lock.lockAt };
+    return { frozen: false, reason: 'locked-first-snapshot', lockAt: lock.lockAt };
+  }
+
   export async function writeRaceDayReportCache(db: D1Database, date: string, engine: string, venue: string | null, payload: any, computeMs: number): Promise<void> {
-    // FREEZE GUARD: never overwrite a settled (results-in) HK race day’s cached report.
-    if (await dateHasSettledResults(db, date, venue)) return;
+    // FREEZE GUARD: never overwrite a locked (T−1.5h) or settled HK race day.
+    if ((await predictionWritesAreFrozen(db, date, venue)).frozen) return;
     await ensureRaceDayReportCacheTable(db);
     await db.prepare(
       `INSERT INTO race_day_report_cache (date, engine, venue, payload_json, generated_at, compute_ms)
@@ -507,11 +531,12 @@ async function raceDayReportIsSettled(db: D1Database, value: any): Promise<boole
   }
 
   // Write all per-horse rows for a single race-day report payload. Idempotent.
-  export async function writePredictionLog(db: D1Database, payload: any, variant: string = 'baseline'): Promise<{ rows: number; frozen?: boolean }> {
+  export async function writePredictionLog(db: D1Database, payload: any, variant: string = 'baseline'): Promise<{ rows: number; frozen?: boolean; lockReason?: string; lockAt?: string | null }> {
     if (!payload?.date || !Array.isArray(payload?.races)) return { rows: 0 };
     // FREEZE GUARD: once the HK race day has results, the bettable prediction is
     // immutable — never let a post-race recompute overwrite it.
-    if (await dateHasSettledResults(db, payload.date, payload.venue)) return { rows: 0, frozen: true };
+    const _guard = await predictionWritesAreFrozen(db, payload.date, payload.venue, payload.eloEngine ?? 'v12');
+    if (_guard.frozen) return { rows: 0, frozen: true, lockReason: _guard.reason, lockAt: _guard.lockAt } as any;
     await ensurePredictionLogTable(db);
     const engine = payload.eloEngine ?? 'v12';
     const generatedAt = payload.generatedAt ?? new Date().toISOString();
