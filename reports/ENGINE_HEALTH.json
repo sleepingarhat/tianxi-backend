@@ -1,62 +1,92 @@
 {
-  "schemaVersion": 2,
-  "generatedHKT": "2026-09-15 15:33 HKT",
+  "schemaVersion": 3,
+  "generatedHKT": "2026-09-16 15:32 HKT",
   "engine": "TX-Oracle v3.2",
   "season": {
     "status": "in_season",
+    "mode": "auto",
+    "today": "2026-09-16",
     "lastMeeting": "2026-09-13",
     "nextMeeting": "2026-09-16",
+    "gapDays": 3,
+    "reason": "next HK meeting known (2026-09-16)",
     "label": "賽季進行中"
   },
-  "overall": "WATCH",
-  "summary": "結構閘通過。已對齊 live／backfill 正規化參數與 frame label。賽季可跑 live 曲線。臨場盤不入 LGB。",
+  "overall": "PASS",
+  "summary": "結構閘通過，臨場盤不入 LGB。季節、live 曲線、健康檔三項即時讀 DB。 鎖點已對齊 T−1.5h：首場開跑前 90 分鐘鎖死全日四擇。",
   "counts": {
-    "pass": 13,
-    "watch": 1,
+    "pass": 15,
+    "watch": 0,
     "fail": 0
+  },
+  "constraintsLive": {
+    "objective": "lambdarank",
+    "earlyStopMetric": "race_logloss",
+    "numLeaves": 8,
+    "learningRate": 0.01,
+    "minDataInLeaf": 80,
+    "maxDepth": 4,
+    "featureFraction": 0.7,
+    "baggingFraction": 0.7,
+    "lambdaL2": 1,
+    "liveOddsInLgb": false,
+    "frameLabel": true
+  },
+  "constraintsAuditedHKT": "2026-09-02 18:20 HKT",
+  "lockPolicy": {
+    "specified": "T−1.5h（第一場開跑前 1.5 小時鎖死全日四擇）",
+    "implemented": "T−1.5h：第一場開跑時間減 90 分鐘觸發凍結（lock-window，fixture post_time 驅動；賽果入庫只作更嚴後備）",
+    "aligned": true,
+    "publicRule": "未凍結一律標「初版」；只有 frozen=true 先算最終版，戰績只計最終版。"
+  },
+  "latestFrozenDay": {
+    "date": "2026-09-16",
+    "rows": 96,
+    "lgbRows": 96,
+    "alpha": 0.88
   },
   "checks": [
     {
       "id": "ltr",
       "label": "排序學習 LambdaRank",
       "status": "PASS",
-      "detail": "整場 listwise。"
+      "detail": "整場 listwise，唔預測完賽時間。"
     },
     {
       "id": "labels",
       "label": "Frame 名次標籤（頭四）",
       "status": "PASS",
-      "detail": "頭四有分級權重。"
+      "detail": "頭四有分級權重，唔再只放大冠軍。"
     },
     {
       "id": "noleak_odds",
       "label": "臨場盤不入 LGB",
       "status": "PASS",
-      "detail": "只 overlay 右欄。"
+      "detail": "只 overlay 選馬頁右欄。"
     },
     {
       "id": "asof",
       "label": "特徵 as-of／無洩漏",
       "status": "PASS",
-      "detail": "τ／α refit 前鎖定。"
+      "detail": "τ／α 每次 refit 前鎖定 as-of 特徵。"
     },
     {
       "id": "gate_alpha",
       "label": "α 自癒健康閘",
       "status": "PASS",
-      "detail": "FAIL → 純 Elo。"
+      "detail": "FAIL → α=0 純 Elo。"
     },
     {
       "id": "fail_closed",
       "label": "異常 fail-closed",
       "status": "PASS",
-      "detail": "唔 crash。"
+      "detail": "diagnostics 壞唔 crash。"
     },
     {
       "id": "season",
-      "label": "休季自動暫停",
+      "label": "季節自動感應",
       "status": "PASS",
-      "detail": "上仗 2026-09-13。"
+      "detail": "賽季進行中（mode=auto）· 上仗 2026-09-13 · 下場 2026-09-16 · gap 3 日。"
     },
     {
       "id": "elo_v12",
@@ -66,9 +96,15 @@
     },
     {
       "id": "public_record",
-      "label": "公開戰績",
+      "label": "公開戰績可核對",
       "status": "PASS",
-      "detail": "hit-rate API。"
+      "detail": "hit-rate API。只對最終版四擇。"
+    },
+    {
+      "id": "public_freeze",
+      "label": "公開預測凍結",
+      "status": "PASS",
+      "detail": "規格 T−1.5h（第一場開跑前 1.5 小時鎖死全日四擇）；程式現時 T−1.5h：第一場開跑時間減 90 分鐘觸發凍結（lock-window，fixture post_time 驅動；賽果入庫只作更嚴後備）。鎖後只准 join 名次，唔再寫預測欄；未到鎖點一律標「初版」，戰績只計最終版。"
     },
     {
       "id": "reg_leaf",
@@ -78,27 +114,27 @@
     },
     {
       "id": "reg_bag",
-      "label": "樹深／bagging",
+      "label": "樹深／抽特徵／抽樣本",
       "status": "PASS",
-      "detail": "max_depth=4 · 0.7。"
+      "detail": "max_depth=4 · feature/bagging 0.7 · λ2=1。"
     },
     {
       "id": "backfill_metric",
-      "label": "live／backfill 對齊",
+      "label": "回填與直播同一約束",
       "status": "PASS",
-      "detail": "同一套正規化。"
+      "detail": "leaves/lr/min_leaf/early_stop/depth/bagging 對齊（人手審核 2026-09-02 18:20 HKT）。"
     },
     {
       "id": "diag_persist",
-      "label": "當日 diagnostics",
-      "status": "WATCH",
-      "detail": "等當日 diagnostics 落地。"
+      "label": "健康檔公開落地",
+      "status": "PASS",
+      "detail": "健康檔即時由 DB 組成（季節 + 2026-09-16 凍結日診斷），唔再讀寫死常數。"
     },
     {
-      "id": "offseason_live",
-      "label": "live 曲線",
+      "id": "live_curve",
+      "label": "當日 live 曲線",
       "status": "PASS",
-      "detail": "賽季中；有場日允許 live 曲線。"
+      "detail": "最近凍結賽日 2026-09-16：96 匹入帳、96 匹有 LGB 分、α=0.88。"
     }
   ]
 }
