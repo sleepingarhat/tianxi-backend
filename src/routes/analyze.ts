@@ -20,7 +20,7 @@ import {
   projectTopPicksForPublic,
 } from '../lib/public-today-picks';
 import { freezeMeetingPayload } from '../lib/prediction-lock-db';
-import { countPredictionLogRows, getMeetingLockState, LOCK_LEAD_MINUTES } from '../lib/lock-window';
+import { countPredictionLogRows, getMeetingLockState, isCancelledMeeting, LOCK_LEAD_MINUTES } from '../lib/lock-window';
 import { computeFreezeLedger } from '../lib/freeze-ledger';
 
 import {
@@ -469,6 +469,7 @@ async function raceDayReportIsSettled(db: D1Database, value: any): Promise<boole
     engine: string = 'v12',
   ): Promise<{ frozen: boolean; reason: string; lockAt: string | null }> {
     if (!date) return { frozen: false, reason: 'no-date', lockAt: null };
+    if (isCancelledMeeting(date)) return { frozen: true, reason: 'cancelled', lockAt: null };
     const settled = await dateHasSettledResults(db, date, venue);
     const lock = await getMeetingLockState(db, date, venue, { settled });
     if (settled) return { frozen: true, reason: 'settled', lockAt: lock.lockAt };
@@ -3073,7 +3074,14 @@ analyzeRoutes.get('/factors', (c) => {
       export async function runRaceDayReportCompute(db: D1Database, engine: EloEngine, opts: { fresh?: boolean; venue?: string } = {}): Promise<any> {
         const fresh = opts.fresh === true;
         const forceVenue = opts.venue;
-        const todayStr = new Date().toISOString().split('T')[0];
+        const todayStr = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Hong_Kong' }).format(new Date());
+        if (isCancelledMeeting(todayStr)) {
+          return {
+            date: todayStr, venue: null, trackCondition: null, races: [],
+            cancelled: true, cancellationReason: '因董建華離世，今日賽事停賽',
+            frozen: false, edition: 'draft', generatedAt: new Date().toISOString(),
+          };
+        }
         // Date picker: use race_meetings (persisted by Capy D1 Sync immediately) as
         // the authoritative source, NOT entries_upcoming (lags Capy Racecard
         // enrichment by minutes-to-hours). Previously picked MAX(entries_upcoming)
