@@ -14,6 +14,13 @@ import type { Env } from '../types';
 
 export const LOCK_LEAD_MINUTES = 90;
 
+// Officially cancelled HK race days must never enter the lock or prediction ledger.
+const CANCELLED_MEETING_DATES = new Set(['2026-09-19']);
+
+export function isCancelledMeeting(date: string | null | undefined): boolean {
+  return !!date && CANCELLED_MEETING_DATES.has(date);
+}
+
 export type LockState = {
   date: string | null;
   venue: string | null;
@@ -59,6 +66,7 @@ export async function countPredictionLogRows(
   engine: string = 'v12',
   variant: string = 'baseline',
 ): Promise<number> {
+  if (isCancelledMeeting(date)) return 1;
   try {
     const row = await db.prepare(
       `SELECT COUNT(*) AS n FROM prediction_log
@@ -81,6 +89,9 @@ export async function getMeetingLockState(
   opts: { settled?: boolean; now?: number } = {},
 ): Promise<LockState> {
   const now = opts.now ?? Date.now();
+  if (isCancelledMeeting(date)) {
+    return { date: date ?? null, venue: venue ?? null, firstPostAt: null, lockAt: null, locked: true, source: 'no-fixture', minutesToLock: null };
+  }
   if (!date) {
     return { date: null, venue: venue ?? null, firstPostAt: null, lockAt: null, locked: !!opts.settled, source: opts.settled ? 'settled' : 'no-fixture', minutesToLock: null };
   }
@@ -118,6 +129,7 @@ export async function findMeetingForLockTick(
       `SELECT race_date AS date, venue, MIN(post_time) AS pt
          FROM entries_upcoming
         WHERE post_time IS NOT NULL AND race_number > 0 AND post_time >= ?
+          AND race_date NOT IN ('2026-09-19')
         GROUP BY race_date, venue
         ORDER BY pt ASC
         LIMIT 1`,
