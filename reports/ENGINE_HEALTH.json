@@ -1,14 +1,14 @@
 {
   "schemaVersion": 3,
-  "generatedHKT": "2026-09-19 15:14 HKT",
+  "generatedHKT": "2026-09-20 15:39 HKT",
   "engine": "TX-Oracle v3.2",
   "season": {
     "status": "in_season",
     "mode": "auto",
-    "today": "2026-09-19",
+    "today": "2026-09-20",
     "lastMeeting": "2026-09-16",
     "nextMeeting": null,
-    "gapDays": 3,
+    "gapDays": 4,
     "reason": "no future meeting yet but gap within normal in-season range (fail-open)",
     "label": "賽季進行中"
   },
@@ -86,7 +86,7 @@
       "id": "season",
       "label": "季節自動感應",
       "status": "PASS",
-      "detail": "賽季進行中（mode=auto）· 上仗 2026-09-16 · 下場 — · gap 3 日。"
+      "detail": "賽季進行中（mode=auto）· 上仗 2026-09-16 · 下場 — · gap 4 日。"
     },
     {
       "id": "elo_v12",
