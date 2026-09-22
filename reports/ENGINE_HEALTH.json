@@ -1,14 +1,14 @@
 {
   "schemaVersion": 3,
-  "generatedHKT": "2026-09-21 15:51 HKT",
+  "generatedHKT": "2026-09-22 15:36 HKT",
   "engine": "TX-Oracle v3.2",
   "season": {
     "status": "in_season",
     "mode": "auto",
-    "today": "2026-09-21",
+    "today": "2026-09-22",
     "lastMeeting": "2026-09-16",
     "nextMeeting": "2026-09-23",
-    "gapDays": 5,
+    "gapDays": 6,
     "reason": "next HK meeting known (2026-09-23)",
     "label": "賽季進行中"
   },
@@ -41,8 +41,8 @@
   },
   "latestFrozenDay": {
     "date": "2026-09-23",
-    "rows": 108,
-    "lgbRows": 108,
+    "rows": 109,
+    "lgbRows": 109,
     "alpha": 0.88
   },
   "checks": [
@@ -86,7 +86,7 @@
       "id": "season",
       "label": "季節自動感應",
       "status": "PASS",
-      "detail": "賽季進行中（mode=auto）· 上仗 2026-09-16 · 下場 2026-09-23 · gap 5 日。"
+      "detail": "賽季進行中（mode=auto）· 上仗 2026-09-16 · 下場 2026-09-23 · gap 6 日。"
     },
     {
       "id": "elo_v12",
@@ -134,7 +134,7 @@
       "id": "live_curve",
       "label": "當日 live 曲線",
       "status": "PASS",
-      "detail": "最近凍結賽日 2026-09-23：108 匹入帳、108 匹有 LGB 分、α=0.88。"
+      "detail": "最近凍結賽日 2026-09-23：109 匹入帳、109 匹有 LGB 分、α=0.88。"
     }
   ]
 }
