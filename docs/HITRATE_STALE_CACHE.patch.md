@@ -1,45 +1,67 @@
-# Hit-rate stale cache patch
+# Hit-rate stale cache — remaining splice
 
-Apply in `src/index.ts` inside `refreshHitRateCache` only.
-Does **not** rewrite `prediction_log` / frozen picks.
+New helper already on this branch:
+`src/lib/hit-rate-coverage-stale.ts`
 
-## Why
+`race_results` has **no usable updated_at**. Stale signal is coverage only:
+`summary.racesEvaluated < COUNT(DISTINCT races with finishing_position > 0)`.
+`computeHitRateStats` already skips races without actual top-3/4; do not change that.
+Never rewrite frozen picks.
 
-Cron only refreshed when cache row was missing `quinellaHits`.
-A mid-card cache (09-23 R1–R4) therefore never recomputed after R5–R9 landed.
-`m.date < utcToday` also skipped the live meeting until UTC midnight.
+## 1) `src/routes/analyze.ts` GET `/hit-rate` (~line 3722)
 
-## Replace the query block with
+Add import:
 
 ```ts
-const hktToday = new Date(Date.now() + 8 * 3600_000).toISOString().substring(0, 10);
-const { results } = await env.DB.prepare(
-  `SELECT m.date FROM race_meetings m
-     LEFT JOIN meeting_hit_rate_cache c ON c.date = m.date AND c.engine = ?
-    WHERE m.date <= ?
-      AND EXISTS (SELECT 1 FROM races r JOIN race_results rr ON rr.race_id = r.id
-                   WHERE r.meeting_id = m.id AND rr.finishing_position > 0)
-      AND (
-        c.date IS NULL
-        OR c.payload_json NOT LIKE '%quinellaHits%'
-        OR IFNULL(c.races_evaluated, 0) < (
-          SELECT COUNT(DISTINCT r.id)
-            FROM races r
-            JOIN race_results rr ON rr.race_id = r.id
-           WHERE r.meeting_id = m.id
-             AND rr.finishing_position > 0
-        )
-      )
-    ORDER BY m.date DESC LIMIT 12`
-).bind(hitRateEngineKey('v12'), hktToday).all<{ date: string }>();
+import { hitRateCacheNeedsCoverageRecompute } from '../lib/hit-rate-coverage-stale';
 ```
 
-Drop the old `const today = new Date().toISOString().substring(0, 10)` in this function.
+Change the cache-hit guard from:
 
-## After merge
+```ts
+if (cached && !hitRateCacheNeedsBoxRecompute(cached) && !hitRateCacheNeedsSourceRecompute(cached)) {
+```
 
-Deploy Workers, then existing cron / `POST /admin/api/refresh-hit-cache` will pick 09-23 if `races_evaluated` still lags finished races.
+to:
 
-## Do not merge
+```ts
+if (
+  cached &&
+  !hitRateCacheNeedsBoxRecompute(cached) &&
+  !hitRateCacheNeedsSourceRecompute(cached) &&
+  !(await hitRateCacheNeedsCoverageRecompute(c.env.DB, date, cached))
+) {
+```
 
-Branch `fix/hitrate-stale-partial-cache` — `src/index.ts` was overwritten by a failed push. Delete that branch.
+On next public read, a 4-race cache self-heals to 9. Cron is no longer the only path.
+
+## 2) `src/index.ts` `refreshHitRateCache` (03:00 HKT job)
+
+Same helper, optional belt-and-braces so admin page is warm without a GET:
+
+```ts
+import { hitRateCacheNeedsCoverageRecompute } from './lib/hit-rate-coverage-stale';
+```
+
+After selecting candidate dates (keep existing NULL / missing-quinellaHits query), skip write when helper is false. Or replace the SQL filter with:
+
+```sql
+OR IFNULL(c.races_evaluated, 0) < (
+  SELECT COUNT(DISTINCT r.id)
+    FROM races r
+    JOIN race_results rr ON rr.race_id = r.id
+   WHERE r.meeting_id = m.id AND rr.finishing_position > 0
+)
+```
+
+and bind HKT today (`Date.now()+8h`) with `m.date <= ?` so a live meeting can refresh before UTC midnight.
+
+## Verify item 2 (scraper skip)
+
+Already on tianxi-database main. Next GHA results run should log:
+`[skip-check] 2026-09-23 complete: races [1..9] == HKJC set -> skip`
+If it re-scrapes, the R10 probe is not treating HKJC's R1 fallback as empty.
+
+## Not this PR
+
+`/explain/2026-09-23`, dev-log, roadmap.md — frontend. Live hit-rate already has 9 races after the manual recompute (`generatedAt=2026-09-23T20:17:36Z`).
