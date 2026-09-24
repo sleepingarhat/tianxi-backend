@@ -303,5 +303,7 @@ jobs:
             tianxi-backend/upcoming-entries.json
             tianxi-backend/upcoming-features.csv
             tianxi-backend/features.csv
+            tianxi-backend/model-bundle/model.txt
+            tianxi-backend/model-bundle/meta.json
           if-no-files-found: warn
           retention-days: 14
