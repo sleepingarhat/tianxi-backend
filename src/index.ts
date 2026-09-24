@@ -23,7 +23,7 @@ import { buildEngineHealth, engineHealthHtml } from './lib/engine-health';
 
 import { ADMIN_AUTH_POLICY, buildAdminBearerHeaders, hasAdminAccess } from './lib/admin-auth';
 import { auditPredictionLock, freezeExplainPayload, freezeMeetingPayload, freezeTopPicksPayload } from './lib/prediction-lock-db';
-  import { computeHitRateStats, ensureHitRateCacheTable, writeHitRateCache, readHitRateCache, ensureRaceDayReportCacheTable, joinPredictionResults, ensurePredictionLogTable, hitRateEngineKey } from './routes/analyze';
+  import { computeHitRateStats, ensureHitRateCacheTable, writeHitRateCache, readHitRateCache, hitRateCacheBehindResults, ensureRaceDayReportCacheTable, joinPredictionResults, ensurePredictionLogTable, hitRateEngineKey } from './routes/analyze';
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -170,7 +170,7 @@ app.onError((err, c) => {
   return c.json({ error: 'Internal Server Error' }, 500);
 });
 
-  async function refreshHitRateCache(env: Env): Promise<{ refreshed: number; errors: number }> {
+  async function refreshHitRateCache(env: Env): Promise<{ refreshed: number; errors: number; behind: number }> {
     await ensureHitRateCacheTable(env.DB);
     const today = new Date().toISOString().substring(0, 10);
     const { results } = await env.DB.prepare(
@@ -182,8 +182,26 @@ app.onError((err, c) => {
           AND (c.date IS NULL OR c.payload_json NOT LIKE '%quinellaHits%')
         ORDER BY m.date DESC LIMIT 12`
     ).bind(hitRateEngineKey('v12'), today).all<{ date: string }>();
+    const todo: { date: string }[] = [...(results ?? [])];
+    const seen = new Set(todo.map((r) => r.date));
+    // 補件：最近 8 個有賽果賽日，如快取落後賽果（場數或筆數）就追加重算
+    const recent = await env.DB.prepare(
+      `SELECT m.date FROM race_meetings m
+        WHERE m.date <= ? AND m.venue IN ('ST','HV')
+          AND EXISTS (SELECT 1 FROM races r JOIN race_results rr ON rr.race_id = r.id
+                       WHERE r.meeting_id = m.id AND rr.finishing_position > 0)
+        ORDER BY m.date DESC LIMIT 8`
+    ).bind(today).all<{ date: string }>().catch(() => ({ results: [] as { date: string }[] }));
+    let behind = 0;
+    for (const row of (recent.results ?? [])) {
+      if (seen.has(row.date)) continue;
+      const cached = await readHitRateCache(env.DB, row.date, 'v12');
+      if (cached && await hitRateCacheBehindResults(env.DB, row.date, cached)) {
+        todo.push(row); seen.add(row.date); behind++;
+      }
+    }
     let refreshed = 0, errors = 0;
-    for (const row of (results ?? [])) {
+    for (const row of todo) {
       try {
         const r = await computeHitRateStats(env.DB, row.date, 'v12', undefined, { boxPayouts: true });
         if ('error' in r) { errors++; continue; }
@@ -191,7 +209,7 @@ app.onError((err, c) => {
         refreshed++;
       } catch { errors++; }
     }
-    return { refreshed, errors };
+    return { refreshed, errors, behind };
   }
 
   app.post('/admin/api/refresh-hit-cache', async (c) => {
