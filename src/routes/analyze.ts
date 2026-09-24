@@ -173,6 +173,33 @@ async function raceDayReportIsSettled(db: D1Database, value: any): Promise<boole
     return races.some((r: any) => r && r.scoreSource == null);
   }
 
+  // 命中率補件自動重算：已評場數 < 有齊頭 4 名次場數，或賽果筆數多過上次快取，就重算。
+  // 只重算對帳，唔改凍結四揀／α。race_results 冇 updated_at，所以用筆數做代理。
+  async function meetingResultCounts(db: D1Database, date: string): Promise<{ rows: number; top4Races: number }> {
+    const row = await db.prepare(
+      `SELECT COUNT(*) AS rows_n,
+              (SELECT COUNT(*) FROM (SELECT r2.id FROM race_meetings m2 JOIN races r2 ON r2.meeting_id=m2.id
+                 JOIN race_results rr2 ON rr2.race_id=r2.id
+                WHERE m2.date=? AND rr2.finishing_position BETWEEN 1 AND 4
+                GROUP BY r2.id HAVING COUNT(DISTINCT rr2.finishing_position)=4)) AS top4_races
+         FROM race_meetings m JOIN races r ON r.meeting_id=m.id JOIN race_results rr ON rr.race_id=r.id
+        WHERE m.date=? AND rr.finishing_position > 0`
+    ).bind(date, date).first<{ rows_n: number; top4_races: number }>();
+    return { rows: Number(row?.rows_n ?? 0), top4Races: Number(row?.top4_races ?? 0) };
+  }
+
+  export async function hitRateCacheBehindResults(db: D1Database, date: string, cached: any): Promise<boolean> {
+    try {
+      const s = cached && cached.summary;
+      if (!s) return false;
+      const c = await meetingResultCounts(db, date);
+      const evaluated = Number(s.racesEvaluated ?? 0);
+      if (evaluated < c.top4Races) return true;
+      if (typeof s.resultRows === 'number' && c.rows > s.resultRows) return true;
+      return false;
+    } catch { return false; }
+  }
+
   export async function readHitRateCache(db: D1Database, date: string, engine: string): Promise<any | null> {
     try {
       const row = await db.prepare(
@@ -186,7 +213,10 @@ async function raceDayReportIsSettled(db: D1Database, value: any): Promise<boole
   }
 
   export async function writeHitRateCache(db: D1Database, date: string, engine: string, payload: any): Promise<void> {
-    const s = payload.summary || {};
+    const s = { ...(payload.summary || {}) };
+    if (/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      try { s.resultRows = (await meetingResultCounts(db, date)).rows; } catch {}
+    }
     await db.prepare(
       `INSERT OR REPLACE INTO meeting_hit_rate_cache
          (date, engine, venue, races_evaluated, top1_hits, top3_any_hits, top3_sum_intersect,
@@ -3719,7 +3749,7 @@ analyzeRoutes.get('/factors', (c) => {
                 }
               } else {
                 const cached = await readHitRateCache(c.env.DB, date, engine);
-                if (cached && !hitRateCacheNeedsBoxRecompute(cached) && !hitRateCacheNeedsSourceRecompute(cached)) {
+                if (cached && !hitRateCacheNeedsBoxRecompute(cached) && !hitRateCacheNeedsSourceRecompute(cached) && !(await hitRateCacheBehindResults(c.env.DB, date, cached))) {
                   const payload = {
                     date,
                     venue: cached.meeting?.venue,
