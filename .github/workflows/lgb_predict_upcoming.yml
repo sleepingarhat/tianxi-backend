@@ -294,6 +294,53 @@ jobs:
           path: tianxi-backend/model-bundle
           key: lgb-model-v1-${{ github.run_id }}
 
+      # 2026-09-24 鎖點 bundle 驗證：model.txt／meta.json／特徵檔／run_id 必須互相對應，
+      # 缺檔或指紋不符即 fail。只讀驗證，唔改訓練、POST、α、四揀。
+      - name: Verify lock-point bundle (fail-closed)
+        working-directory: tianxi-backend
+        env:
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          python - <<'PY'
+          import csv, hashlib, json, os, sys
+          errs = []
+          need = ['model-bundle/model.txt', 'model-bundle/meta.json', 'upcoming-features.csv', 'features.csv']
+          for f in need:
+              if not os.path.isfile(f) or os.path.getsize(f) == 0:
+                  errs.append(f'missing/empty: {f}')
+          if errs:
+              print('\n'.join(errs)); sys.exit(1)
+          meta = json.load(open('model-bundle/meta.json'))
+          cols = meta.get('featCols') or []
+          booster_cols = []
+          for line in open('model-bundle/model.txt'):
+              if line.startswith('feature_names='):
+                  booster_cols = line.strip().split('=', 1)[1].split(' '); break
+          if booster_cols != cols:
+              errs.append(f'booster feature_names != meta.featCols ({len(booster_cols)} vs {len(cols)})')
+          for f in ['upcoming-features.csv', 'features.csv']:
+              hdr = next(csv.reader(open(f)))
+              miss = [c for c in cols if c not in hdr]
+              if miss: errs.append(f'{f} missing feature cols: {miss}')
+          if not str(meta.get('modelVersion', '')).startswith('lgb-ensemble-'):
+              errs.append(f'bad modelVersion: {meta.get("modelVersion")}')
+          sha = lambda p: hashlib.sha256(open(p, 'rb').read()).hexdigest()
+          man = {
+              'runId': os.environ['RUN_ID'], 'runAttempt': os.environ['RUN_ATTEMPT'],
+              'headSha': os.environ['HEAD_SHA'], 'modelVersion': meta.get('modelVersion'),
+              'alpha': meta.get('alpha'), 'nFeatures': len(cols),
+              'sha256': {p: sha(p) for p in ['model-bundle/model.txt', 'model-bundle/meta.json', 'upcoming-features.csv']},
+          }
+          man['bundleFingerprint'] = hashlib.sha256((man['sha256']['model-bundle/model.txt'] + man['sha256']['model-bundle/meta.json']).encode()).hexdigest()[:24]
+          json.dump(man, open('model-bundle/lock-manifest.json', 'w'), indent=2)
+          print(json.dumps(man, indent=2))
+          if errs:
+              print('VERIFY FAILED:\n' + '\n'.join(errs)); sys.exit(1)
+          print('lock-point bundle verified')
+          PY
+
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -305,5 +352,6 @@ jobs:
             tianxi-backend/features.csv
             tianxi-backend/model-bundle/model.txt
             tianxi-backend/model-bundle/meta.json
+            tianxi-backend/model-bundle/lock-manifest.json
           if-no-files-found: warn
           retention-days: 14
