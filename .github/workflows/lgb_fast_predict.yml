@@ -53,29 +53,29 @@ jobs:
             "https://tianxi-backend.tianxi-entertainment.workers.dev/api/analyze/today-picks" \
             -o picks.json || { echo "::notice::today-picks unreachable — 唔跑（fail-closed，避免無謂重覆上傳）"; echo "need=false" >> "$GITHUB_OUTPUT"; exit 0; }
           NEED=$(python3 - <<'PY'
-import json
-try:
-    d = json.load(open('picks.json'))
-except Exception:
-    print('false'); raise SystemExit(0)
-races = d.get('races') or []
-if not races:
-    print('false'); raise SystemExit(0)
-missing = [r for r in races
-           if int(((r.get('lgbCoverage') or {}).get('hits')) or 0) == 0]
-print('true' if missing else 'false')
-PY
-)
+          import json
+          try:
+              d = json.load(open('picks.json'))
+          except Exception:
+              print('false'); raise SystemExit(0)
+          races = d.get('races') or []
+          if not races:
+              print('false'); raise SystemExit(0)
+          missing = [r for r in races
+                     if int(((r.get('lgbCoverage') or {}).get('hits')) or 0) == 0]
+          print('true' if missing else 'false')
+          PY
+          )
           python3 - <<'PY'
-import json
-try:
-    d = json.load(open('picks.json'))
-except Exception:
-    raise SystemExit(0)
-races = d.get('races') or []
-hit = sum(1 for r in races if int(((r.get('lgbCoverage') or {}).get('hits')) or 0) > 0)
-print(f'coverage: {hit}/{len(races)} races  modelVersion={d.get("lgbModelVersion")}')
-PY
+          import json
+          try:
+              d = json.load(open('picks.json'))
+          except Exception:
+              raise SystemExit(0)
+          races = d.get('races') or []
+          hit = sum(1 for r in races if int(((r.get('lgbCoverage') or {}).get('hits')) or 0) > 0)
+          print(f'coverage: {hit}/{len(races)} races  modelVersion={d.get("lgbModelVersion")}')
+          PY
           echo "need=$NEED"
           echo "need=$NEED" >> "$GITHUB_OUTPUT"
 
@@ -182,14 +182,14 @@ PY
             "https://tianxi-backend.tianxi-entertainment.workers.dev/api/analyze/today-picks?nocache=1" \
             -o after.json || { echo "::warning::驗證讀取失敗"; exit 0; }
           python3 - <<'PY'
-import json
-d = json.load(open('after.json'))
-races = d.get('races') or []
-hit = sum(1 for r in races if int(((r.get('lgbCoverage') or {}).get('hits')) or 0) > 0)
-print(f'after carry: {hit}/{len(races)} races covered, modelVersion={d.get("lgbModelVersion")}')
-if races and hit == 0:
-    raise SystemExit('::error::carry 後仍然零覆蓋 —— 檢查 race_id 對齊同 lgb_predictions 寫入')
-PY
+          import json
+          d = json.load(open('after.json'))
+          races = d.get('races') or []
+          hit = sum(1 for r in races if int(((r.get('lgbCoverage') or {}).get('hits')) or 0) > 0)
+          print(f'after carry: {hit}/{len(races)} races covered, modelVersion={d.get("lgbModelVersion")}')
+          if races and hit == 0:
+              raise SystemExit('::error::carry 後仍然零覆蓋 —— 檢查 race_id 對齊同 lgb_predictions 寫入')
+          PY
 
       - name: Upload artifacts
         if: always()
