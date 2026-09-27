@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -17,6 +18,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--booster", help="Read-only lgb.txt used at lock")
     ap.add_argument("--features", help="Same-version dump-features CSV")
+    ap.add_argument("--meta", help="model-bundle meta.json (maps generic Column_N booster names to featCols)")
     ap.add_argument("--fingerprint", default="unknown")
     ap.add_argument("--max-rows", type=int, default=4000)
     ap.add_argument("--out", default="reports/shap/latest.json")
@@ -54,6 +56,13 @@ def main() -> int:
             booster = lgb.Booster(model_file=str(booster_p))
             names = booster.feature_name()
             df = pd.read_csv(feat_p)
+            # numpy-trained boosters serialise generic Column_N names; map back
+            # to the locked featCols order from meta.json (order is the contract).
+            if names and all(re.fullmatch(r"Column_\d+", n) for n in names) and args.meta:
+                meta = json.loads(Path(args.meta).read_text())
+                cols = meta.get("featCols") or []
+                if len(cols) == len(names):
+                    names = list(cols)
             use = [c for c in names if c in df.columns]
             if len(use) < 8:
                 out["reason"] = f"feature overlap too small: {len(use)}"

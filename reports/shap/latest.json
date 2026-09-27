@@ -1,0 +1,97 @@
+{
+  "ok": true,
+  "knife": 2,
+  "sport": "racing",
+  "status": "ok",
+  "fingerprint": "8da20f27a75575a1e5c985b3",
+  "method": "TreeSHAP",
+  "applied_to_freeze": false,
+  "disclaimer": "LGB-track contribution only. Not win-cause. Not Elo. Not alpha blend. Do not show on today-picks until fingerprint matches the locked booster.",
+  "generated_at": "2026-09-27T12:39:52Z",
+  "global_mean_abs": [
+    {
+      "feature": "form_avgpos_w",
+      "mean_abs": 0.3377421024717314
+    },
+    {
+      "feature": "j_elo",
+      "mean_abs": 0.15625180645498093
+    },
+    {
+      "feature": "draw",
+      "mean_abs": 0.09186929609456015
+    },
+    {
+      "feature": "dist_top3",
+      "mean_abs": 0.08155157661205104
+    },
+    {
+      "feature": "t_elo",
+      "mean_abs": 0.04648062845412736
+    },
+    {
+      "feature": "jv_top3",
+      "mean_abs": 0.04411205409167622
+    },
+    {
+      "feature": "form_top3rate_w",
+      "mean_abs": 0.04153718345856151
+    },
+    {
+      "feature": "dist_starts",
+      "mean_abs": 0.022935810456846107
+    },
+    {
+      "feature": "weight_avg5",
+      "mean_abs": 0.02236572756099581
+    },
+    {
+      "feature": "sect_early_avg",
+      "mean_abs": 0.021787611569856664
+    },
+    {
+      "feature": "going_starts",
+      "mean_abs": 0.016007198065292425
+    },
+    {
+      "feature": "form_pos_slope",
+      "mean_abs": 0.013540555872209828
+    },
+    {
+      "feature": "sect_late_kick",
+      "mean_abs": 0.012371914058114946
+    },
+    {
+      "feature": "factor_bonus",
+      "mean_abs": 0.011501563900070512
+    },
+    {
+      "feature": "draw_x_sprint",
+      "mean_abs": 0.01130781385903863
+    },
+    {
+      "feature": "horse_pace_n",
+      "mean_abs": 0.008295025446703902
+    },
+    {
+      "feature": "horse_pace_early",
+      "mean_abs": 0.0072146577577840675
+    },
+    {
+      "feature": "jdb_top3",
+      "mean_abs": 0.006789906201058065
+    },
+    {
+      "feature": "draw_top3",
+      "mean_abs": 0.006446456518700339
+    },
+    {
+      "feature": "jv_starts",
+      "mean_abs": 0.005871538384004281
+    }
+  ],
+  "per_runner": [],
+  "reason": null,
+  "n_rows": 4000,
+  "n_features": 52
+}
