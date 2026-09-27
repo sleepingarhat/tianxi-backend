@@ -318,7 +318,14 @@ jobs:
           for line in open('model-bundle/model.txt'):
               if line.startswith('feature_names='):
                   booster_cols = line.strip().split('=', 1)[1].split(' '); break
-          if booster_cols != cols:
+          import re as _re
+          generic = all(_re.fullmatch(r'Column_\d+', c) for c in booster_cols)
+          if generic:
+              # 訓練用 numpy 矩陣（train[FEAT_COLS].to_numpy()），LightGBM 會寫 Column_N；
+              # 預測同樣用 numpy，欄序由 FEAT_COLS 保證，所以只核數量。
+              if len(booster_cols) != len(cols):
+                  errs.append(f'booster feature count != meta.featCols ({len(booster_cols)} vs {len(cols)})')
+          elif booster_cols != cols:
               errs.append(f'booster feature_names != meta.featCols ({len(booster_cols)} vs {len(cols)})')
           for f in ['upcoming-features.csv', 'features.csv']:
               hdr = next(csv.reader(open(f)))
