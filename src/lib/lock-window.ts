@@ -140,3 +140,71 @@ export async function findMeetingForLockTick(
     return null;
   }
 }
+
+// ── T−90 全日快照補寫（一次） ─────────────────────────────────────────────
+// 2026-09-27 教訓：鎖點時只得第 1 場有快照，舊邏輯見 rows>0 就當「已鎖」，
+// 第 2–11 場永遠冇凍結紀錄。新規則：
+//   • 只喺鎖點之後、首場開跑之前（now < firstPostAt）；
+//   • 只補 entries_upcoming 有但 prediction_log 未有嘅場次，已鎖場次永不覆寫；
+//   • 每個賽日最多一次（lock_completion_log 記低）；
+//   • 已過賽日（首場已開跑）永不補寫，所以 9-27 唔會被回填。
+
+/** Distinct race numbers already frozen in prediction_log. */
+export async function loggedRaceNumbers(db: Env['DB'], date: string, engine: string = 'v12'): Promise<Set<number>> {
+  try {
+    const res = await db.prepare(
+      `SELECT DISTINCT race_number AS rn FROM prediction_log WHERE date = ? AND engine = ? AND variant = 'baseline'`,
+    ).bind(date, engine).all<{ rn: number }>();
+    return new Set((res?.results ?? []).map((r) => Number(r.rn)));
+  } catch {
+    return new Set();
+  }
+}
+
+async function fixtureRaceNumbers(db: Env['DB'], date: string, venue?: string | null): Promise<Set<number>> {
+  const hk = venue === 'ST' || venue === 'HV' ? venue : null;
+  try {
+    const res = hk
+      ? await db.prepare(`SELECT DISTINCT race_number AS rn FROM entries_upcoming WHERE race_date = ? AND venue = ? AND race_number > 0`).bind(date, hk).all<{ rn: number }>()
+      : await db.prepare(`SELECT DISTINCT race_number AS rn FROM entries_upcoming WHERE race_date = ? AND race_number > 0`).bind(date).all<{ rn: number }>();
+    return new Set((res?.results ?? []).map((r) => Number(r.rn)));
+  } catch {
+    return new Set();
+  }
+}
+
+async function ensureLockCompletionTable(db: Env['DB']): Promise<void> {
+  await db.prepare(`CREATE TABLE IF NOT EXISTS lock_completion_log (
+    date TEXT NOT NULL, engine TEXT NOT NULL, done_at TEXT NOT NULL, rows_written INTEGER,
+    PRIMARY KEY (date, engine))`).run();
+}
+
+/** Is the one-shot T−90 completion write still allowed for this meeting? */
+export async function lockCompletionAllowed(
+  db: Env['DB'], date: string, venue?: string | null, engine: string = 'v12', now: number = Date.now(),
+): Promise<boolean> {
+  if (isCancelledMeeting(date)) return false;
+  const first = await fetchFirstPostTime(db, date, venue);
+  const firstMs = first ? Date.parse(first) : NaN;
+  if (!Number.isFinite(firstMs) || now >= firstMs) return false; // 已開跑／已過賽日：唔補
+  try {
+    await ensureLockCompletionTable(db);
+    const done = await db.prepare(`SELECT 1 AS x FROM lock_completion_log WHERE date = ? AND engine = ?`).bind(date, engine).first();
+    if (done) return false; // 只准一次
+  } catch {
+    return false;
+  }
+  const fixtures = await fixtureRaceNumbers(db, date, venue);
+  if (!fixtures.size) return false;
+  const logged = await loggedRaceNumbers(db, date, engine);
+  for (const rn of fixtures) if (!logged.has(rn)) return true;
+  return false;
+}
+
+export async function markLockCompletion(db: Env['DB'], date: string, engine: string, rows: number): Promise<void> {
+  try {
+    await ensureLockCompletionTable(db);
+    await db.prepare(`INSERT OR IGNORE INTO lock_completion_log (date, engine, done_at, rows_written) VALUES (?, ?, ?, ?)`)
+      .bind(date, engine, new Date().toISOString(), rows).run();
+  } catch { /* best effort */ }
+}

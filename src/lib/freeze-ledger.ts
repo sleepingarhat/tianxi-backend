@@ -14,6 +14,7 @@
  *     table and the sample size next to it.
  */
 import { dateIsLocked } from './prediction-lock-db';
+import { getMeetingLockState } from './lock-window';
 
 export type LedgerRace = {
   raceNumber: number;
@@ -52,7 +53,13 @@ export type LedgerMeeting = {
   favouriteHitPct: number | null;
   flatWinRoiPct: number | null;
   races: LedgerRace[];
+  /** 鎖後先寫入嘅場次：只作對帳參考，「鎖後、唔計分」，唔入任何凍結指標。 */
+  postLockRaces: number[];
+  postLockNote: string | null;
 };
+
+/** 鎖點 tick 每 5 分鐘一次，所以鎖點後 10 分鐘內寫入嘅首份快照仍算鎖點快照。 */
+const LOCK_TICK_GRACE_MS = 10 * 60_000;
 
 const ln = (x: number) => Math.log(Math.max(x, 1e-12));
 const avg = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null);
@@ -114,6 +121,8 @@ export async function computeFreezeLedgerForDate(
     favouriteHitPct: null,
     flatWinRoiPct: null,
     races: [],
+    postLockRaces: [],
+    postLockNote: null,
   };
 
   const locked = await dateIsLocked(db, date, venue);
@@ -125,7 +134,7 @@ export async function computeFreezeLedgerForDate(
 
   const frozen = await db
     .prepare(
-      `SELECT race_number, horse_number, predicted_rank, p_win
+      `SELECT race_number, horse_number, predicted_rank, p_win, generated_at
          FROM prediction_log
         WHERE date = ? AND engine = ? AND variant = 'baseline' AND predicted_rank IS NOT NULL
         ORDER BY race_number ASC, predicted_rank ASC`,
@@ -137,6 +146,28 @@ export async function computeFreezeLedgerForDate(
   for (const r of frozen?.results ?? []) {
     if (!frozenByRace.has(r.race_number)) frozenByRace.set(r.race_number, []);
     frozenByRace.get(r.race_number)!.push(r);
+  }
+  // 鎖點完整性：只計鎖點快照（lockAt+10 分鐘內）或者 T−90 補寫一次
+  // （lock_completion_log 有紀錄、且喺首場開跑前）。其餘一律「鎖後、唔計分」。
+  const lock = await getMeetingLockState(db, date, venue);
+  const lockMs = lock.lockAt ? Date.parse(lock.lockAt) : NaN;
+  const firstMs = lock.firstPostAt ? Date.parse(lock.firstPostAt) : NaN;
+  let completionOk = false;
+  try {
+    completionOk = !!(await db.prepare(`SELECT 1 AS x FROM lock_completion_log WHERE date = ? AND engine = ?`).bind(date, engine).first());
+  } catch { completionOk = false; }
+  if (Number.isFinite(lockMs)) {
+    const limit = completionOk && Number.isFinite(firstMs) ? firstMs : lockMs + LOCK_TICK_GRACE_MS;
+    for (const [rn, rows] of [...frozenByRace.entries()]) {
+      const ts = rows.map((r) => Date.parse(String(r.generated_at ?? ''))).filter(Number.isFinite);
+      const earliest = ts.length ? Math.min(...ts) : NaN;
+      if (Number.isFinite(earliest) && earliest > limit) {
+        frozenByRace.delete(rn);
+        base.postLockRaces.push(rn);
+      }
+    }
+    base.postLockRaces.sort((a, b) => a - b);
+    if (base.postLockRaces.length) base.postLockNote = '鎖後、唔計分';
   }
   if (!frozenByRace.size) {
     base.source = 'missing-log';
@@ -362,4 +393,24 @@ export async function computeFreezeLedger(
       flatWinRoiPct: r1(bets.length ? (bets.reduce((s, r) => s + (r.flatWinPnl as number), 0) / (bets.length * 10)) * 100 : null),
     },
   };
+}
+
+/** 某日鎖後先寫入嘅場次（「鎖後、唔計分」）；同凍結對帳表同一規則。 */
+export async function postLockRaceNumbers(db: D1Database, date: string, venue: string | null, engine: string = 'v12'): Promise<number[]> {
+  const lock = await getMeetingLockState(db, date, venue);
+  const lockMs = lock.lockAt ? Date.parse(lock.lockAt) : NaN;
+  const firstMs = lock.firstPostAt ? Date.parse(lock.firstPostAt) : NaN;
+  if (!Number.isFinite(lockMs)) return [];
+  let completionOk = false;
+  try {
+    completionOk = !!(await db.prepare(`SELECT 1 AS x FROM lock_completion_log WHERE date = ? AND engine = ?`).bind(date, engine).first());
+  } catch { completionOk = false; }
+  const limit = completionOk && Number.isFinite(firstMs) ? firstMs : lockMs + LOCK_TICK_GRACE_MS;
+  try {
+    const res = await db.prepare(
+      `SELECT race_number AS rn, MIN(generated_at) AS g FROM prediction_log
+        WHERE date = ? AND engine = ? AND variant = 'baseline' GROUP BY race_number`,
+    ).bind(date, engine).all<{ rn: number; g: string }>();
+    return (res?.results ?? []).filter((r) => { const t = Date.parse(String(r.g ?? '')); return Number.isFinite(t) && t > limit; }).map((r) => Number(r.rn)).sort((a, b) => a - b);
+  } catch { return []; }
 }

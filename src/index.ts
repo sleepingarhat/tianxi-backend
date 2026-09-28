@@ -18,7 +18,7 @@ import { adminGateRoutes } from './routes/admin-gate';
 import { opsRoutes } from './routes/ops';
 import { membershipRoutes, proPage } from './routes/membership';
 import { getSeasonStatus } from './lib/season';
-import { countPredictionLogRows, findMeetingForLockTick, getMeetingLockState, LOCK_LEAD_MINUTES } from './lib/lock-window';
+import { countPredictionLogRows, findMeetingForLockTick, getMeetingLockState, LOCK_LEAD_MINUTES, lockCompletionAllowed } from './lib/lock-window';
 import { buildEngineHealth, engineHealthHtml } from './lib/engine-health';
 
 import { ADMIN_AUTH_POLICY, buildAdminBearerHeaders, hasAdminAccess } from './lib/admin-auth';
@@ -272,7 +272,15 @@ app.onError((err, c) => {
       const lock = await getMeetingLockState(env.DB, meeting.date, meeting.venue);
       if (!lock.locked) return { ok: true, action: 'pre-lock', date: meeting.date, lockAt: lock.lockAt };
       const rows = await countPredictionLogRows(env.DB, meeting.date);
-      if (rows > 0) return { ok: true, action: 'already-locked', date: meeting.date, lockAt: lock.lockAt, rows };
+      if (rows > 0) {
+        // 全日快照未齊而首場未開跑 → 補寫一次缺咗嘅場次（已鎖場次唔郁）
+        if (!(await lockCompletionAllowed(env.DB, meeting.date, meeting.venue))) {
+          return { ok: true, action: 'already-locked', date: meeting.date, lockAt: lock.lockAt, rows };
+        }
+        const out = await refreshRaceDayReport(env);
+        const after = await countPredictionLogRows(env.DB, meeting.date);
+        return { ok: out.ok, action: `completed-T-${LOCK_LEAD_MINUTES}m`, date: meeting.date, lockAt: lock.lockAt, rows: after, error: out.error };
+      }
       const out = await refreshRaceDayReport(env);
       const after = await countPredictionLogRows(env.DB, meeting.date);
       return { ok: out.ok, action: `locked-T-${LOCK_LEAD_MINUTES}m`, date: meeting.date, lockAt: lock.lockAt, rows: after, error: out.error };

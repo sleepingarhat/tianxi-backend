@@ -20,7 +20,8 @@ import {
   projectTopPicksForPublic,
 } from '../lib/public-today-picks';
 import { freezeMeetingPayload } from '../lib/prediction-lock-db';
-import { countPredictionLogRows, getMeetingLockState, isCancelledMeeting, LOCK_LEAD_MINUTES } from '../lib/lock-window';
+import { countPredictionLogRows, getMeetingLockState, isCancelledMeeting, LOCK_LEAD_MINUTES, lockCompletionAllowed, loggedRaceNumbers, markLockCompletion } from '../lib/lock-window';
+import { postLockRaceNumbers } from '../lib/freeze-ledger';
 import { computeFreezeLedger } from '../lib/freeze-ledger';
 
 import {
@@ -505,13 +506,21 @@ async function raceDayReportIsSettled(db: D1Database, value: any): Promise<boole
     if (settled) return { frozen: true, reason: 'settled', lockAt: lock.lockAt };
     if (!lock.locked) return { frozen: false, reason: 'pre-lock', lockAt: lock.lockAt };
     const rows = await countPredictionLogRows(db, date, engine);
-    if (rows > 0) return { frozen: true, reason: `locked-T-${LOCK_LEAD_MINUTES}m`, lockAt: lock.lockAt };
+    if (rows > 0) {
+      // T−90 補寫一次：鎖點到咗但全日快照未齊（例如 2026-09-27 只得第 1 場），
+      // 首場開跑前准寫「一次」缺咗嘅場次；已有場次永不覆寫，已過賽日永不補寫。
+      if (await lockCompletionAllowed(db, date, venue, engine)) {
+        return { frozen: false, reason: 'locked-completion', lockAt: lock.lockAt };
+      }
+      return { frozen: true, reason: `locked-T-${LOCK_LEAD_MINUTES}m`, lockAt: lock.lockAt };
+    }
     return { frozen: false, reason: 'locked-first-snapshot', lockAt: lock.lockAt };
   }
 
   export async function writeRaceDayReportCache(db: D1Database, date: string, engine: string, venue: string | null, payload: any, computeMs: number): Promise<void> {
     // FREEZE GUARD: never overwrite a locked (T−1.5h) or settled HK race day.
-    if ((await predictionWritesAreFrozen(db, date, venue)).frozen) return;
+    const _g = await predictionWritesAreFrozen(db, date, venue);
+    if (_g.frozen || _g.reason === 'locked-completion') return;
     await ensureRaceDayReportCacheTable(db);
     await db.prepare(
       `INSERT INTO race_day_report_cache (date, engine, venue, payload_json, generated_at, compute_ms)
@@ -572,13 +581,16 @@ async function raceDayReportIsSettled(db: D1Database, value: any): Promise<boole
     await ensurePredictionLogTable(db);
     const engine = payload.eloEngine ?? 'v12';
     const generatedAt = payload.generatedAt ?? new Date().toISOString();
+    const completion = _guard.reason === 'locked-completion';
+    const alreadyLogged = completion ? await loggedRaceNumbers(db, payload.date, engine) : new Set<number>();
     const stmts: D1PreparedStatement[] = [];
     for (const race of payload.races) {
       if (!race?.picks?.length || race.raceNumber == null || race.raceNumber === 0) continue;
+      if (completion && alreadyLogged.has(Number(race.raceNumber))) continue; // 已鎖場次永不覆寫
       for (const p of race.picks) {
         if (!p.horseId) continue;
         stmts.push(
-          db.prepare(`INSERT OR REPLACE INTO prediction_log
+          db.prepare(`${completion ? 'INSERT OR IGNORE' : 'INSERT OR REPLACE'} INTO prediction_log
             (date, race_number, horse_id, engine, variant, horse_number, draw,
              horse_elo, elo_source, elo_confidence, elo_composite, factor_bonus, final_score,
              p_win, p_top3, predicted_rank, generated_at,
@@ -608,6 +620,7 @@ async function raceDayReportIsSettled(db: D1Database, value: any): Promise<boole
     for (let i = 0; i < stmts.length; i += 50) {
       await db.batch(stmts.slice(i, i + 50));
     }
+    if (completion) await markLockCompletion(db, payload.date, engine, stmts.length);
     return { rows: stmts.length };
   }
 
@@ -1218,6 +1231,8 @@ export async function computeHitRateStats(db: D1Database, date: string, engine: 
   let picksData: any = (alphaOverride == null && eloWeightsOverride == null && drawModelOverride == null && drawScaleOverride == null)
     ? await loadFrozenPicksForHitRate(db, date, engine, entries)
     : null;
+  const postLockRaces = picksData ? await postLockRaceNumbers(db, date, (meeting as any)?.venue ?? null, engine) : [];
+  const picksFromFrozenLog = !!picksData && postLockRaces.length === 0;
   if (!picksData) {
     picksData = await computePicksFromEntries(db, date, meeting, entries, engine, alphaOverride, eloWeightsOverride, drawModelOverride, drawScaleOverride);
   }
@@ -1436,6 +1451,12 @@ export async function computeHitRateStats(db: D1Database, date: string, engine: 
         fallbackReason: ensembleRaces === 0 && races.length > 0 ? 'LGB_PREDICTIONS_MISSING' : null,
         boxDivsFetched: wantBoxPayouts,
         boxDivsComplete,
+        // 對帳來源標記：冇完整鎖前 prediction_log 就係重算，只作對帳參考，
+        // 「鎖後、唔計分」——唔入凍結戰績（凍結戰績只讀 freeze-ledger）。
+        picksSource: picksFromFrozenLog ? 'frozen-log' : 'recompute',
+        countsTowardFrozenRecord: picksFromFrozenLog,
+        scoringNote: picksFromFrozenLog ? null : '鎖後、唔計分',
+        postLockRaces,
       },
     };
   }
