@@ -1,0 +1,124 @@
+{
+ "id": "H-R2",
+ "title": "凍結 p vs 扣水 q（研究診斷）",
+ "generatedAt": "2026-09-28T07:03:59.208761Z",
+ "policy": "只讀 prediction_log；q＝最終獨贏賠率倒數按比例扣水；獨贏只旁註；唔改四揀、唔改指紋、唔回寫模型。9-27 第 2–11 場鎖後、唔計分、唔入樣本。",
+ "prelockSnapshot": {
+  "races": 18,
+  "runners": 213,
+  "modelWinLogloss": 2.281,
+  "marketWinLogloss": 1.979,
+  "deltaLogloss": 0.302,
+  "brierModel": 0.0754,
+  "brierMarket": 0.0693,
+  "corrPQ": 0.58,
+  "meanAbsPminusQ": 0.0424,
+  "meanOverround": 1.229,
+  "calibration": [
+   {
+    "p": "0.00-0.05",
+    "n": 74,
+    "meanP": 0.025,
+    "meanQ": 0.042,
+    "winRate": 0.041
+   },
+   {
+    "p": "0.05-0.10",
+    "n": 67,
+    "meanP": 0.074,
+    "meanQ": 0.072,
+    "winRate": 0.045
+   },
+   {
+    "p": "0.10-0.20",
+    "n": 62,
+    "meanP": 0.139,
+    "meanQ": 0.133,
+    "winRate": 0.177
+   },
+   {
+    "p": "0.20-0.30",
+    "n": 7,
+    "meanP": 0.216,
+    "meanQ": 0.197,
+    "winRate": 0.143
+   },
+   {
+    "p": "0.30-1.00",
+    "n": 3,
+    "meanP": 0.341,
+    "meanQ": 0.142,
+    "winRate": 0
+   }
+  ],
+  "closeGapQuantiles": {
+   "p10": 0.004,
+   "p25": 0.023,
+   "p50": 0.039,
+   "p75": 0.0531,
+   "p90": 0.148
+  }
+ },
+ "allJoinedRowsReferenceOnly": {
+  "races": 206,
+  "runners": 2546,
+  "modelWinLogloss": 2.334,
+  "marketWinLogloss": 2.024,
+  "deltaLogloss": 0.31,
+  "brierModel": 0.072,
+  "brierMarket": 0.0657,
+  "corrPQ": 0.627,
+  "meanAbsPminusQ": 0.0426,
+  "meanOverround": 1.225,
+  "calibration": [
+   {
+    "p": "0.00-0.05",
+    "n": 1029,
+    "meanP": 0.027,
+    "meanQ": 0.034,
+    "winRate": 0.036
+   },
+   {
+    "p": "0.05-0.10",
+    "n": 737,
+    "meanP": 0.074,
+    "meanQ": 0.077,
+    "winRate": 0.072
+   },
+   {
+    "p": "0.10-0.20",
+    "n": 644,
+    "meanP": 0.138,
+    "meanQ": 0.134,
+    "winRate": 0.138
+   },
+   {
+    "p": "0.20-0.30",
+    "n": 111,
+    "meanP": 0.233,
+    "meanQ": 0.202,
+    "winRate": 0.198
+   },
+   {
+    "p": "0.30-1.00",
+    "n": 25,
+    "meanP": 0.36,
+    "meanQ": 0.229,
+    "winRate": 0.2
+   }
+  ],
+  "closeGapQuantiles": {
+   "p10": 0.005,
+   "p25": 0.018,
+   "p50": 0.039,
+   "p75": 0.0801,
+   "p90": 0.1449
+  }
+ },
+ "closeGap": {
+  "status": "null",
+  "reason": "開賽前／鎖點快照樣本不足 200 場，未寫死",
+  "sampleRaces": 18,
+  "threshold": 200
+ }
+}
