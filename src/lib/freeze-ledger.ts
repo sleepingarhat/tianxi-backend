@@ -14,7 +14,7 @@
  *     table and the sample size next to it.
  */
 import { dateIsLocked } from './prediction-lock-db';
-import { getMeetingLockState } from './lock-window';
+import { getMeetingLockState, POST_LOCK_EXCLUDED } from './lock-window';
 
 export type LedgerRace = {
   raceNumber: number;
@@ -165,6 +165,9 @@ export async function computeFreezeLedgerForDate(
         frozenByRace.delete(rn);
         base.postLockRaces.push(rn);
       }
+    }
+    for (const rn of POST_LOCK_EXCLUDED[date] ?? []) {
+      if (frozenByRace.delete(rn) && !base.postLockRaces.includes(rn)) base.postLockRaces.push(rn);
     }
     base.postLockRaces.sort((a, b) => a - b);
     if (base.postLockRaces.length) base.postLockNote = '鎖後、唔計分';
@@ -411,6 +414,8 @@ export async function postLockRaceNumbers(db: D1Database, date: string, venue: s
       `SELECT race_number AS rn, MIN(generated_at) AS g FROM prediction_log
         WHERE date = ? AND engine = ? AND variant = 'baseline' GROUP BY race_number`,
     ).bind(date, engine).all<{ rn: number; g: string }>();
-    return (res?.results ?? []).filter((r) => { const t = Date.parse(String(r.g ?? '')); return Number.isFinite(t) && t > limit; }).map((r) => Number(r.rn)).sort((a, b) => a - b);
+    const out = new Set((res?.results ?? []).filter((r) => { const t = Date.parse(String(r.g ?? '')); return Number.isFinite(t) && t > limit; }).map((r) => Number(r.rn)));
+    for (const rn of POST_LOCK_EXCLUDED[date] ?? []) out.add(rn);
+    return [...out].sort((a, b) => a - b);
   } catch { return []; }
 }

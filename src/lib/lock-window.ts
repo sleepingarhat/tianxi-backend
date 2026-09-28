@@ -208,3 +208,11 @@ export async function markLockCompletion(db: Env['DB'], date: string, engine: st
       .bind(date, engine, new Date().toISOString(), rows).run();
   } catch { /* best effort */ }
 }
+
+/**
+ * 人工核實嘅鎖後場次：鎖點當刻未有快照，之後先寫入（generated_at 沿用舊 payload
+ * 時間，唔可信）。倉主 2026-09-28 裁決：唔入凍結戰績、唔回填、唔當校準樣本。
+ */
+export const POST_LOCK_EXCLUDED: Record<string, number[]> = {
+  '2026-09-27': [2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+};
