@@ -4111,18 +4111,19 @@ analyzeRoutes.get('/factors', (c) => {
               const row = await db.prepare(`SELECT payload_json FROM meeting_hit_rate_cache WHERE date=? AND engine=?`).bind(rollupKey, rollupEng).first<{ payload_json: string }>();
               if (row?.payload_json) {
                 const parsed = JSON.parse(row.payload_json);
-                if (parsed && parsed.to === today) {
+                if (parsed && parsed.to === today && (parsed.meetingsEvaluated ?? 0) > 0) {
                   return c.json(admin ? { ...parsed, cached: true } : projectHitRateRollupForPublic(parsed));
                 }
               }
             } catch (e) { console.warn('hit-rate-rollup cache read failed', e); /* fall through to recompute */ }
           }
+          let datesFailed = false;
           const datesQ = await db.prepare(
             "SELECT DISTINCT rm.date AS date, rm.venue AS venue " +
             "FROM race_meetings rm JOIN races r ON r.meeting_id = rm.id JOIN race_results rr ON rr.race_id = r.id " +
             "WHERE rm.date >= ? AND rm.date < ? AND rm.venue IN ('ST','HV') AND rr.finishing_position IS NOT NULL " +
             "ORDER BY rm.date DESC"
-          ).bind(cutoff, today).all<any>().catch(() => ({ results: [] as any[] }));
+          ).bind(cutoff, today).all<any>().catch((e: any) => { datesFailed = true; console.warn('hit-rate-rollup dates query failed', e); return { results: [] as any[] }; });
           const meetingDates: any[] = (datesQ.results as any[]) || [];
                   let totalRaces = 0, totalTop1Hits = 0, totalTop3AnyHits = 0, totalTop3Intersect = 0;
             let totalQuinella = 0, totalQp = 0, totalTrio = 0, totalTierce = 0;
@@ -4185,7 +4186,8 @@ analyzeRoutes.get('/factors', (c) => {
               perMeeting, errors,
               generatedAt: new Date().toISOString(),
             };
-            try {
+            // 唔好將失敗／空結果寫入全日快取：之前一次 D1 短暫失敗會令成日顯示 0 場。
+            if (!datesFailed && perMeeting.length > 0 && errors.length === 0) try {
               await db.prepare(`INSERT OR REPLACE INTO meeting_hit_rate_cache (date, engine, payload_json, computed_at) VALUES (?, ?, ?, ?)`)
                 .bind(rollupKey, rollupEng, JSON.stringify(payload), new Date().toISOString()).run();
             } catch (e) { console.warn('hit-rate-rollup cache write failed', e); /* best-effort */ }
